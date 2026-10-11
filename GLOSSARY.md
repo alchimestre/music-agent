@@ -43,3 +43,11 @@ file outside that window is a different file rather than a near miss.
 
 The version of a track named in parentheses — Original, Extended, or a remixer's name. Two mixes of one
 title are two different tracks, not two copies of one track.
+
+## Pass
+
+One run of a stage over every track it still owes. The **first pass** searches with no peer filters at
+all, because a filter can remove the only peer holding a rare track. A **later pass** — what `--retry`
+starts — is the one allowed to restrict itself to peers with free slots, and it moves on to candidates it
+has not asked before rather than repeating a question that was already answered. A track that fails
+across two passes is not retried again.
