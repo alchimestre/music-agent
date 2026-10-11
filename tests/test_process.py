@@ -12,8 +12,11 @@ from pathlib import Path
 
 import pytest
 
+from audio_files import aiff, mp4
+
 from music_agent import config as config_module
-from music_agent import process, state
+from music_agent import identify, library, process, state, tag
+from music_agent.parsing import fold
 
 
 def make_config(tmp_path: Path) -> config_module.Config:
@@ -58,7 +61,7 @@ class FakeRunner:
             if self.fails_conversion:
                 return subprocess.CompletedProcess(argv, 1, "", "ffmpeg: no such codec")
             source = next(Path(argv[1]).iterdir())
-            (Path(argv[2]) / f"{source.stem}.aiff").write_bytes(b"aiff")
+            aiff(Path(argv[2]) / f"{source.stem}.aiff")   # real: the tagger opens it afterwards
             source.unlink()
             return subprocess.CompletedProcess(argv, 0, "", "")
         if any("fake-normalize" in part for part in argv):
@@ -120,11 +123,12 @@ def test_a_name_with_nothing_in_it_still_has_one():
 def test_a_lossy_file_goes_to_the_lossy_lane_untouched(tmp_path):
     config = make_config(tmp_path)
     runner = FakeRunner()
-    record = state.Record(idx=1, artist="Kiasmos", title="Blurred", local_path=staged(tmp_path, "08 - Blurred.m4a"),
+    record = state.Record(idx=1, artist="Kiasmos", title="Blurred",
+                          local_path=str(mp4(tmp_path / "staging" / "08 - Blurred.m4a")),
                           status=state.DOWNLOADED, format="m4a")
     job = job_with(config, [record])
 
-    process.run(config, job, runner=runner, log=lambda *_: None)
+    process.run(config, job, tools=process.Tools(runner=runner), log=lambda *_: None)
 
     assert runner.conversions() == [], "lossy is never converted (the design notes)"
     assert (config.lossy / "Kiasmos - Blurred.m4a").is_file()
@@ -139,7 +143,7 @@ def test_a_lossless_file_is_converted_into_the_lossless_lane(tmp_path):
                           local_path=source, status=state.DOWNLOADED, format="flac")
     job = job_with(config, [record])
 
-    process.run(config, job, runner=runner, log=lambda *_: None)
+    process.run(config, job, tools=process.Tools(runner=runner), log=lambda *_: None)
 
     landed = config.lossless / "UFO95 - Solution (Original Mix).aiff"
     assert landed.is_file()
@@ -152,11 +156,11 @@ def test_a_file_already_in_aiff_is_not_converted_again(tmp_path):
     config = make_config(tmp_path)
     runner = FakeRunner()
     record = state.Record(idx=1, artist="Kiasmos", title="Blurred",
-                          local_path=staged(tmp_path, "Kiasmos - Blurred.aiff"),
+                          local_path=str(aiff(tmp_path / "staging" / "Kiasmos - Blurred.aiff")),
                           status=state.DOWNLOADED, format="aiff")
     job = job_with(config, [record])
 
-    process.run(config, job, runner=runner, log=lambda *_: None)
+    process.run(config, job, tools=process.Tools(runner=runner), log=lambda *_: None)
 
     assert runner.conversions() == []
     assert (config.lossless / "Kiasmos - Blurred.aiff").is_file()
@@ -169,11 +173,11 @@ def test_a_name_already_taken_is_refused_rather_than_overwritten(tmp_path):
     existing = config.lossless / "Kiasmos - Blurred.aiff"
     existing.write_bytes(b"the one already there")
     record = state.Record(idx=1, artist="Kiasmos", title="Blurred",
-                          local_path=staged(tmp_path, "Kiasmos - Blurred.aiff"),
+                          local_path=str(aiff(tmp_path / "staging" / "Kiasmos - Blurred.aiff")),
                           status=state.DOWNLOADED, format="aiff")
     job = job_with(config, [record])
 
-    summary = process.run(config, job, runner=FakeRunner(), log=lambda *_: None)
+    summary = process.run(config, job, tools=process.Tools(runner=FakeRunner()), log=lambda *_: None)
 
     assert summary.failed == [1]
     assert existing.read_bytes() == b"the one already there"
@@ -187,7 +191,7 @@ def test_a_staged_file_that_is_gone_is_reported(tmp_path):
                           status=state.DOWNLOADED, format="flac")
     job = job_with(config, [record])
 
-    summary = process.run(config, job, runner=FakeRunner(), log=lambda *_: None)
+    summary = process.run(config, job, tools=process.Tools(runner=FakeRunner()), log=lambda *_: None)
 
     assert summary.failed == [1]
     assert "is gone" in job.records()[0].notes
@@ -202,7 +206,7 @@ def test_a_failed_conversion_puts_the_file_back(tmp_path):
                           status=state.DOWNLOADED, format="flac")
     job = job_with(config, [record])
 
-    summary = process.run(config, job, runner=runner, log=lambda *_: None)
+    summary = process.run(config, job, tools=process.Tools(runner=runner), log=lambda *_: None)
 
     assert summary.failed == [1]
     assert source.is_file(), "the download must survive a failed conversion"
@@ -216,7 +220,7 @@ def test_only_downloaded_records_are_processed(tmp_path):
                           local_path=staged(tmp_path, "x.flac"), status=state.PENDING)
     job = job_with(config, [record])
 
-    summary = process.run(config, job, runner=FakeRunner(), log=lambda *_: None)
+    summary = process.run(config, job, tools=process.Tools(runner=FakeRunner()), log=lambda *_: None)
 
     assert summary.placed == []
     assert job.records()[0].status == state.PENDING
@@ -229,16 +233,16 @@ def test_the_normalizer_is_given_the_directory_and_the_settings(tmp_path):
     config = make_config(tmp_path)
     runner = FakeRunner()
     record = state.Record(idx=1, artist="Kiasmos", title="Blurred",
-                          local_path=staged(tmp_path, "Kiasmos - Blurred.aiff"),
+                          local_path=str(aiff(tmp_path / "staging" / "Kiasmos - Blurred.aiff")),
                           status=state.DOWNLOADED, format="aiff")
     job = job_with(config, [record])
 
-    process.run(config, job, runner=runner, log=lambda *_: None)
+    process.run(config, job, tools=process.Tools(runner=runner), log=lambda *_: None)
 
     (argv,) = runner.normalizations()
     assert argv[2] == str(config.lossless), "a directory, because that is where it keeps its state"
     assert argv[3:] == ["--target-lufs", "-14.0", "--true-peak", "-1.0", "--tolerance", "0.5"]
-    assert job.records()[0].status == state.NORMALIZED
+    assert job.records()[0].status == state.TAGGED
 
 
 def test_the_normalizer_runs_once_for_everything_in_a_lane(tmp_path):
@@ -246,22 +250,22 @@ def test_the_normalizer_runs_once_for_everything_in_a_lane(tmp_path):
     runner = FakeRunner()
     records = [
         state.Record(idx=1, artist="Kiasmos", title="Blurred",
-                     local_path=staged(tmp_path, "Kiasmos - Blurred.aiff"), status=state.DOWNLOADED,
+                     local_path=str(aiff(tmp_path / "staging" / "Kiasmos - Blurred.aiff")), status=state.DOWNLOADED,
                      format="aiff"),
         state.Record(idx=2, artist="UFO95", title="Solution",
-                     local_path=staged(tmp_path, "UFO95 - Solution.aiff"), status=state.DOWNLOADED,
+                     local_path=str(aiff(tmp_path / "staging" / "UFO95 - Solution.aiff")), status=state.DOWNLOADED,
                      format="aiff"),
         state.Record(idx=3, artist="Villalobos", title="Fizheuer",
-                     local_path=staged(tmp_path, "Villalobos - Fizheuer.m4a"), status=state.DOWNLOADED,
+                     local_path=str(mp4(tmp_path / "staging" / "Villalobos - Fizheuer.m4a")), status=state.DOWNLOADED,
                      format="m4a"),
     ]
     job = job_with(config, records)
 
-    summary = process.run(config, job, runner=runner, log=lambda *_: None)
+    summary = process.run(config, job, tools=process.Tools(runner=runner), log=lambda *_: None)
 
     assert len(runner.normalizations()) == 2, "one per lane that received something"
     assert summary.normalized == [1, 2, 3]
-    assert [record.status for record in job.records()] == [state.NORMALIZED] * 3
+    assert [record.status for record in job.records()] == [state.TAGGED] * 3
     assert job.finished()
 
 
@@ -269,13 +273,144 @@ def test_a_normalize_failure_leaves_those_records_to_retry(tmp_path):
     config = make_config(tmp_path)
     runner = FakeRunner(fails_normalize=True)
     record = state.Record(idx=1, artist="Kiasmos", title="Blurred",
-                          local_path=staged(tmp_path, "Kiasmos - Blurred.aiff"),
+                          local_path=str(aiff(tmp_path / "staging" / "Kiasmos - Blurred.aiff")),
                           status=state.DOWNLOADED, format="aiff")
     job = job_with(config, [record])
 
-    summary = process.run(config, job, runner=runner, log=lambda *_: None)
+    summary = process.run(config, job, tools=process.Tools(runner=runner), log=lambda *_: None)
 
     assert summary.failed == [1]
     assert job.records()[0].status == state.RETRY_LATER
     assert not job.finished()
     assert (config.lossless / "Kiasmos - Blurred.aiff").is_file(), "it is placed either way"
+
+
+# ── identifying, genring and tagging ─────────────────────────────────────────
+
+
+def identification(artist: str = "Kiasmos", title: str = "Blurred", *, styles: tuple[str, ...] = (),
+                   genres: tuple[str, ...] = (), seconds: int = 449, broken: bool = False):
+    """Seams that answer at once, so the stage runs without any service being reachable."""
+
+    class Hearing:
+        def listen(self, path):
+            if broken:
+                raise identify.IdentifyError("fpcalc is not installed")
+            return "FINGERPRINT", seconds
+
+    class Matches:
+        def match(self, fingerprint, seconds_):
+            return [identify.Match(score=0.98, recordings=(identify.Candidate(
+                id="rec-1", title=title, artists=(artist,), duration=float(seconds),
+                album="Blurred", album_artists=(artist,)),))]
+
+    class Brainz:
+        """Shaped like the live one, which is the point: the release and the genres are only asked about
+        when the recording names them, so a thinner fake would make the stage look like it skips them."""
+
+        def recording(self, recording_id):
+            return identify.Candidate(id=recording_id, title=title, artists=(artist,),
+                                      releases=(identify.Release(id="rel-1",
+                                                                 release_group_id="rg-1"),))
+
+        def search(self, request):
+            if broken:
+                raise RuntimeError("musicbrainz is unreachable from here")
+            return []
+
+        def release(self, release_id):
+            return identify.Release(id="rel-1", title="Blurred", date="2017-01-02",
+                                    label="Erased Tapes", catalog_number="ERATP001",
+                                    release_group_id="rg-1")
+
+        def genres(self, release_group_id):
+            return genres
+
+    class Discogs:
+        def styles(self, artist_, title_):
+            return styles
+
+    return Hearing(), Matches(), Brainz(), Discogs()
+
+
+def with_identification(runner, *, styles: tuple[str, ...] = (), genres: tuple[str, ...] = (),
+                        vocabulary: list[str] | None = None, mappings=None, broken: bool = False):
+    hearing, matches, brainz, discogs = identification(styles=styles, genres=genres, broken=broken)
+    return process.Tools(runner=runner, hearing=hearing, matches=matches, brainz=brainz,
+                         discogs=discogs,
+                         library=library.Library([], vocabulary or ["Techno", "Jazz"]),
+                         mappings=mappings or {})
+
+
+def test_a_track_is_identified_genred_and_tagged_on_its_way_through(tmp_path):
+    """The whole stage, with the services faked and everything else real — including the file."""
+    config = make_config(tmp_path)
+    record = state.Record(idx=1, artist="Kiasmos", title="Blurred",
+                          local_path=str(aiff(tmp_path / "staging" / "Blurred.aiff")),
+                          status=state.DOWNLOADED, format="aiff")
+    job = job_with(config, [record])
+    tools = with_identification(FakeRunner(), styles=("Minimal Techno",),
+                                mappings={fold("minimal techno"): "Techno"})
+
+    summary = process.run(config, job, tools=tools, log=lambda *_: None)
+
+    landed = config.lossless / "Kiasmos - Blurred.aiff"
+    assert summary.tagged == [1], summary.report()
+    assert job.records()[0].status == state.TAGGED
+    assert job.records()[0].genre == "Techno"
+
+    written = tag.read(landed)
+    assert (written.title, written.artist) == ("Blurred", "Kiasmos")
+    assert written.album == "Blurred"
+    assert written.genre == "Techno"
+    assert (written.label, written.catalog_number, written.year) == ("Erased Tapes", "ERATP001", "2017")
+    assert written.release_id == "rel-1", "the ids are the cache a re-run reads"
+
+
+def test_a_genre_nothing_maps_is_left_for_the_skill_and_said_so(tmp_path):
+    config = make_config(tmp_path)
+    record = state.Record(idx=1, artist="Kiasmos", title="Blurred",
+                          local_path=str(aiff(tmp_path / "staging" / "Blurred.aiff")),
+                          status=state.DOWNLOADED, format="aiff")
+    job = job_with(config, [record])
+    tools = with_identification(FakeRunner(), styles=("Krautrock",), genres=("Field Recording",))
+
+    summary = process.run(config, job, tools=tools, log=lambda *_: None)
+
+    assert summary.ungenred == [1]
+    assert job.records()[0].status == state.TAGGED, "tagged, just without a genre"
+    assert job.records()[0].genre == ""
+    assert tag.read(config.lossless / "Kiasmos - Blurred.aiff").genre == ""
+
+
+def test_a_genre_the_table_knows_is_taken_from_the_services(tmp_path):
+    """MusicBrainz's genres are the weak second opinion behind Discogs styles (the design notes)."""
+    config = make_config(tmp_path)
+    record = state.Record(idx=1, artist="Kiasmos", title="Blurred",
+                          local_path=str(aiff(tmp_path / "staging" / "Blurred.aiff")),
+                          status=state.DOWNLOADED, format="aiff")
+    job = job_with(config, [record])
+    tools = with_identification(FakeRunner(), genres=("jazz",), mappings={fold("jazz"): "Jazz"})
+
+    process.run(config, job, tools=tools, log=lambda *_: None)
+
+    assert job.records()[0].genre == "Jazz"
+
+
+def test_a_service_that_fails_leaves_the_name_doing_the_work(tmp_path):
+    """Ticket 15's last resort, reached because a service was unreachable rather than because it was
+    asked and had nothing."""
+    config = make_config(tmp_path)
+    record = state.Record(idx=1, artist="Kiasmos", title="Blurred",
+                          local_path=str(aiff(tmp_path / "staging" / "Blurred.aiff")),
+                          status=state.DOWNLOADED, format="aiff")
+    job = job_with(config, [record])
+    tools = with_identification(FakeRunner(), broken=True)
+
+    summary = process.run(config, job, tools=tools, log=lambda *_: None)
+
+    assert summary.failed == []
+    assert job.records()[0].status == state.TAGGED
+    written = tag.read(config.lossless / "Kiasmos - Blurred.aiff")
+    assert (written.title, written.artist) == ("Blurred", "Kiasmos"), "the request's own name"
+    assert written.album == "", "and nothing invented beyond it"

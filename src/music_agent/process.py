@@ -1,20 +1,23 @@
-"""The processing stage: what was downloaded, into the collection, at the right format and loudness.
+"""The processing stage: what was downloaded, into the collection, identified and tagged on the way.
 
 Ticket 07 puts the writes here, and the map keeps two tools canonical rather than reimplementing them:
-`convert_to_aiff.sh` converts, and the normalizer measures and rewrites in place. This stage drives both
-and owns what neither knows about — which lane a file belongs in, what it is called once it arrives, and
-the order the two tools run in.
+`convert_to_aiff.sh` converts, and the normalizer measures and rewrites in place. This stage drives both,
+identifies and tags, and owns what none of them knows about — which lane a file belongs in, what it is
+called once it arrives, and the order everything runs in.
+
+The order is not the one the map lists, and the reason is in the converter: it carries metadata across
+(`-map_metadata 0` with `-write_id3v2 1`), so anything written before it survives. Identification and
+tagging therefore run **ahead of** conversion, which also means the fingerprint is taken from the file as
+it was downloaded rather than from a re-encode of it.
 
 Three facts read out of the converter rather than assumed. It keeps a file's **basename** and changes only
 the extension, so a peer's `08 - Solution.flac` arrives as `08 - Solution.aiff` and has to be renamed to
-the house convention the library already uses. It **carries metadata across** (`-map 0` together with
-`-map_metadata 0 -write_id3v2 1`), so the tagging step, when it exists, belongs *before* conversion and its
-work survives. And it **deletes its input on success**, so a staged file is consumed rather than left
-behind — which is also why it cannot simply be pointed at the staging directory: the lossy files there must
-not be converted, and neither must another record's.
+the house convention the library already uses. It **carries metadata across**, as above. And it **deletes
+its input on success**, which is why it cannot simply be pointed at the staging directory: the lossy files
+there must not be converted, and neither must another record's.
 
 Lossy files are never converted (the design notes). They go to the lossy lane as they are, and both lanes are
-normalized and imported alike.
+identified, genred, tagged and imported alike.
 """
 
 from __future__ import annotations
@@ -23,12 +26,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from . import state
+from . import genre, identify, state, tag
 from .config import Config
+from .library import Library
 from .rules import LOSSLESS_EXTENSIONS
 
 
@@ -47,15 +52,47 @@ def execute(argv: list[str]) -> subprocess.CompletedProcess:
 
 
 @dataclass
+class Tools:
+    """What the stage reaches outside itself with, so a test can hand it fakes.
+
+    Every seam is optional. Without the identification ones the stage still converts, places and
+    normalizes — which is what it did before it could identify anything.
+    """
+
+    runner: Runner = execute
+    hearing: identify.Hearing | None = None
+    matches: identify.Matches | None = None
+    brainz: identify.Brainz | None = None
+    discogs: identify.Discogs | None = None
+    library: Library | None = None
+    mappings: Mapping[str, str] = field(default_factory=dict)
+
+    @property
+    def identifies(self) -> bool:
+        return self.hearing is not None and self.matches is not None and self.brainz is not None
+
+    @classmethod
+    def live(cls, config: Config, *, library: Library | None = None,
+             mappings: Mapping[str, str] | None = None) -> Tools:
+        hearing, matches, brainz, discogs = identify.live(config)
+        return cls(hearing=hearing, matches=matches, brainz=brainz, discogs=discogs,
+                   library=library, mappings=mappings or {})
+
+
+@dataclass
 class Summary:
     """What a pass came to, by track."""
 
     placed: list[int] = field(default_factory=list)
     normalized: list[int] = field(default_factory=list)
+    tagged: list[int] = field(default_factory=list)
+    ungenred: list[int] = field(default_factory=list)
     failed: list[int] = field(default_factory=list)
 
     def report(self) -> str:
-        parts = [f"{len(self.placed)} placed", f"{len(self.normalized)} normalized"]
+        parts = [f"{len(self.placed)} placed", f"{len(self.tagged)} tagged"]
+        if self.ungenred:
+            parts.append(f"{len(self.ungenred)} without a genre")
         if self.failed:
             parts.append(f"{len(self.failed)} failed")
         return " · ".join(parts)
@@ -77,6 +114,54 @@ def filename_for(record: state.Record, suffix: str) -> str:
         name = f"{name} ({record.mix})"
     cleaned = " ".join(name.translate(_UNSAFE).split()).strip()
     return (cleaned or "untitled") + suffix.lower()
+
+
+def tags_for(found: identify.Identified, *, genre_name: str = "") -> tag.Tags:
+    """Ticket 07's field list, and only that list: never BPM or key."""
+    return tag.Tags(
+        title=found.title, artist=found.artist, album=found.album,
+        album_artist=found.album_artist, year=found.year, label=found.label,
+        catalog_number=found.catalog_number, genre=genre_name,
+        recording_id=found.recording_id, release_id=found.release_id,
+        release_group_id=found.release_group_id,
+    )
+
+
+def identify_one(record: state.Record, tools: Tools, log) -> identify.Identified:
+    """What the file is, or what its name says it is when nothing can be asked (the design notes).
+
+    A service being unreachable is deliberately not fatal: the track still has a name, and the tags it
+    can carry from that name are better than no track at all.
+    """
+    if not tools.identifies:
+        return identify.from_filename(record.request)
+    try:
+        return identify.identify(Path(record.local_path), record.request,
+                                 hearing=tools.hearing, matches=tools.matches, brainz=tools.brainz,
+                                 discogs=tools.discogs, log=log)
+    except Exception as error:          # a network or a service is not a reason to lose the track
+        log(f"      could not identify it ({type(error).__name__}) — the name will have to do")
+        return identify.from_filename(record.request)
+
+
+def apply_genre(record: state.Record, found: identify.Identified, tools: Tools, log) -> genre.Choice:
+    """Resolve the genre against the collection's own vocabulary, or leave it blank (the design notes).
+
+    Discogs styles come first and MusicBrainz genres second: that order was measured, and it is not what
+    one would guess. MusicBrainz's own genres had `electronic` claiming ten different library genres.
+    """
+    offered = list(found.styles) + list(found.genres)
+    if tools.library is None:
+        choice = genre.Choice(considered=tuple(offered))
+    else:
+        choice = genre.resolve(offered, vocabulary=tools.library.genres(), mappings=tools.mappings)
+
+    record.genre = choice.genre
+    if choice.genre:
+        log(f"      genre {choice.genre!r}, from {choice.source!r}")
+    elif offered:
+        log(f"      nothing in the table for {offered} — the working procedure decides this one")
+    return choice
 
 
 def convert(config: Config, source: Path, *, run: Runner, log) -> Path:
@@ -147,18 +232,22 @@ def normalize(config: Config, folder: Path, *, run: Runner, log) -> None:
     log(f"      normalized {folder}")
 
 
-def run(config: Config, job: state.Job, *, runner: Runner = execute, log=print) -> Summary:
-    """Place everything staging holds, then normalize each directory that received something."""
+def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print) -> Summary:
+    """Everything staging holds: identified, genred, converted, placed, normalized, tagged."""
+    tools = tools or Tools()
     records = job.records()
     summary = Summary()
     touched: set[Path] = set()
     placed: list[state.Record] = []
+    found: dict[int, identify.Identified] = {}
 
     for record in records:
         if record.status != state.DOWNLOADED:
             continue
         try:
-            landed = place(config, record, run=runner, log=log)
+            found[record.idx] = identify_one(record, tools, log)
+            apply_genre(record, found[record.idx], tools, log)
+            landed = place(config, record, run=tools.runner, log=log)
         except ProcessError as error:
             record.status = state.RETRY_LATER
             record.notes = str(error)
@@ -171,14 +260,14 @@ def run(config: Config, job: state.Job, *, runner: Runner = execute, log=print) 
         touched.add(landed.parent)
         placed.append(record)
         summary.placed.append(record.idx)
-        job.write_records(records)          # as in acquire: a crash costs the current track
+        job.write_records(records)          # a crash costs the current track and nothing else
 
     def in_folder(folder: Path) -> list[state.Record]:
         return [record for record in placed if Path(record.local_path).parent == folder]
 
     for folder in sorted(touched):
         try:
-            normalize(config, folder, run=runner, log=log)
+            normalize(config, folder, run=tools.runner, log=log)
         except ProcessError as error:
             for record in in_folder(folder):
                 record.status = state.RETRY_LATER
@@ -190,6 +279,30 @@ def run(config: Config, job: state.Job, *, runner: Runner = execute, log=print) 
         for record in in_folder(folder):
             record.status = state.NORMALIZED
             summary.normalized.append(record.idx)
+
+    for record in placed:
+        if record.status != state.NORMALIZED:
+            continue
+        try:
+            written = tag.write(Path(record.local_path),
+                                tags_for(found[record.idx], genre_name=record.genre), log=log)
+        except tag.TagError as error:
+            record.status = state.RETRY_LATER
+            record.notes = str(error)
+            summary.failed.append(record.idx)
+            job.append_event("tagging_failed", idx=record.idx, error=str(error))
+            log(f"[{record.idx}] {record.label}: {error}")
+            continue
+        if record.genre and "genre" not in written:
+            # An existing genre is never replaced (the design notes), so the record has to follow the file rather
+            # than claim a genre the file does not carry — the import reads the record, not the tag.
+            kept = tag.read(Path(record.local_path)).genre
+            log(f"      it already carried a genre, so {kept!r} stays rather than {record.genre!r}")
+            record.genre = kept
+        record.status = state.TAGGED
+        summary.tagged.append(record.idx)
+        if not record.genre:
+            summary.ungenred.append(record.idx)
 
     job.write_records(records)
     job.write_status(config)

@@ -84,6 +84,10 @@ class Identified:
     recording_id: str = ""
     release_id: str = ""
     release_group_id: str = ""
+    # What the two services call this track. Kept separate rather than merged, because the order they are
+    # trusted in is the caller's business, and `genre` decides it.
+    styles: tuple[str, ...] = ()
+    genres: tuple[str, ...] = ()
     score: float = 0.0
     source: str = ""        # fingerprint | search | filename
 
@@ -101,13 +105,21 @@ class Matches(Protocol):
 
 
 class Brainz(Protocol):
-    """MusicBrainz: a recording in full, a text search, and a release."""
+    """MusicBrainz: a recording in full, a text search, a release, and a release group's genres."""
 
     def recording(self, recording_id: str) -> Candidate | None: ...
 
     def search(self, request: Request) -> list[Match]: ...
 
     def release(self, release_id: str) -> Release: ...
+
+    def genres(self, release_group_id: str) -> tuple[str, ...]: ...
+
+
+class Discogs(Protocol):
+    """Discogs: the styles a release carries, which are the specific names its genres are not."""
+
+    def styles(self, artist: str, title: str) -> tuple[str, ...]: ...
 
 
 def from_filename(request: Request) -> Identified:
@@ -181,6 +193,7 @@ def identify(
     hearing: Hearing,
     matches: Matches,
     brainz: Brainz,
+    discogs: Discogs | None = None,
     log=lambda *_: None,
 ) -> Identified:
     """What the file at `path` is: its sound first, a text search second, its filename last."""
@@ -193,29 +206,35 @@ def identify(
         found = best(matches.match(fingerprint, seconds), seconds)
         if found is not None:
             log(f"      the fingerprint answers: {found.title!r}")
-            return _in_full(found, brainz, source="fingerprint")
+            return _in_full(found, brainz, discogs=discogs, source="fingerprint")
 
     found = best(brainz.search(request), seconds)
     if found is not None:
         log(f"      a text search answers: {found.title!r}")
-        return _in_full(found, brainz, source="search")
+        return _in_full(found, brainz, discogs=discogs, source="search")
 
     log("      nothing in MusicBrainz — the filename has to do")
     return from_filename(request)
 
 
-def _in_full(candidate: Candidate, brainz: Brainz, *, source: str) -> Identified:
+def _in_full(candidate: Candidate, brainz: Brainz, *, discogs: Discogs | None = None,
+             source: str) -> Identified:
     """Ask MusicBrainz about the recording that was found, and about one release of it.
 
     One release, not every release it appears on: each costs a request at one a second, MusicBrainz orders
     them by relevance, and a field a release simply does not carry is left empty rather than invented.
+
+    The two genre sources are gathered here as well, since this is the first point at which a trustworthy
+    artist and title exist to ask Discogs about.
     """
     detail = brainz.recording(candidate.id) or candidate
     release = choose([brainz.release(one.id) for one in detail.releases[:3]] or [],
                      group=candidate.release_group)
+    artist = " & ".join(detail.artists or candidate.artists)
+    title = detail.title or candidate.title
     return Identified(
-        title=detail.title or candidate.title,
-        artist=" & ".join(detail.artists or candidate.artists),
+        title=title,
+        artist=artist,
         album=candidate.album or detail.album or release.title,
         album_artist=album_artist(release, candidate),
         year=release.date[:4],
@@ -224,6 +243,8 @@ def _in_full(candidate: Candidate, brainz: Brainz, *, source: str) -> Identified
         recording_id=candidate.id,
         release_id=release.id,
         release_group_id=release.release_group_id,
+        styles=discogs.styles(artist, title) if discogs is not None and artist and title else (),
+        genres=brainz.genres(release.release_group_id) if release.release_group_id else (),
         source=source,
     )
 
@@ -263,6 +284,40 @@ class AcoustIDMatches:
         return [_match_of(result) for result in response.get("results", [])]
 
 
+class DiscogsStyles:
+    """Discogs, keyed by the token their API wants for the rate limit it grants.
+
+    The *search* answers with `style` as well as `genre`, so one request per track is enough — and the
+    style is the useful one, being the specific name (`Jazz-Funk`) where the genre is a coarse bucket
+    (`Jazz / Funk / Soul / Folk, World, & Country`).
+    """
+
+    def __init__(self, token: str, user_agent: str = "music-agent/0.1") -> None:
+        self._token = token
+        self._agent = user_agent
+
+    @classmethod
+    def from_environment(cls, config: Config) -> DiscogsStyles:
+        return cls(required(config.discogs_token_env))
+
+    def styles(self, artist: str, title: str) -> tuple[str, ...]:
+        import json as _json
+        import urllib.parse
+        import urllib.request
+
+        query = urllib.parse.urlencode({"q": f"{artist} {title}", "type": "release",
+                                        "per_page": "1", "token": self._token})
+        request = urllib.request.Request(f"https://api.discogs.com/database/search?{query}",
+                                         headers={"User-Agent": self._agent})
+        try:
+            with urllib.request.urlopen(request, timeout=25) as handle:
+                body = _json.load(handle)
+        except Exception:                       # a genre is not worth failing an identification over
+            return ()
+        results = body.get("results") or []
+        return tuple(results[0].get("style") or []) if results else ()
+
+
 def _match_of(result: dict) -> Match:
     """One AcoustID result. The release group is where the album, its artists and the compilation flag
     already are, so nothing needs asking for them."""
@@ -291,6 +346,7 @@ class MusicBrainz:
         self._mb = musicbrainzngs
         self._mb.set_useragent("music-agent", "0.1", contact)
         self._mb.set_rate_limit(1.0, 1)
+        self._contact = contact
 
     @classmethod
     def from_environment(cls, config: Config) -> MusicBrainz:
@@ -326,6 +382,23 @@ class MusicBrainz:
         got = self._mb.get_release_by_id(
             release_id, includes=["labels", "release-groups", "artist-credits"])
         return self._as_release(got.get("release") or {})
+
+    def genres(self, release_group_id: str) -> tuple[str, ...]:
+        """A release group's genres, over a raw ws/2 call.
+
+        Not through musicbrainzngs: its 0.7.1 has no `genres` include at all — only `tags`, which came back
+        empty on every file it was tried against — while the API itself answers (the design notes).
+        """
+        import json as _json
+        import urllib.request
+
+        request = urllib.request.Request(
+            f"https://musicbrainz.org/ws/2/release-group/{release_group_id}?inc=genres&fmt=json",
+            headers={"User-Agent": f"music-agent/0.1 ( {self._contact} )"},   # their policy wants the
+        )                                                                    # contact in the agent
+        with urllib.request.urlopen(request, timeout=25) as handle:
+            body = _json.load(handle)
+        return tuple(genre["name"] for genre in body.get("genres", []) if genre.get("name"))
 
     def _as_candidate(self, recording: dict) -> Candidate | None:
         if not recording.get("id"):
@@ -375,7 +448,7 @@ def required(name: str) -> str:
     return value
 
 
-def live(config: Config) -> tuple[Fingerprints, AcoustIDMatches, MusicBrainz]:
-    """The three seams as they really are, for whatever stage identifies files."""
+def live(config: Config) -> tuple[Fingerprints, AcoustIDMatches, MusicBrainz, DiscogsStyles]:
+    """The four seams as they really are, for whatever stage identifies files."""
     return (Fingerprints(), AcoustIDMatches.from_environment(config),
-            MusicBrainz.from_environment(config))
+            MusicBrainz.from_environment(config), DiscogsStyles.from_environment(config))

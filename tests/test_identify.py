@@ -57,7 +57,8 @@ def nothing_matched() -> identify.Matches:
 
 def brainz(recording: identify.Candidate | None = None,
            search: identify.Match | None = None,
-           release: identify.Release | None = None) -> identify.Brainz:
+           release: identify.Release | None = None,
+           genres: tuple[str, ...] = ()) -> identify.Brainz:
     class Brainz:
         def __init__(self) -> None:
             self.asked_for_release: list[str] = []
@@ -71,6 +72,9 @@ def brainz(recording: identify.Candidate | None = None,
         def release(self, release_id: str) -> identify.Release:
             self.asked_for_release.append(release_id)
             return release or identify.Release()
+
+        def genres(self, release_group_id: str) -> tuple[str, ...]:
+            return genres
 
     return Brainz()
 
@@ -244,6 +248,9 @@ def test_the_release_in_acoustids_group_wins_over_the_first(tmp_path):
 
         def release(self, release_id: str) -> identify.Release:
             return {"rel-1": singles, "rel-2": albums}[release_id]
+
+        def genres(self, release_group_id: str) -> tuple[str, ...]:
+            return ()
 
     matched = candidate(release_group="albumgroup", album="Death Row: Greatest Hits",
                         album_artists=("Various Artists",), compilation=True)
