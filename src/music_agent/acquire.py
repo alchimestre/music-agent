@@ -26,6 +26,7 @@ from pathlib import Path
 
 from . import reference, rules, slsk, state
 from .config import Config
+from .library import Library
 from .mcp import ServerError, StdioServer
 from .parsing import search_query
 from .reference import Lookup
@@ -142,7 +143,8 @@ class Summary:
     """What a pass came to, by track."""
 
     downloaded: list[int] = field(default_factory=list)
-    already: list[int] = field(default_factory=list)
+    already_downloaded: list[int] = field(default_factory=list)
+    already_held: list[int] = field(default_factory=list)
     in_review: list[int] = field(default_factory=list)
     nothing_usable: list[int] = field(default_factory=list)
     failed: list[int] = field(default_factory=list)
@@ -153,8 +155,10 @@ class Summary:
             f"{len(self.in_review)} need a decision",
             f"{len(self.nothing_usable)} with nothing usable",
         ]
-        if self.already:
-            parts.append(f"{len(self.already)} already held")
+        if self.already_held:
+            parts.append(f"{len(self.already_held)} already in the library")
+        if self.already_downloaded:
+            parts.append(f"{len(self.already_downloaded)} already downloaded")
         if self.failed:
             parts.append(f"{len(self.failed)} to retry")
         return " · ".join(parts)
@@ -237,6 +241,7 @@ def one(
     server: StdioServer,
     lookup: Lookup,
     *,
+    library: Library | None,
     log,
     sleep,
     clock,
@@ -244,7 +249,7 @@ def one(
 ) -> str:
     """Acquire one track. Returns which of the summary's lists it belongs in."""
     if record.status == state.DOWNLOADED and record.local_path and Path(record.local_path).is_file():
-        return "already"
+        return "already_downloaded"
 
     if not record.candidates:
         # Ticket 13: resolved once, then written into the record — a resumed run never re-queries, and a
@@ -254,6 +259,18 @@ def one(
         job.append_event("reference", idx=record.idx, seconds=seconds)
         log(f"[{record.idx}] {record.label}: "
             + (f"reference {seconds}s" if seconds else "no MusicBrainz reference — review only"))
+
+    # Ticket 09: nothing is fetched that the collection already holds. This is asked before the search, so
+    # a track already in the library never costs a request either.
+    if library is not None:
+        found = library.held(record.artist, record.title, record.duration_s)
+        if found is not None:
+            record.status = state.FOUND_IN_LIBRARY
+            record.notes = f"already held at {found.path}" if found.path else "already held"
+            job.append_event("already_held", idx=record.idx, path=found.path, genre=found.genre)
+            log(f"[{record.idx}] {record.label}: already in the library"
+                + (f" — {found.path}" if found.path else ""))
+            return "already_held"
 
     added = merge(record, search(server, record, later_pass=later_pass))
     job.append_event("searched", idx=record.idx, added=added, offered=len(record.candidates))
@@ -305,6 +322,7 @@ def run(
     server: StdioServer,
     lookup: Lookup,
     *,
+    library: Library | None = None,
     log=print,
     sleep=time.sleep,
     clock=time.monotonic,
@@ -317,8 +335,8 @@ def run(
     for record in records:
         later_pass = retry or bool(record.candidates)
         try:
-            outcome = one(job, record, server, lookup, log=log, sleep=sleep, clock=clock,
-                          later_pass=later_pass)
+            outcome = one(job, record, server, lookup, library=library, log=log, sleep=sleep,
+                          clock=clock, later_pass=later_pass)
         except (slsk.ToolError, ServerError) as error:
             record.status = state.RETRY_LATER
             outcome = "failed"

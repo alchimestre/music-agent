@@ -16,7 +16,7 @@ import pytest
 
 from music_agent import acquire
 from music_agent import config as config_module
-from music_agent import reference, state
+from music_agent import library, reference, state
 from music_agent.mcp import StdioServer
 
 FAKE = str(Path(__file__).parent / "fake_server.py")
@@ -137,10 +137,10 @@ def tools_called(path: Path) -> list[str]:
     return [entry["tool"] for entry in calls_made(path)]
 
 
-def pass_once(config, job, server, lookup, calls: Path) -> tuple[acquire.Summary, Quiet]:
+def pass_once(config, job, server, lookup, calls: Path, shelf=None) -> tuple[acquire.Summary, Quiet]:
     quiet = Quiet(Clock())
-    summary = acquire.run(config, job, server, lookup, log=quiet.log, sleep=quiet.sleep,
-                          clock=quiet.clock)
+    summary = acquire.run(config, job, server, lookup, library=shelf, log=quiet.log,
+                          sleep=quiet.sleep, clock=quiet.clock)
     return summary, quiet
 
 
@@ -299,7 +299,7 @@ def test_a_track_already_downloaded_is_not_fetched_again(tmp_path):
         second, quiet = pass_once(config, job, server, Reference(), calls)
 
     assert tools_called(calls).count("download") == 1
-    assert second.already == [1], quiet.lines
+    assert second.already_downloaded == [1], quiet.lines
     assert job.records()[0].local_path == str(landed)
 
 
@@ -316,6 +316,37 @@ def test_a_later_pass_asks_only_for_peers_with_free_slots(tmp_path):
     assert searches[0]["query"] == "kiasmos blurred"
     assert "free_slots_only" not in searches[0]
     assert searches[1]["free_slots_only"] is True
+
+
+def test_a_track_the_library_already_holds_is_not_even_searched(tmp_path):
+    """Ticket 09: nothing is fetched that the collection holds. It is asked before the search, so an
+    already-held track costs no request at all — which is exactly what the first smoke run showed it
+    was missing."""
+    config, job, server, calls = setup(tmp_path, results=GOOD)
+    shelf = library.Library(
+        [library.Held("Kiasmos", "Blurred", 449, path="/Library/Kiasmos - Blurred.aiff")], []
+    )
+
+    with server:
+        summary, quiet = pass_once(config, job, server, Reference(), calls, shelf=shelf)
+
+    record = job.records()[0]
+    assert summary.already_held == [1], quiet.lines
+    assert record.status == state.FOUND_IN_LIBRARY
+    assert record.local_path == ""
+    assert tools_called(calls) == [], "an already-held track should not have been searched for"
+    assert job.finished()
+
+
+def test_a_track_the_library_holds_at_another_length_is_still_fetched(tmp_path):
+    config, job, server, calls = setup(tmp_path, results=GOOD)
+    shelf = library.Library([library.Held("Kiasmos", "Blurred", 520)], [])
+
+    with server:
+        summary, quiet = pass_once(config, job, server, Reference(), calls, shelf=shelf)
+
+    assert summary.already_held == []
+    assert "search" in tools_called(calls)
 
 
 def test_a_server_that_refuses_is_left_to_retry_rather_than_crashing(tmp_path):

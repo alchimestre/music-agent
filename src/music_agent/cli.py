@@ -12,6 +12,7 @@ from pathlib import Path
 
 from . import acquire
 from . import config as config_module
+from . import library
 from . import mcp
 from . import reference
 from . import slsk
@@ -72,9 +73,11 @@ def _acquire(config: config_module.Config, args: argparse.Namespace) -> int:
             return 1
 
     try:
+        shelf = library.open(config)
         with mcp.StdioServer(list(config.soulseek_command), env=slsk.environment(config)) as server:
-            summary = acquire.run(config, job, server, reference.lookup(config), retry=args.retry)
-    except (slsk.MissingCredential, mcp.ServerError) as error:
+            summary = acquire.run(config, job, server, reference.lookup(config),
+                                  library=shelf, retry=args.retry)
+    except (slsk.MissingCredential, mcp.ServerError, library.Unreadable) as error:
         print(error, file=sys.stderr)
         return 1
 
