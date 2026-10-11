@@ -10,8 +10,13 @@ import argparse
 import sys
 from pathlib import Path
 
+from . import acquire
 from . import config as config_module
+from . import mcp
+from . import reference
+from . import slsk
 from . import state
+from . import tracklist
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -32,12 +37,52 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="a run by id; the newest unfinished one by default")
     status.add_argument("--queue", action="store_true",
                         help="list the tracks that need a decision, with what was offered")
+
+    acquire = commands.add_parser("acquire", parents=[common],
+                                  help="search Soulseek for a tracklist, into staging")
+    acquire.add_argument("--tracks", type=Path, default=None, metavar="FILE",
+                         help="the tracklist to start a run from; omit it to continue a run")
+    acquire.add_argument("--name", default=None, metavar="NAME",
+                         help="what to call the run (default: the tracklist's own name)")
+    acquire.add_argument("--job", default=None, metavar="ID",
+                         help="a run by id; the newest unfinished one by default")
+    acquire.add_argument("--retry", action="store_true",
+                         help="a later pass over what failed, preferring peers with free slots")
     return parser
 
 
-def _label(record: state.Record) -> str:
-    title = f"{record.artist} - {record.title}"
-    return f"{title} ({record.mix})" if record.mix else title
+def _acquire(config: config_module.Config, args: argparse.Namespace) -> int:
+    if args.tracks is not None:
+        requests = tracklist.read(args.tracks)
+        if not requests:
+            print(f"{args.tracks} names no tracks", file=sys.stderr)
+            return 1
+        job = state.create(config, args.name or args.tracks.stem)
+        job.write_records([
+            state.Record(idx=index, artist=request.artist, title=request.title, mix=request.mix)
+            for index, request in enumerate(requests, start=1)
+        ])
+        print(f"run {job.id} · {len(requests)} tracks · staging {config.staging}")
+    else:
+        job = state.find(config, args.job) if args.job else state.newest_unfinished(config)
+        if job is None:
+            where = repr(args.job) if args.job else "any run"
+            print(f"nothing to continue: no run called {where} under {config.state_root}",
+                  file=sys.stderr)
+            return 1
+
+    try:
+        with mcp.StdioServer(list(config.soulseek_command), env=slsk.environment(config)) as server:
+            summary = acquire.run(config, job, server, reference.lookup(config), retry=args.retry)
+    except (slsk.MissingCredential, mcp.ServerError) as error:
+        print(error, file=sys.stderr)
+        return 1
+
+    print()
+    print(summary.report())
+    if summary.in_review or summary.nothing_usable:
+        print(f"music-agent status --job {job.id} --queue")
+    return 0
 
 
 def _status(config: config_module.Config, args: argparse.Namespace) -> int:
@@ -69,7 +114,7 @@ def _status(config: config_module.Config, args: argparse.Namespace) -> int:
     else:
         print(f"{len(queue)} need{'s' if len(queue) == 1 else ''} a decision:")
         for record in queue:
-            print(f"  [{record.idx}] {_label(record)}")
+            print(f"  [{record.idx}] {record.label}")
             for verdict in record.offered():
                 print(f"        {verdict.label.value:<9} {verdict.candidate.user:<18}"
                       f"{verdict.candidate.ext:<6}{verdict.reason}")
@@ -78,7 +123,7 @@ def _status(config: config_module.Config, args: argparse.Namespace) -> int:
         print()
         print(f"{len(unusable)} with nothing usable — another search is needed:")
         for record in unusable:
-            print(f"  [{record.idx}] {_label(record)}")
+            print(f"  [{record.idx}] {record.label}")
     return 0
 
 
@@ -87,6 +132,8 @@ def main(argv: list[str] | None = None) -> int:
     config = config_module.load(getattr(args, "config", None))
     if args.command == "status":
         return _status(config, args)
+    if args.command == "acquire":
+        return _acquire(config, args)
     return 2                                        # unreachable: the subparser requires a command
 
 

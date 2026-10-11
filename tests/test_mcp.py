@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import fake_server
 from music_agent.mcp import ServerError, StdioServer
 
 FAKE = str(Path(__file__).parent / "fake_server.py")
@@ -28,14 +29,15 @@ def test_it_shakes_hands_and_lists_tools():
 
 def test_a_tool_result_comes_back_as_data():
     with open_server("normal") as server:
-        results = server.call("search", {"query": "kiasmos blurred"})
-    assert results[0]["username"] == "vinyl_only"
-    assert results[0]["duration_sec"] == 448.0
+        payload = server.call("search", {"query": "kiasmos blurred"})
+    assert payload["count"] == 1
+    assert payload["results"][0]["username"] == "vinyl_only"
+    assert payload["results"][0]["duration_sec"] == 448.0
 
 
 def test_a_structured_payload_is_used_when_offered():
     with open_server("structured") as server:
-        assert server.call("search") == {"results": _results()}
+        assert server.call("search") == {"results": fake_server.DEFAULT_RESULTS}
 
 
 def test_it_answers_the_servers_question_rather_than_hanging():
@@ -78,7 +80,7 @@ def test_a_mute_server_times_out_on_the_handshake():
 
 def test_junk_on_stdout_does_not_derail_the_exchange():
     with open_server("garbage") as server:
-        assert server.call("search")[0]["extension"] == "flac"
+        assert server.call("search")["results"][0]["extension"] == "flac"
 
 
 def test_a_command_that_cannot_be_run_names_the_command():
@@ -90,19 +92,3 @@ def test_closing_twice_is_harmless():
     server = open_server("normal")
     server.close()
     server.close()
-
-
-def _results() -> list[dict]:
-    return [
-        {
-            "id": "vinyl_only:Music\\Kiasmos - Blurred (Extended Mix).flac",
-            "username": "vinyl_only",
-            "filename": "Music\\Kiasmos - Blurred (Extended Mix).flac",
-            "filesize": 82_000_000,
-            "extension": "flac",
-            "bitrate": None,
-            "duration_sec": 448.0,
-            "has_free_slots": True,
-            "queue_size": 0,
-        }
-    ]

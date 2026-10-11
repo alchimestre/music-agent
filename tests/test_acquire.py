@@ -1,0 +1,336 @@
+"""The acquisition stage, against a stand-in server: no Soulseek, and no waiting either.
+
+The download policy is tested directly — it is the part that would otherwise only be exercisable by
+waiting a quarter of an hour on a real peer — and the flow around it is tested end to end through the
+protocol, with a clock the test moves by hand.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+import pytest
+
+from music_agent import acquire
+from music_agent import config as config_module
+from music_agent import reference, state
+from music_agent.mcp import StdioServer
+
+FAKE = str(Path(__file__).parent / "fake_server.py")
+
+GOOD = [
+    {
+        "id": "peerA:Music\\Kiasmos - Blurred.flac",
+        "username": "peerA",
+        "filename": "Music\\Kiasmos - Blurred.flac",
+        "filesize": 82_000_000,
+        "extension": "flac",
+        "bitrate": 855,
+        "duration_sec": 449,
+        "queue_size": 0,
+    }
+]
+TWO_PEERS = GOOD + [
+    {
+        "id": "peerB:Other\\Kiasmos - Blurred.flac",
+        "username": "peerB",
+        "filename": "Other\\Kiasmos - Blurred.flac",
+        "filesize": 81_000_000,
+        "extension": "flac",
+        "bitrate": 900,
+        "duration_sec": 449,
+        "queue_size": 0,
+    }
+]
+WRONG_LENGTH = [
+    {
+        "id": "peerA:Music\\Kiasmos - Blurred (Extended Mix).flac",
+        "username": "peerA",
+        "filename": "Music\\Kiasmos - Blurred (Extended Mix).flac",
+        "extension": "flac",
+        "duration_sec": 520,
+        "queue_size": 0,
+    }
+]
+NO_LENGTH = [
+    {
+        "id": "peerA:Music\\Kiasmos - Blurred.aiff",
+        "username": "peerA",
+        "filename": "Music\\Kiasmos - Blurred.aiff",
+        "extension": "aiff",
+        "duration_sec": None,
+        "queue_size": 0,
+    }
+]
+
+
+class Clock:
+    """A clock the test moves, so no budget costs any real time."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def tick(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class Reference:
+    """A lookup that answers at once, which is what makes candidates Ready."""
+
+    def __init__(self, seconds: int = 449) -> None:
+        self.seconds = seconds
+        self.asked: list[str] = []
+
+    def find(self, query: str, limit: int = 25) -> list[reference.Recording]:
+        self.asked.append(query)
+        return [reference.Recording(title="Blurred", artist="Kiasmos", length_ms=self.seconds * 1000)]
+
+
+class Quiet:
+    """A log and a sleep that do nothing but move the clock."""
+
+    def __init__(self, clock: Clock) -> None:
+        self.clock = clock
+        self.lines: list[str] = []
+
+    def log(self, line: str) -> None:
+        self.lines.append(line)
+
+    def sleep(self, seconds: float) -> None:
+        self.clock.tick(10)     # a fixed step, so a budget is crossed in a countable number of polls
+
+
+def setup(tmp_path: Path, *, results: list[dict], download: str | None = None):
+    """A config, a job holding one track, and a stand-in server wired to the scenario."""
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(f'[paths]\nstaging = "{tmp_path / "staging"}"\nstate = "state"\n',
+                           encoding="utf-8")
+    (tmp_path / "staging").mkdir()
+    config = config_module.load(config_path)
+
+    job = state.create(config, "test")
+    job.write_records([state.Record(idx=1, artist="Kiasmos", title="Blurred")])
+
+    env = dict(os.environ)
+    env["FAKE_RESULTS"] = json.dumps(results)
+    if download is not None:
+        env["FAKE_DOWNLOAD"] = download
+    calls = tmp_path / "calls.jsonl"
+    env["FAKE_LOG"] = str(calls)
+
+    return config, job, StdioServer([sys.executable, FAKE, "normal"], env=env), calls
+
+
+def calls_made(path: Path) -> list[dict]:
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def tools_called(path: Path) -> list[str]:
+    return [entry["tool"] for entry in calls_made(path)]
+
+
+def pass_once(config, job, server, lookup, calls: Path) -> tuple[acquire.Summary, Quiet]:
+    quiet = Quiet(Clock())
+    summary = acquire.run(config, job, server, lookup, log=quiet.log, sleep=quiet.sleep,
+                          clock=quiet.clock)
+    return summary, quiet
+
+
+# ── the policy, on its own ───────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "status,connection,on_disk,stuck,queue,expected",
+    [
+        # The disk decides, whatever the server believes: the finished record is dropped after
+        # sixty seconds, so a later poll says not_found about a download that worked.
+        ("not_found", "", True, 1.0, 0, acquire.Move.DONE),
+        ("queued", "waiting_for_peer", True, 999.0, 0, acquire.Move.DONE),
+        # A finished transfer whose file has not appeared is the rename, which is quick.
+        ("finished", "", False, 1.0, 0, acquire.Move.WAIT),
+        ("finished", "", False, 16.0, 0, acquire.Move.FAILED),
+        ("failed", "", False, 1.0, 0, acquire.Move.FAILED),
+        ("cancelled", "", False, 1.0, 0, acquire.Move.FAILED),
+        ("session_expired", "", False, 1.0, 0, acquire.Move.FAILED),
+        # A transfer in flight is never rotated on the connect timer, however long it has been at zero.
+        ("downloading", "transferring", False, 46.0, 0, acquire.Move.WAIT),
+        ("downloading", "transferring", False, 301.0, 0, acquire.Move.ROTATE),
+        # A connection that never transferred a byte is rotated at 45 seconds.
+        ("queued", "waiting_for_peer", False, 46.0, 0, acquire.Move.ROTATE),
+        ("queued", "connecting", False, 30.0, 0, acquire.Move.WAIT),
+        # A peer that declared a queue is behaving normally rather than failing, and gets the longer
+        # budget.
+        ("queued", "waiting_for_peer", False, 46.0, 5, acquire.Move.WAIT),
+        ("queued", "waiting_for_peer", False, 301.0, 5, acquire.Move.ROTATE),
+    ],
+)
+def test_the_decision_to_wait_rotate_or_give_up(status, connection, on_disk, stuck, queue, expected):
+    transfer = acquire.Transfer(status=status, connection_state=connection)
+    assert acquire.move(transfer, on_disk=on_disk, stuck_for=stuck, declared_queue=queue) is expected
+
+
+# ── the flow ─────────────────────────────────────────────────────────────────
+
+
+def test_a_download_that_lands_is_recorded_and_the_run_finishes(tmp_path):
+    landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
+    config, job, server, calls = setup(tmp_path, results=GOOD,
+                                       download=f"downloading:transferring:90000:{landed}")
+    landed.write_bytes(b"the file, already there when we look")
+
+    with server:
+        summary, quiet = pass_once(config, job, server, Reference(), calls)
+
+    record = job.records()[0]
+    assert summary.downloaded == [1], quiet.lines
+    assert record.status == state.DOWNLOADED
+    assert record.format == "flac"
+    assert record.local_path == str(landed)
+    assert record.tried == ["peerA:Music\\Kiasmos - Blurred.flac"]
+    assert job.finished()
+    assert "download" in tools_called(calls)
+
+
+def test_the_file_on_disk_wins_over_a_server_that_says_not_found(tmp_path):
+    """Ticket 03's trap: the record of a finished download is dropped after a minute, so `not_found` can
+    describe a download that succeeded."""
+    landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
+    config, job, server, calls = setup(tmp_path, results=GOOD, download=f"not_found::0:{landed}")
+    landed.write_bytes(b"a file that did arrive")
+
+    with server:
+        summary, quiet = pass_once(config, job, server, Reference(), calls)
+
+    assert summary.downloaded == [1], quiet.lines
+    assert job.records()[0].status == state.DOWNLOADED
+
+
+def test_a_track_with_nothing_ready_waits_for_a_human(tmp_path):
+    config, job, server, calls = setup(tmp_path, results=NO_LENGTH)
+
+    with server:
+        summary, quiet = pass_once(config, job, server, Reference(), calls)
+
+    assert summary.in_review == [1], quiet.lines
+    assert job.records()[0].status == state.PENDING
+    assert "download" not in tools_called(calls), "nothing was Ready to take"
+
+
+def test_a_search_with_no_usable_candidate_says_so(tmp_path):
+    config, job, server, calls = setup(tmp_path, results=WRONG_LENGTH)
+
+    with server:
+        summary, quiet = pass_once(config, job, server, Reference(), calls)
+
+    assert summary.nothing_usable == [1], quiet.lines
+    assert "download" not in tools_called(calls)
+
+
+def test_an_empty_search_leaves_nothing_usable(tmp_path):
+    config, job, server, calls = setup(tmp_path, results=[])
+
+    with server:
+        summary, _ = pass_once(config, job, server, Reference(), calls)
+
+    assert summary.nothing_usable == [1]
+
+
+def test_a_connect_stall_rotates_to_the_next_peer_and_cancels_the_first(tmp_path):
+    landed = tmp_path / "staging" / "from peerB.flac"
+    config, job, server, calls = setup(
+        tmp_path,
+        results=TWO_PEERS,
+        download=f"queued:waiting_for_peer:0:|downloading:transferring:90000:{landed}",
+    )
+    landed.write_bytes(b"the one that arrived")
+
+    with server:
+        summary, quiet = pass_once(config, job, server, Reference(), calls)
+
+    record = job.records()[0]
+    assert summary.downloaded == [1], quiet.lines
+    assert record.local_path == str(landed)
+    assert "peerB:Other\\Kiasmos - Blurred.flac" in record.tried
+    assert "cancel_download" in tools_called(calls), "a stalled transfer must not hold a transfer slot"
+
+
+def test_every_candidate_failing_leaves_the_track_to_retry(tmp_path):
+    config, job, server, calls = setup(tmp_path, results=TWO_PEERS, download="failed::0:")
+
+    with server:
+        summary, quiet = pass_once(config, job, server, Reference(), calls)
+
+    assert summary.failed == [1], quiet.lines
+    assert job.records()[0].status == state.RETRY_LATER
+    assert not job.finished(), "a run with a track left to retry is not finished"
+
+
+def test_the_reference_is_resolved_once_and_only_once(tmp_path):
+    landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
+    config, job, server, calls = setup(tmp_path, results=GOOD,
+                                       download=f"downloading:transferring:90000:{landed}")
+    landed.write_bytes(b"x")
+    lookup = Reference()
+
+    with server:
+        pass_once(config, job, server, lookup, calls)
+        pass_once(config, job, server, lookup, calls)
+
+    assert len(lookup.asked) == 1, "a resumed run must not ask MusicBrainz again (the design notes)"
+    assert job.records()[0].duration_s == 449
+
+
+def test_a_track_already_downloaded_is_not_fetched_again(tmp_path):
+    landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
+    config, job, server, calls = setup(tmp_path, results=GOOD,
+                                       download=f"downloading:transferring:90000:{landed}")
+    landed.write_bytes(b"x")
+
+    with server:
+        pass_once(config, job, server, Reference(), calls)
+        second, quiet = pass_once(config, job, server, Reference(), calls)
+
+    assert tools_called(calls).count("download") == 1
+    assert second.already == [1], quiet.lines
+    assert job.records()[0].local_path == str(landed)
+
+
+def test_a_later_pass_asks_only_for_peers_with_free_slots(tmp_path):
+    """Ticket 04: peer attributes may scope a retry pass, and never the first one."""
+    config, job, server, calls = setup(tmp_path, results=[])
+    record = job.records()[0]
+
+    with server:
+        acquire.search(server, record, later_pass=False)
+        acquire.search(server, record, later_pass=True)
+
+    searches = [entry["arguments"] for entry in calls_made(calls) if entry["tool"] == "search"]
+    assert searches[0]["query"] == "kiasmos blurred"
+    assert "free_slots_only" not in searches[0]
+    assert searches[1]["free_slots_only"] is True
+
+
+def test_a_server_that_refuses_is_left_to_retry_rather_than_crashing(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(f'[paths]\nstaging = "{tmp_path / "staging"}"\nstate = "state"\n',
+                           encoding="utf-8")
+    config = config_module.load(config_path)
+    job = state.create(config, "test")
+    job.write_records([state.Record(idx=1, artist="Kiasmos", title="Blurred")])
+
+    with StdioServer([sys.executable, FAKE, "refuses"]) as server:
+        quiet = Quiet(Clock())
+        summary = acquire.run(config, job, server, Reference(), log=quiet.log, sleep=quiet.sleep,
+                              clock=quiet.clock)
+
+    assert summary.failed == [1]
+    assert job.records()[0].status == state.RETRY_LATER
+    assert any("refused" in line for line in quiet.lines)

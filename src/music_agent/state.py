@@ -67,6 +67,14 @@ class Record:
     format: str = ""
     notes: str = ""
     candidates: list[Candidate] = field(default_factory=list)
+    # The candidates we have already asked a peer for, as `user:path`. Recorded so a retry pass moves on
+    # to the next one rather than asking the same peer the same question.
+    tried: list[str] = field(default_factory=list)
+
+    @property
+    def label(self) -> str:
+        title = f"{self.artist} - {self.title}"
+        return f"{title} ({self.mix})" if self.mix else title
 
     @property
     def request(self) -> Request:
