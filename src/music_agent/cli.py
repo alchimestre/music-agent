@@ -12,6 +12,7 @@ from pathlib import Path
 
 from . import acquire
 from . import config as config_module
+from . import genre
 from . import library
 from . import mcp
 from . import process
@@ -71,9 +72,17 @@ def _process(config: config_module.Config, args: argparse.Namespace) -> int:
         print(f"nothing to continue: no run under {config.state_root}", file=sys.stderr)
         return 1
 
-    summary = process.run(config, job)
+    try:
+        tools = process.Tools.live(config, library=library.open(config), mappings=genre.table())
+    except (slsk.MissingCredential, library.Unreadable) as error:
+        print(error, file=sys.stderr)
+        return 1
+
+    summary = process.run(config, job, tools=tools)
     print()
     print(summary.report())
+    if summary.ungenred:
+        print(f"{len(summary.ungenred)} without a genre from the table — the working procedure decides those")
     if summary.failed:
         print(f"music-agent status --job {job.id}")
     return 0
@@ -137,6 +146,8 @@ def _status(config: config_module.Config, args: argparse.Namespace) -> int:
     records = job.records()
     queue = [record for record in records if record.needs_you()]
     unusable = [record for record in records if not record.usable()]
+    ungenred = [record for record in records
+                if record.status in {state.TAGGED, state.NORMALIZED} and not record.genre]
 
     print()
     if not queue:
@@ -153,6 +164,12 @@ def _status(config: config_module.Config, args: argparse.Namespace) -> int:
         print()
         print(f"{len(unusable)} with nothing usable — another search is needed:")
         for record in unusable:
+            print(f"  [{record.idx}] {record.label}")
+
+    if ungenred:
+        print()
+        print(f"{len(ungenred)} waiting on a genre — the table has nothing and the working procedure decides:")
+        for record in ungenred:
             print(f"  [{record.idx}] {record.label}")
     return 0
 

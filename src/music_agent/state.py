@@ -35,6 +35,7 @@ DOWNLOADING = "downloading"
 DOWNLOADED = "downloaded"
 CONVERTED = "converted"
 NORMALIZED = "normalized"
+TAGGED = "tagged"
 IMPORTED = "imported"
 RETRY_LATER = "retry_later"
 NOT_FOUND = "not_found"
@@ -66,6 +67,7 @@ class Record:
     decision: str = UNDECIDED
     local_path: str = ""
     format: str = ""
+    genre: str = ""
     notes: str = ""
     candidates: list[Candidate] = field(default_factory=list)
     # The candidates we have already asked a peer for, as `user:path`. Recorded so a retry pass moves on
