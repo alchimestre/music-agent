@@ -14,6 +14,7 @@ from . import acquire
 from . import config as config_module
 from . import library
 from . import mcp
+from . import process
 from . import reference
 from . import slsk
 from . import state
@@ -49,7 +50,33 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="a run by id; the newest unfinished one by default")
     acquire.add_argument("--retry", action="store_true",
                          help="a later pass over what failed, preferring peers with free slots")
+
+    process = commands.add_parser("process", parents=[common],
+                                  help="convert, place and normalize what was downloaded")
+    process.add_argument("--job", default=None, metavar="ID",
+                         help="a run by id; the newest unfinished one by default")
     return parser
+
+
+def _job(config: config_module.Config, args: argparse.Namespace) -> state.Job | None:
+    """The run a command works on: one named, or the newest that never finished."""
+    if getattr(args, "job", None):
+        return state.find(config, args.job)
+    return state.newest_unfinished(config)
+
+
+def _process(config: config_module.Config, args: argparse.Namespace) -> int:
+    job = _job(config, args)
+    if job is None:
+        print(f"nothing to continue: no run under {config.state_root}", file=sys.stderr)
+        return 1
+
+    summary = process.run(config, job)
+    print()
+    print(summary.report())
+    if summary.failed:
+        print(f"music-agent status --job {job.id}")
+    return 0
 
 
 def _acquire(config: config_module.Config, args: argparse.Namespace) -> int:
@@ -137,6 +164,8 @@ def main(argv: list[str] | None = None) -> int:
         return _status(config, args)
     if args.command == "acquire":
         return _acquire(config, args)
+    if args.command == "process":
+        return _process(config, args)
     return 2                                        # unreachable: the subparser requires a command
 
 

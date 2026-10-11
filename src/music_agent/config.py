@@ -43,6 +43,8 @@ class Config:
     soulseek_obfuscated_port: int
     slsk_username_env: str
     slsk_password_env: str
+    convert_tool: Path
+    normalize_tool: Path
 
 
 def _resolve(value: str, base: Path) -> Path:
@@ -76,6 +78,11 @@ DEFAULTS = Config(
     # the obfuscated listener alongside it.
     soulseek_listen_port=20000,
     soulseek_obfuscated_port=20001,
+    # The map keeps both of these canonical, so the CLI drives them instead of reimplementing them. The
+    # normalizer needs only ffmpeg and mutagen, and mutagen is one of our own dependencies, so it runs
+    # under this interpreter.
+    convert_tool=Path("~/Music/convert_to_aiff.sh").expanduser(),
+    normalize_tool=Path("~/projects/loudness_normalizer/loudness_normalizer.py").expanduser(),
 )
 
 
@@ -97,6 +104,7 @@ def load(path: Path | None = None) -> Config:
     loudness = data.get("loudness", {})
     credentials = data.get("credentials", {})
     soulseek = data.get("soulseek", {})
+    tools = data.get("tools", {})
 
     return Config(
         staging=_resolve(paths.get("staging", str(DEFAULTS.staging)), base),
@@ -117,4 +125,6 @@ def load(path: Path | None = None) -> Config:
         ),
         slsk_username_env=credentials.get("soulseek_user", DEFAULTS.slsk_username_env),
         slsk_password_env=credentials.get("soulseek_password", DEFAULTS.slsk_password_env),
+        convert_tool=_resolve(tools.get("convert", str(DEFAULTS.convert_tool)), base),
+        normalize_tool=_resolve(tools.get("normalize", str(DEFAULTS.normalize_tool)), base),
     )
