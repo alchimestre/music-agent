@@ -1,0 +1,118 @@
+# What other people call it, on the left; what this collection calls it, on the right.
+#
+# Ticket 06: a curated table, corrected by hand, with the gaps left to the working procedure — a model chooses among
+# the library's genres or declines, and only a decline reaches the user. A mapping whose target is not a
+# genre the collection actually has is ignored rather than trusted, because the vocabulary is read from
+# the database at run time and this file can drift from it.
+#
+# The most specific name wins, so `minimal` beats `techno` when a release carries both.
+#
+# Evidence, because the choice of source was measured rather than assumed:
+#
+#   MusicBrainz genres were tried first and abandoned. A sample of the collection had `electronic` alone
+#   claiming ten different library genres, and `techno` five. They are here as a second opinion only.
+#
+#   Discogs styles were measured with three tracks from every genre in the collection. The specific ones
+#   are clean — `hardcore` → Hard Techno (2 of 3), `minimal` → Minimal / Deep Tech (2 of 3),
+#   `synth-pop` → Pop (2 of 3), `hardcore hip-hop` → Hip Hop (2 of 3), `trance` → Trance (2 of 3) — and
+#   the broad ones are not, which is why several are deliberately absent.
+#
+# Deliberately absent, with the reason, so nobody re-adds them hopefully:
+#
+#   `techno`      split four ways across the collection (Techno, Minimal / Deep Tech,
+#                 Techno (Raw / Deep / Hypnotic), Melodic House & Techno)
+#   `electro`     split across Electro, House, Hip Hop, Pop and Techno (Raw / Deep / Hypnotic)
+#   `acid`        split across Electro, Hard Techno, House and Trance
+#   `downtempo`   split across Melodic House & Techno, Psy-Trance, Downtempo / Trip-Hop and World
+#   `experimental` split across Hip Hop, Rock, Tech House and Ambient / Experimental
+#   `breakbeat`   split across Hard Techno, House and Breakbeat / Bass
+#   `folk`        split evenly between Folk and World — the collection keeps both, and nothing external
+#                 separates them
+#   `ambient`     appeared against Pop, Techno (Raw / Deep / Hypnotic) and Techno
+#
+# A track whose styles are all in that list gets a blank genre, which is where the working procedure comes in.
+#
+# Consequence worth knowing: `Acid Core` has no path *into* it at all, because the one style that would
+# lead there — `acid` — is in the list above. It is reached only by the working procedure choosing it, or by the user
+# correcting a file after import.
+
+[map]
+# --- what Discogs' own names already are in this collection (identity, and the safest kind of mapping) ---
+"techno"        = "Techno"
+"house"         = "House"
+"deep house"    = "Deep House"
+"electro"       = "Electro"
+"hip hop"       = "Hip Hop"
+"trap"          = "Hip Hop"
+"jazz"          = "Jazz"
+"rock"          = "Rock"
+"metal"         = "Rock"
+"pop"           = "Pop"
+"folk"          = "Folk"
+"world"         = "World"
+"classical"     = "Classical"
+"trance"        = "Trance"
+"psy-trance"    = "Psy-Trance"
+"drum n bass"   = "Drum & Bass"
+"drum & bass"   = "Drum & Bass"
+"jungle"        = "Drum & Bass"
+"darkwave"      = "Darkwave / Post-Punk"
+
+# --- measured: a clear majority of the collection's own labels for tracks carrying this style ---
+"minimal"           = "Minimal / Deep Tech"
+"hardcore"          = "Hard Techno"
+"hardcore techno"   = "Hard Techno"
+"hardcore hip-hop"  = "Hip Hop"
+"synth-pop"         = "Pop"
+"tech trance"       = "Trance"
+
+# --- the specific names, where Discogs says one thing and the collection files it as another ---
+"jazz-funk"         = "Jazz"
+"soul-jazz"         = "Jazz"
+"fusion"            = "Jazz"
+"swing"             = "Jazz"
+"bebop"             = "Jazz"
+"modern classical"  = "Classical"
+"dub techno"        = "Techno (Raw / Deep / Hypnotic)"
+"idm"               = "Techno (Raw / Deep / Hypnotic)"
+"dark ambient"      = "Ambient / Experimental"
+"drone"             = "Ambient / Experimental"
+"field recording"   = "Ambient / Experimental"
+"abstract"          = "Ambient / Experimental"
+"trip hop"          = "Downtempo / Trip-Hop"
+"disco"             = "Disco / Funk / Soul"
+"funk"              = "Disco / Funk / Soul"
+"soul"              = "Disco / Funk / Soul"
+"afrobeat"          = "World"
+"raï"               = "World"
+"nordic"            = "Folk"
+"acoustic"          = "Folk"
+"goth rock"         = "Darkwave / Post-Punk"
+"punk"              = "Darkwave / Post-Punk"
+"post-punk"         = "Darkwave / Post-Punk"
+"new wave"          = "Darkwave / Post-Punk"
+"gabber"            = "Hard Techno"
+"freetekno"         = "Hard Techno"
+"industrial"        = "Hard Techno"
+"breakcore"         = "Breakbeat / Bass"
+"bass music"        = "Breakbeat / Bass"
+"dubstep"           = "Breakbeat / Bass"
+"progressive house" = "Melodic House & Techno"
+"deep techno"       = "Minimal / Deep Tech"
+"tribal house"      = "Tech House"
+"ambient techno"    = "Techno (Raw / Deep / Hypnotic)"
+"electro house"     = "House"
+"hard house"        = "House"
+"acid house"        = "House"
+"electroclash"      = "Electro"
+"minimal wave"      = "Electro"
+"black metal"       = "Rock"
+"folk metal"        = "Rock"
+"art rock"          = "Rock"
+"alternative rock"  = "Rock"
+"indie rock"        = "Rock"
+"psychedelic rock"  = "Rock"
+"noise"             = "Ambient / Experimental"
+"spoken word"       = "Ambient / Experimental"
+"soundtrack"        = "Ambient / Experimental"
+"score"             = "Ambient / Experimental"
