@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import PurePosixPath
 
-from .parsing import appears_in, artists_appear, extract_mix, parse_filename
+from .parsing import appears_in, artists_appear, extract_mix, mix_matches, parse_filename
 
 # A candidate's length may differ from the reference by this much and no more (the design notes). Anything
 # wider is not a near miss, it is a different file, and it is rejected rather than offered.
@@ -120,12 +120,12 @@ def hms(seconds: int | None) -> str:
 
 
 def version_matches(candidate: Candidate, request: Request) -> bool:
-    """A bare request means the original; a named one must appear in the candidate's mix."""
-    want = request.mix.strip().lower()
-    have = candidate.mix.lower()
-    if not want:
-        return have == "" or have.startswith("original")
-    return want in have
+    """A bare request means the original; a named one must appear in the candidate's mix.
+
+    Defined in `parsing`, so a candidate's mix suffix and a MusicBrainz recording's version cannot be
+    judged by two different rules.
+    """
+    return mix_matches(request.mix, candidate.mix)
 
 
 def classify(candidate: Candidate, request: Request) -> Verdict:

@@ -1,0 +1,108 @@
+"""The tracklist file: the one reading of the input, owned here.
+
+Ticket 18: a tracklist reaches the CLI as a file it parses — text, CSV, or a list pasted into a file — and
+the working procedure never re-reads it, so there is exactly one reading and no second, divergent one.
+
+One track per line, the house convention (the design notes):
+
+    Kiasmos - Blurred
+    Kiasmos - Blurred (Extended Mix)
+    01. Ntogn - Through the Mines of Khazad-dum
+    # comments and blank lines are skipped
+
+or a CSV whose header names both an artist and a title column, in any other columns' company, which is
+what an export looks like:
+
+    Track Name,Artist Name,Album
+    Blurred,Kiasmos,Blurred
+
+The title keeps its mix suffix in `Request.mix` rather than in `Request.title`, because the query builder
+and the matcher both read those apart (tickets 05 and 14) — a title that kept the mix would match
+nothing, since a candidate's title is compared with its own mix already taken off.
+"""
+
+from __future__ import annotations
+
+import csv
+import re
+from pathlib import Path
+
+from .parsing import bare_title, extract_mix, fold
+from .rules import Request
+
+_COMMENT = "#"
+
+# A numbered list entry, and only that: `01. `, `3) `, `A1 - `. A bare space is deliberately *not*
+# accepted, because `808 State - Pacific` is an artist rather than item 808. The asymmetry is the point:
+# missing a track number costs a lookup that finds nothing, which leaves the track review-only, while
+# stripping an artist that begins with digits asks MusicBrainz about a different artist — and a wrong
+# reference rejects every correct file (the design notes).
+_LIST_NUMBER = re.compile(r"^\s*(?:[A-Za-z]{1,2})?\d{1,3}\s*([.)\]:]|\s-\s)\s*")
+
+# The column names an export uses. Exact matches, so `Album Artist` is not mistaken for the artist.
+_ARTIST_HEADS = frozenset({"artist", "artist name", "artists", "artist(s)", "performer", "band"})
+_TITLE_HEADS = frozenset({"title", "track", "track name", "track title", "name", "song", "song name"})
+
+
+def header_columns(line: str) -> tuple[int, int] | None:
+    """The (artist, title) column positions if this line is a header naming both, else None."""
+    fields = [fold(field) for field in next(csv.reader([line]))]
+    artist = next((i for i, field in enumerate(fields) if field in _ARTIST_HEADS), None)
+    title = next((i for i, field in enumerate(fields) if field in _TITLE_HEADS), None)
+    return None if artist is None or title is None else (artist, title)
+
+
+def request_for(artist: str, title: str) -> Request:
+    """A request from two strings, with the version read off the title rather than left in it."""
+    title = title.strip()
+    mix = extract_mix(title)
+    bare = bare_title(title)
+    if not bare:
+        # The whole title was parenthesised, so it is a title and not a version suffix.
+        return Request(artist=artist.strip(), title=title, mix="")
+    return Request(artist=artist.strip(), title=bare, mix=mix)
+
+
+def from_line(line: str) -> Request | None:
+    """One text line. None when it is a comment, a blank, or otherwise nothing to ask for."""
+    text = _LIST_NUMBER.sub("", line.strip(), count=1).strip()
+    if not text or text.startswith(_COMMENT):
+        return None
+    artist, separator, title = text.partition(" - ")
+    if not separator:
+        # No artist: a white-label or an unnamed edit. Nothing to look up, so it stays review-only
+        # (the design notes) rather than being guessed at.
+        artist, title = "", text
+    if not title.strip():
+        return None
+    return request_for(artist, title)
+
+
+def from_csv(lines: list[str], columns: tuple[int, int]) -> list[Request]:
+    """Every row but the header, reading only the two columns that were named."""
+    artist_at, title_at = columns
+    requests: list[Request] = []
+    for row in csv.reader(lines):
+        if max(artist_at, title_at) >= len(row):
+            continue                     # a short row: nothing to read rather than something to guess
+        title = row[title_at].strip()
+        if title:
+            requests.append(request_for(row[artist_at], title))
+    return requests
+
+
+def parse(text: str) -> list[Request]:
+    """Every request the text carries, in order."""
+    lines = [
+        line for line in text.splitlines() if line.strip() and not line.strip().startswith(_COMMENT)
+    ]
+    if not lines:
+        return []
+    columns = header_columns(lines[0])
+    if columns is not None:
+        return from_csv(lines[1:], columns)
+    return [request for request in (from_line(line) for line in lines) if request is not None]
+
+
+def read(path: Path) -> list[Request]:
+    return parse(Path(path).expanduser().read_text(encoding="utf-8"))

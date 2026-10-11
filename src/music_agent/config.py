@@ -11,6 +11,15 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+# How a caller tells the human where a missing value goes. One string, so every credential says the same
+# thing.
+ENV_HINT = "set -a; source .env; set +a"
+
+
+class MissingCredential(RuntimeError):
+    """The environment does not carry a credential something needs."""
+
+
 # src/music_agent/config.py -> src/music_agent -> src -> the repo root
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.toml"
 

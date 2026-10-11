@@ -3,7 +3,9 @@ name = "music-agent"
 version = "0.1.0"
 description = "Acquire, process and import tracks into rekordbox, following the decisions in the design notes"
 requires-python = ">=3.13"
-dependencies = []
+# musicbrainzngs is pinned to the version the design notes was verified against: 0.7.1 returns no `genres`
+# include, which is why the genre path calls ws/2 directly (the design notes).
+dependencies = ["musicbrainzngs==0.7.1"]
 
 [project.scripts]
 music-agent = "music_agent.cli:main"
