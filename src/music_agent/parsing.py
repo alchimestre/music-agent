@@ -122,6 +122,29 @@ def artists_appear(wanted: str, path: str) -> bool:
     return bool(named) and all(appears_in(artist, path) for artist in named)
 
 
+def bare_title(text: str) -> str:
+    """The title with its mix suffix and any trailing label code taken off.
+
+    One definition, because three things must agree about where a title ends: the search query, the
+    name matching in `rules`, and the tracklist reader. `Black Ibis [PRA005]` loses the code,
+    `Blurred (Extended Mix)` loses the mix, and `Ø [Phase]` keeps its name (the design notes).
+    """
+    return _TRAILING_PARENS.sub("", strip_code_tail(text)).strip()
+
+
+def mix_matches(wanted: str, have: str) -> bool:
+    """Ticket 05: a bare request means the original, and a named version must appear in the other.
+
+    `ENERGY` matches `ENERGY (Original Mix)` but not `ENERGY (Victor Ruiz Remix)`, and a remix
+    satisfies only a request that names it.
+    """
+    want = wanted.strip().lower()
+    other = have.strip().lower()
+    if not want:
+        return other == "" or other.startswith("original")
+    return want in other
+
+
 def search_query(artist: str, title: str) -> str:
     """`artist title`, and nothing else.
 
@@ -129,8 +152,7 @@ def search_query(artist: str, title: str) -> str:
     extra words return zero results. The query goes out folded, because peers routinely drop accents
     (the design notes).
     """
-    bare = _TRAILING_PARENS.sub("", strip_code_tail(title)).strip()
-    return fold(f"{artist} {bare}")
+    return fold(f"{artist} {bare_title(title)}")
 
 
 @dataclass(frozen=True)

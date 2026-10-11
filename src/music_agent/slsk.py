@@ -9,13 +9,7 @@ from __future__ import annotations
 
 import os
 
-from music_agent.config import Config
-
-_ENV_HINT = "set -a; source .env; set +a"
-
-
-class MissingCredential(RuntimeError):
-    """The environment does not carry a credential the server insists on."""
+from music_agent.config import ENV_HINT, Config, MissingCredential
 
 
 class ToolError(RuntimeError):
@@ -36,7 +30,7 @@ def environment(config: Config) -> dict[str, str]:
     """
     for name in (config.slsk_username_env, config.slsk_password_env):
         if not os.environ.get(name):
-            raise MissingCredential(f"{name} is not set — add it to .env, or run: {_ENV_HINT}")
+            raise MissingCredential(f"{name} is not set — add it to .env, or run: {ENV_HINT}")
 
     env = dict(os.environ)
     env["SLSK_USERNAME"] = os.environ[config.slsk_username_env]
