@@ -62,3 +62,15 @@ def test_the_shipped_config_is_valid_and_agrees_with_the_defaults():
     assert config.staging == DEFAULTS.staging
     assert config.target_lufs == DEFAULTS.target_lufs
     assert config.state_root == config_module.DEFAULT_CONFIG_PATH.parent / ".state/jobs"
+
+
+def test_the_shipped_config_pins_the_acquisition_server_and_moves_it_off_the_default_ports():
+    """Two regressions worth catching here. Floating the pin on a branch would let a rebuild move the
+    fields the match rules read (the design notes), and the listening ports must not go back to aioslsk's
+    defaults, which the omp MCP's own slsk server already holds on this machine."""
+    config = load(config_module.DEFAULT_CONFIG_PATH)
+
+    assert config.soulseek_command[0] == "uvx"
+    assert any(part.startswith("git+") and "@" in part for part in config.soulseek_command), \
+        "the acquisition server is not pinned to a commit"
+    assert (config.soulseek_listen_port, config.soulseek_obfuscated_port) != (60000, 60001)
