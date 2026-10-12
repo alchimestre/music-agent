@@ -13,6 +13,7 @@ from pathlib import Path
 from . import acquire
 from . import config as config_module
 from . import genre
+from . import importing
 from . import library
 from . import mcp
 from . import process
@@ -57,7 +58,45 @@ def _build_parser() -> argparse.ArgumentParser:
                                   help="convert, place and normalize what was downloaded")
     process.add_argument("--job", default=None, metavar="ID",
                          help="a run by id; the newest unfinished one by default")
+
+    importing = commands.add_parser("import", parents=[common],
+                                    help="add what was tagged to the rekordbox collection")
+    importing.add_argument("--job", default=None, metavar="ID",
+                           help="a run by id; the newest unfinished one by default")
+    importing.add_argument("--no-backup", action="store_true",
+                           help="skip copying the collection first (not recommended)")
     return parser
+
+
+def _import(config: config_module.Config, args: argparse.Namespace) -> int:
+    """The one stage that has to run with rekordbox closed."""
+    job = _job(config, args)
+    if job is None:
+        print(f"nothing to import: no run under {config.state_root}", file=sys.stderr)
+        return 1
+
+    from pyrekordbox import Rekordbox6Database
+
+    try:
+        database = Rekordbox6Database()
+    except Exception as error:
+        print(f"cannot open the collection ({error})", file=sys.stderr)
+        return 1
+
+    try:
+        summary = importing.run(config, job, db=database,
+                                   backup_first=not args.no_backup)
+    except importing.NotClosed as error:
+        print(error, file=sys.stderr)
+        return 1
+    finally:
+        database.close()
+
+    print()
+    print(summary.report())
+    if summary.failed:
+        print(f"music-agent status --job {job.id}")
+    return 0
 
 
 def _job(config: config_module.Config, args: argparse.Namespace) -> state.Job | None:
@@ -198,6 +237,8 @@ def main(argv: list[str] | None = None) -> int:
         return _acquire(config, args)
     if args.command == "process":
         return _process(config, args)
+    if args.command == "import":
+        return _import(config, args)
     return 2                                        # unreachable: the subparser requires a command
 
 

@@ -266,7 +266,8 @@ def test_the_normalizer_runs_once_for_everything_in_a_lane(tmp_path):
     assert len(runner.normalizations()) == 2, "one per lane that received something"
     assert summary.normalized == [1, 2, 3]
     assert [record.status for record in job.records()] == [state.TAGGED] * 3
-    assert job.finished()
+    assert not job.finished(), "the run is finished by the import, not here"
+
 
 
 def test_a_normalize_failure_leaves_those_records_to_retry(tmp_path):

@@ -310,6 +310,5 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
 
     job.write_records(records)
     job.write_status(config)
-    if not summary.failed:
-        job.finish()
+    # As in acquire: the run is finished by the import, which is where the pipeline ends.
     return summary
