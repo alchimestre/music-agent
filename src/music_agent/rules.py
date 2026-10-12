@@ -31,8 +31,9 @@ MIN_SECONDS = 60
 # taken as lossy. Lossless is the lane that reaches the AIFF pipeline.
 LOSSLESS_EXTENSIONS = frozenset({"flac", "wav", "aiff", "aif"})
 
-# Everything else we take, as-is. `.aif` is listed because it is the same format as `.aiff` and peers
-# use both. Anything not in either set is refused outright — artwork, cue sheets, logs, checksums.
+# Everything else we take, as-is. `.aif` is listed because it is the same format as `.aiff` and peers use
+# both — `place` renames it on the way into the lane, so `.aiff` is the only name the collection ever sees.
+# Anything not in either set is refused outright — artwork, cue sheets, logs, checksums.
 AUDIO_EXTENSIONS = LOSSLESS_EXTENSIONS | frozenset({"m4a", "mp3", "ogg", "opus"})
 
 
