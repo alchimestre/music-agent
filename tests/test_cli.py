@@ -93,3 +93,36 @@ def test_a_named_run_can_be_selected(tmp_path, capsys):
     job = seed(config_path, [SETTLED])
     assert main(["--config", str(config_path), "status", "--job", job.id]) == 0
     assert job.id in capsys.readouterr().out
+
+
+def test_a_name_on_enough_tracks_is_put_to_vincent(tmp_path, capsys):
+    """The proposal is the to accept or decline, so it has to say what accepting looks like."""
+    config_path = make_config(tmp_path)
+    config = config_module.load(config_path)
+    job = state.create(config, "run")
+    job.write_records([state.Record(idx=1, artist="Kiasmos", title="Blurred",
+                                    status=state.TAGGED, genre="")])
+    for index in range(5):
+        job.append_event(state.UNGENERED_EVENT, idx=index, names=["Goa Trance"])
+
+    assert main(["--config", str(config_path), "status", "--queue"]) == 0
+
+    out = capsys.readouterr().out
+    assert "waiting on a genre" in out
+    assert "Goa Trance" in out
+    assert "5 tracks" in out
+    assert '"goa trance" = "Goa Trance"' in out, "the line to paste, not just the name"
+
+
+def test_a_name_on_too_few_tracks_is_not_put_to_him(tmp_path, capsys):
+    config_path = make_config(tmp_path)
+    config = config_module.load(config_path)
+    job = state.create(config, "run")
+    job.write_records([state.Record(idx=1, artist="Kiasmos", title="Blurred",
+                                    status=state.TAGGED, genre="")])
+    for index in range(2):
+        job.append_event(state.UNGENERED_EVENT, idx=index, names=["Goa Trance"])
+
+    main(["--config", str(config_path), "status", "--queue"])
+
+    assert "to become a genre" not in capsys.readouterr().out

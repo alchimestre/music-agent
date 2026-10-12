@@ -17,6 +17,7 @@ from . import library
 from . import mcp
 from . import process
 from . import reference
+from .parsing import fold
 from . import slsk
 from . import state
 from . import tracklist
@@ -73,7 +74,9 @@ def _process(config: config_module.Config, args: argparse.Namespace) -> int:
         return 1
 
     try:
-        tools = process.Tools.live(config, library=library.open(config), mappings=genre.table())
+        shelf = library.open(config)
+        vocabulary = genre.vocabulary(shelf.genres(), genre.approved())
+        tools = process.Tools.live(config, vocabulary=vocabulary, mappings=genre.table())
     except (slsk.MissingCredential, library.Unreadable) as error:
         print(error, file=sys.stderr)
         return 1
@@ -171,6 +174,18 @@ def _status(config: config_module.Config, args: argparse.Namespace) -> int:
         print(f"{len(ungenred)} waiting on a genre — the table has nothing and the working procedure decides:")
         for record in ungenred:
             print(f"  [{record.idx}] {record.label}")
+
+    proposals = genre.proposals(state.ungenred_names(state.all_jobs(config)),
+                                mappings=genre.table())
+    if proposals:
+        print()
+        print(f"{len(proposals)} name{'s' if len(proposals) != 1 else ''} that fitted nothing, on enough "
+              "tracks to become a genre (the design notes):")
+        for proposal in proposals:
+            print(f"  {proposal.name!r}, on {proposal.tracks} tracks — to accept it, add both lines to "
+                  "genres.toml:")
+            print(f'      "{fold(proposal.name)}" = "{proposal.name}"')
+            print(f'      approved = [..., "{proposal.name}"]')
     return 0
 
 

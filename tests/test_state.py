@@ -132,3 +132,15 @@ def test_find_returns_a_run_by_id(tmp_path):
 def test_a_state_root_that_does_not_exist_yet_has_no_runs(tmp_path):
     assert state.all_jobs(make_config(tmp_path)) == []
     assert state.newest_unfinished(make_config(tmp_path)) is None
+
+
+def test_the_names_that_fitted_nothing_are_counted_across_runs(tmp_path):
+    """Ticket 06: a single tracklist is the wrong window for "enough tracks"."""
+    config = make_config(tmp_path)
+    first = state.create(config, "one")
+    first.append_event(state.UNGENERED_EVENT, idx=1, names=["Goa Trance", "Krautrock"])
+    second = state.create(config, "two")
+    second.append_event(state.UNGENERED_EVENT, idx=1, names=["Goa Trance"])
+    second.append_event("searched", idx=1, added=3)
+
+    assert state.ungenred_names([first, second]) == {"Goa Trance": 2, "Krautrock": 1}

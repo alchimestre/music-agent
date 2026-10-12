@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +49,23 @@ SKIPPED = "skipped"
 DECLINED = "not found"
 
 FINISHED_EVENT = "finished"
+
+# A track that was identified, offered names, and matched none of them (the design notes). Counted from the event
+# logs rather than a new store, because "enough tracks" means across runs and not across one tracklist.
+UNGENERED_EVENT = "ungenred"
+
+
+def ungenred_names(jobs: Iterable[Job]) -> dict[str, int]:
+    """How many tracks carried each name that resolved to nothing."""
+    counted: dict[str, int] = {}
+    for job in jobs:
+        for entry in job.events():
+            if entry.get("event") != UNGENERED_EVENT:
+                continue
+            for name in entry.get("names", []):
+                if name:
+                    counted[name] = counted.get(name, 0) + 1
+    return counted
 
 
 def _now() -> str:

@@ -26,14 +26,13 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
 from . import genre, identify, state, tag
 from .config import Config
-from .library import Library
 from .rules import LOSSLESS_EXTENSIONS
 
 
@@ -64,7 +63,7 @@ class Tools:
     matches: identify.Matches | None = None
     brainz: identify.Brainz | None = None
     discogs: identify.Discogs | None = None
-    library: Library | None = None
+    vocabulary: Sequence[str] = field(default_factory=list)
     mappings: Mapping[str, str] = field(default_factory=dict)
 
     @property
@@ -72,11 +71,11 @@ class Tools:
         return self.hearing is not None and self.matches is not None and self.brainz is not None
 
     @classmethod
-    def live(cls, config: Config, *, library: Library | None = None,
+    def live(cls, config: Config, *, vocabulary: Sequence[str] = (),
              mappings: Mapping[str, str] | None = None) -> Tools:
         hearing, matches, brainz, discogs = identify.live(config)
         return cls(hearing=hearing, matches=matches, brainz=brainz, discogs=discogs,
-                   library=library, mappings=mappings or {})
+                   vocabulary=list(vocabulary), mappings=mappings or {})
 
 
 @dataclass
@@ -151,10 +150,10 @@ def apply_genre(record: state.Record, found: identify.Identified, tools: Tools, 
     one would guess. MusicBrainz's own genres had `electronic` claiming ten different library genres.
     """
     offered = list(found.styles) + list(found.genres)
-    if tools.library is None:
-        choice = genre.Choice(considered=tuple(offered))
+    if tools.vocabulary:
+        choice = genre.resolve(offered, vocabulary=tools.vocabulary, mappings=tools.mappings)
     else:
-        choice = genre.resolve(offered, vocabulary=tools.library.genres(), mappings=tools.mappings)
+        choice = genre.Choice(considered=tuple(offered))
 
     record.genre = choice.genre
     if choice.genre:
@@ -246,7 +245,12 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
             continue
         try:
             found[record.idx] = identify_one(record, tools, log)
-            apply_genre(record, found[record.idx], tools, log)
+            choice = apply_genre(record, found[record.idx], tools, log)
+            if not choice.found and choice.considered:
+                # Ticket 06: counted so that a name fitting nothing on enough tracks can be proposed as a
+                # genre rather than staying blank for ever.
+                job.append_event(state.UNGENERED_EVENT, idx=record.idx,
+                                 names=list(choice.considered))
             landed = place(config, record, run=tools.runner, log=log)
         except ProcessError as error:
             record.status = state.RETRY_LATER

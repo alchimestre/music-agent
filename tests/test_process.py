@@ -15,7 +15,7 @@ import pytest
 from audio_files import aiff, mp4
 
 from music_agent import config as config_module
-from music_agent import identify, library, process, state, tag
+from music_agent import identify, process, state, tag
 from music_agent.parsing import fold
 
 
@@ -337,8 +337,7 @@ def with_identification(runner, *, styles: tuple[str, ...] = (), genres: tuple[s
                         vocabulary: list[str] | None = None, mappings=None, broken: bool = False):
     hearing, matches, brainz, discogs = identification(styles=styles, genres=genres, broken=broken)
     return process.Tools(runner=runner, hearing=hearing, matches=matches, brainz=brainz,
-                         discogs=discogs,
-                         library=library.Library([], vocabulary or ["Techno", "Jazz"]),
+                         discogs=discogs, vocabulary=vocabulary or ["Techno", "Jazz"],
                          mappings=mappings or {})
 
 
@@ -414,3 +413,19 @@ def test_a_service_that_fails_leaves_the_name_doing_the_work(tmp_path):
     written = tag.read(config.lossless / "Kiasmos - Blurred.aiff")
     assert (written.title, written.artist) == ("Blurred", "Kiasmos"), "the request's own name"
     assert written.album == "", "and nothing invented beyond it"
+
+
+def test_a_name_that_fitted_nothing_is_recorded_so_it_can_be_counted(tmp_path):
+    """Ticket 06: five tracks carrying a name that fits nothing is what turns it into a proposal."""
+    config = make_config(tmp_path)
+    record = state.Record(idx=1, artist="Kiasmos", title="Blurred",
+                          local_path=str(aiff(tmp_path / "staging" / "Blurred.aiff")),
+                          status=state.DOWNLOADED, format="aiff")
+    job = job_with(config, [record])
+    tools = with_identification(FakeRunner(), styles=("Krautrock", "Kosmische"))
+
+    process.run(config, job, tools=tools, log=lambda *_: None)
+
+    recorded = [entry for entry in job.events() if entry["event"] == state.UNGENERED_EVENT]
+    assert len(recorded) == 1
+    assert recorded[0]["names"] == ["Krautrock", "Kosmische"]

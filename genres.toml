@@ -36,6 +36,10 @@
 # lead there — `acid` — is in the list above. It is reached only by the working procedure choosing it, or by the user
 # correcting a file after import.
 
+# Genres the collection is allowed to gain. A name here is one the user has accepted from a proposal — a
+# mapping may point at it, the file will be tagged with it, and the import mints the row (the design notes).
+approved = []
+
 [map]
 # --- what Discogs' own names already are in this collection (identity, and the safest kind of mapping) ---
 "techno"        = "Techno"

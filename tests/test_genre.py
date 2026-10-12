@@ -110,3 +110,49 @@ def test_the_shipped_table_loads_and_points_only_at_real_genres():
 
 def test_a_table_that_is_not_there_is_empty_rather_than_an_error(tmp_path: Path):
     assert genre.table(tmp_path / "absent.toml") == {}
+
+
+# ── growing the vocabulary, which the user decided is allowed ---------------------------------
+
+
+def test_approved_names_come_from_the_file(tmp_path):
+    path = tmp_path / "genres.toml"
+    path.write_text('approved = ["Goa Trance"]\n\n[map]\n"x" = "Techno"\n', encoding="utf-8")
+    assert genre.approved(path) == ("Goa Trance",)
+    assert genre.approved(tmp_path / "absent.toml") == ()
+
+
+def test_the_vocabulary_is_the_collections_own_plus_what_is_approved():
+    assert genre.vocabulary(["Techno"], ["Goa Trance"]) == ["Techno", "Goa Trance"]
+    assert genre.vocabulary(["Techno"], ["techno"]) == ["Techno"], "already there, said once"
+    assert genre.vocabulary(["Techno"]) == ["Techno"]
+
+
+def test_only_an_approved_name_lets_a_genre_out_of_the_vocabulary():
+    """`resolve` refuses a name the collection does not have, so approval is what makes a new one
+    possible at all."""
+    shortcut = {fold("goa trance"): "Goa Trance"}
+    assert genre.resolve(["Goa Trance"], vocabulary=["Techno"], mappings=shortcut).found is False
+    approved = genre.vocabulary(["Techno"], ["Goa Trance"])
+    assert genre.resolve(["Goa Trance"], vocabulary=approved, mappings=shortcut).genre == "Goa Trance"
+
+
+def test_proposals_need_enough_tracks_and_come_best_evidenced_first():
+    found = genre.proposals({"Goa Trance": 7, "Krautrock": 4, "Dark Disco": 12}, mappings={})
+    assert [proposal.name for proposal in found] == ["Dark Disco", "Goa Trance"]
+    assert (found[0].name, found[0].tracks) == ("Dark Disco", 12)
+
+
+def test_four_tracks_is_not_yet_a_proposal():
+    assert genre.proposals({"Krautrock": 4}, mappings={}) == []
+    assert genre.proposals({"Goa Trance": 5}, mappings={}) != [], "five is the bar the user set"
+
+
+def test_a_name_that_already_has_a_mapping_is_never_a_proposal():
+    """It resolved, or it pointed at a genre the collection does not have — and either way the table is
+    where that gets fixed, not a proposal."""
+    assert genre.proposals({"Techno": 9}, mappings={fold("techno"): "Techno"}) == []
+
+
+def test_the_threshold_can_be_moved():
+    assert genre.proposals({"Goa Trance": 2}, mappings={}, threshold=2) != []
