@@ -213,6 +213,13 @@ def _status(config: config_module.Config, args: argparse.Namespace) -> int:
         print(f"{len(ungenred)} waiting on a genre — the table has nothing and the working procedure decides:")
         for record in ungenred:
             print(f"  [{record.idx}] {record.label}")
+        # The choice has to be made among the collection's own genres, so print them. Only asked for when
+        # there is one to make, which keeps the ordinary run of this command away from the database.
+        try:
+            for name in sorted(library.open(config).genres()):
+                print(f"      {name}")
+        except library.Unreadable as error:
+            print(f"      (the collection could not be read, so its genres are not listed: {error})")
 
     proposals = genre.proposals(state.ungenred_names(state.all_jobs(config)),
                                 mappings=genre.table())
