@@ -203,7 +203,11 @@ def place(config: Config, record: state.Record, *, run: Runner, log) -> Path:
     if lossless and suffix not in {".aiff", ".aif"}:
         source = convert(config, source, run=run, log=log)
 
-    target = folder / filename_for(record, source.suffix)
+    # One extension for one format: `.aif` is an AIFF by another name, and pyrekordbox cannot add one —
+    # `add_content` upper-cases the suffix and asks its `FileType` enum for a member that does not exist
+    # (`AIF`), raising an `AttributeError` where it only catches a `ValueError`. So the copy is *renamed* as
+    # it is placed, never converted: the audio is already exactly what the collection wants.
+    target = folder / filename_for(record, ".aiff" if source.suffix.lower() == ".aif" else source.suffix)
     if target.exists():
         # Never overwrite: a name already taken means something the dedupe did not catch, and a quiet
         # replacement would destroy a file rather than report a conflict.

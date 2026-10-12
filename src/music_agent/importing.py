@@ -99,15 +99,15 @@ def file_columns(path: Path) -> dict:
 
     Measured against the user's library rather than guessed: `BitRate` is **kbps** (1,214 of the AIFF rows say
     1411 where mutagen says 1411200), `FileSize` is bytes as of this write — rekordbox's own value is a
-    snapshot that lags a re-tag — and `FileType` comes from pyrekordbox's enum (12 = AIFF), with `.aif`
-    treated as `.aiff` because the rows do and the enum has no `AIF` member.
+    snapshot that lags a re-tag — and `FileType` comes from pyrekordbox's enum (12 = AIFF). The suffix maps
+    straight onto the enum's member names, which is safe here because `process.place` renames an `.aif` as it
+    lands: the enum has no `AIF` member, and neither does the collection.
     """
     from pyrekordbox.db6.tables import FileType
 
     sound = library.sound_of(path)
     columns: dict = {"FileNameL": path.name, "FileSize": path.stat().st_size}
-    member = getattr(FileType, "AIFF" if path.suffix.lower() == ".aif" else path.suffix.lstrip(".").upper(),
-                     None)
+    member = getattr(FileType, path.suffix.lstrip(".").upper(), None)
     if member is not None:
         columns["FileType"] = member.value
     if sound.seconds is not None:

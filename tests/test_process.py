@@ -166,6 +166,29 @@ def test_a_file_already_in_aiff_is_not_converted_again(tmp_path):
     assert (config.lossless / "Kiasmos - Blurred.aiff").is_file()
 
 
+def test_a_file_named_aif_is_placed_as_aiff(tmp_path):
+    """One extension for one format, because pyrekordbox's own `add_content` derives its file type from the
+    upper-cased suffix and there is no `AIF` member — a `.aif` cannot be added at all.
+
+    Renamed, never converted: `.aif` is an AIFF by another name, so the audio is already what the collection
+    wants and the converter would only re-encode it.
+    """
+    config = make_config(tmp_path)
+    runner = FakeRunner()
+    record = state.Record(idx=1, artist="Maryam Saleh", title="El Fetra",
+                          local_path=str(aiff(tmp_path / "staging" / "Maryam Saleh - El Fetra.aif")),
+                          status=state.DOWNLOADED, format="aif")
+    job = job_with(config, [record])
+
+    process.run(config, job, tools=process.Tools(runner=runner), log=lambda *_: None)
+
+    assert runner.conversions() == [], "an .aif is an AIFF, so there is nothing to convert"
+    assert (config.lossless / "Maryam Saleh - El Fetra.aiff").is_file()
+    assert not (config.lossless / "Maryam Saleh - El Fetra.aif").exists()
+    assert job.records()[0].local_path == str(config.lossless / "Maryam Saleh - El Fetra.aiff"), \
+        "the record follows the file"
+
+
 def test_a_name_already_taken_is_refused_rather_than_overwritten(tmp_path):
     """The dedupe should have caught it; if it did not, replacing the file would destroy it."""
     config = make_config(tmp_path)
