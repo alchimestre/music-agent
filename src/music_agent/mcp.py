@@ -12,7 +12,11 @@ Three things bite callers, so all three are handled here rather than in each sta
 - The server may push notifications, which are dropped, and may ask the client questions. An unanswered
   question would leave the exchange hanging, so any request from the server gets an empty result.
 - A server that dies mid-call must be reported at once rather than waited for, which is why the reader
-  thread signals end-of-input into the same queue the answers arrive on.
+  thread signals end-of-input to every call still waiting.
+- **Calls answer each other out of order.** The acquisition works on several tracks at once, so several
+  requests are in flight together and their answers come back in whatever order the server finishes them.
+  Each answer is routed to the call that asked for it by its id; a single shared queue would let one call
+  read another's answer and leave the other waiting for an answer already spent.
 - The command we run is a *wrapper*: `uvx` starts the server as a process of its own. Closing the input
   and terminating the wrapper takes that server down with it — measured both when idle and with a call
   still in flight — so nothing here signals a process group.
@@ -34,7 +38,7 @@ from typing import Any
 PROTOCOL_VERSION = "2024-11-05"
 
 _STARTUP_TIMEOUT = 60.0     # uvx may have to build the server the first time it runs
-_CALL_TIMEOUT = 60.0        # a search asks the network and waits
+_CALL_TIMEOUT = 15.0        # the user, 2026-10-12: a minute on one track is too long; 15 s is ample
 _GRACE = 0.5                # a server that exits when its input closes does so at once
 _KILL_GRACE = 2.0
 _STDERR_TAIL = 20           # lines kept to explain a failure
@@ -70,7 +74,9 @@ class StdioServer:
         startup_timeout: float = _STARTUP_TIMEOUT,
     ) -> None:
         self._on_log = on_log
-        self._inbox: queue.Queue[Any] = queue.Queue()
+        self._waiters: dict[int, queue.Queue] = {}   # one queue per call in flight
+        self._state = threading.Lock()               # guards the id counter and the waiter table
+        self._writes = threading.Lock()              # stdin is one stream, so writes take turns
         self._stderr: deque[str] = deque(maxlen=_STDERR_TAIL)
         self._next_id = 0
         self._closed = False
@@ -106,16 +112,34 @@ class StdioServer:
         for line in stream:
             sink(line)
         if terminal:
-            self._inbox.put(None)          # end of input: the server is gone
+            # End of input: the server is gone, and every call still waiting has to hear it.
+            with self._state:
+                waiting = list(self._waiters.values())
+            for waiter in waiting:
+                waiter.put(None)
 
     def _read_message(self, line: str) -> None:
         line = line.strip()
         if not line:
             return
         try:
-            self._inbox.put(json.loads(line))
+            message = json.loads(line)
         except json.JSONDecodeError:
             self._log(f"ignoring unparseable output: {line[:160]}")
+            return
+        if "id" not in message:                    # a notification: nothing here asks for one
+            self._log(f"notification {message.get('method')}")
+            return
+        if "method" in message:                    # a question, which must not hang
+            self._log(f"answering the server's {message.get('method')} with an empty result")
+            self._send({"jsonrpc": "2.0", "id": message["id"], "result": {}})
+            return
+        with self._state:
+            waiter = self._waiters.get(message["id"])
+        if waiter is None:
+            self._log(f"an answer to nothing: request {message['id']}")
+            return
+        waiter.put(message)
 
     def _read_log(self, line: str) -> None:
         line = line.rstrip()
@@ -133,8 +157,9 @@ class StdioServer:
     def _send(self, message: dict) -> None:
         try:
             assert self._proc.stdin is not None
-            self._proc.stdin.write(json.dumps(message) + "\n")
-            self._proc.stdin.flush()
+            with self._writes:
+                self._proc.stdin.write(json.dumps(message) + "\n")
+                self._proc.stdin.flush()
         except (BrokenPipeError, ValueError) as exc:
             raise ServerError(f"the server closed its input: {self._tail()}") from exc
 
@@ -160,37 +185,34 @@ class StdioServer:
         self._send({"jsonrpc": "2.0", "method": method, "params": params or {}})
 
     def request(self, method: str, params: dict | None = None, timeout: float = _CALL_TIMEOUT) -> dict:
-        """Send a request and wait for its answer, routing whatever else arrives first."""
-        self._next_id += 1
-        message_id = self._next_id
-        self._send({"jsonrpc": "2.0", "id": message_id, "method": method, "params": params or {}})
+        """Send a request and wait for *its* answer, whatever else the server is answering meanwhile."""
+        waiter: queue.Queue = queue.Queue()
+        with self._state:
+            self._next_id += 1
+            message_id = self._next_id
+            self._waiters[message_id] = waiter
+        try:
+            self._send({"jsonrpc": "2.0", "id": message_id, "method": method, "params": params or {}})
 
-        deadline = time.monotonic() + timeout
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise ServerError(f"{method}: no answer within {timeout:g}s")
-            try:
-                message = self._inbox.get(timeout=remaining)
-            except queue.Empty:
-                raise ServerError(f"{method}: no answer within {timeout:g}s") from None
+            deadline = time.monotonic() + timeout
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ServerError(f"{method}: no answer within {timeout:g}s")
+                try:
+                    message = waiter.get(timeout=remaining)
+                except queue.Empty:
+                    raise ServerError(f"{method}: no answer within {timeout:g}s") from None
 
-            if message is None:
-                raise ServerError(f"{method}: the server exited — {self._tail()}")
-            if "id" not in message:                        # a notification
-                self._log(f"notification {message.get('method')}")
-                continue
-            if "method" in message:                         # a question, which must not hang
-                self._log(f"answering the server's {message.get('method')} with an empty result")
-                self._send({"jsonrpc": "2.0", "id": message["id"], "result": {}})
-                continue
-            if message["id"] != message_id:
-                self._log(f"ignoring an answer to request {message['id']}")
-                continue
-            if "error" in message:
-                error = message["error"] or {}
-                raise ServerError(f"{method}: {error.get('message', error)}")
-            return message.get("result") or {}
+                if message is None:
+                    raise ServerError(f"{method}: the server exited — {self._tail()}")
+                if "error" in message:
+                    error = message["error"] or {}
+                    raise ServerError(f"{method}: {error.get('message', error)}")
+                return message.get("result") or {}
+        finally:
+            with self._state:
+                self._waiters.pop(message_id, None)
 
     def tools(self) -> list[str]:
         return [tool["name"] for tool in self.request("tools/list").get("tools", [])]

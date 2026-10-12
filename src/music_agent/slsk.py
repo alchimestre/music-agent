@@ -23,7 +23,8 @@ class ToolError(RuntimeError):
 
 
 def environment(config: Config) -> dict[str, str]:
-    """The child's environment: the credentials under the names the server reads, and our own ports.
+    """The child's environment: the credentials under the names the server reads, our own ports, and the
+    ceilings on how much of it runs at once.
 
     The credentials arrive under whatever name this machine uses them and are *copied* into the two the
     server looks for, so `config.toml` stays free to name them the local way.
@@ -38,6 +39,11 @@ def environment(config: Config) -> dict[str, str]:
     env["SLSK_DOWNLOAD_DIR"] = str(config.staging)
     env["SLSK_LISTEN_PORT"] = str(config.soulseek_listen_port)
     env["SLSK_OBFUSCATED_PORT"] = str(config.soulseek_obfuscated_port)
+    # The child's own ceilings, so how much of this runs at once is one decision made here rather than a
+    # default buried in a pinned build.
+    env["SLSK_MAX_CONCURRENT_DL"] = str(config.max_downloads)
+    env["SLSK_MAX_CONCURRENT_SEARCH"] = str(config.max_searches)
+    env["SLSK_MAX_CONCURRENT_OPS"] = str(config.max_operations)
     return env
 
 

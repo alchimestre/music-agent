@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -141,6 +142,9 @@ class Job:
 
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
+        # A pass works on several tracks at once, so the two files a run owns are written under one lock
+        # rather than trusting to luck.
+        self._lock = threading.Lock()
 
     @property
     def id(self) -> str:
@@ -171,12 +175,13 @@ class Job:
     def write_records(self, records: list[Record]) -> None:
         """Rewrite the whole file, which the working procedure's own guidance does: it stays small."""
         lines = [json.dumps(record.to_json(), ensure_ascii=False) for record in records]
-        self.tracks_path.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+        with self._lock:
+            self.tracks_path.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
 
     def append_event(self, event: str, **fields) -> None:
         entry = {"ts": _now(), "event": event}
         entry.update(fields)
-        with self.events_path.open("a", encoding="utf-8") as handle:
+        with self._lock, self.events_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     def events(self) -> list[dict]:

@@ -2,15 +2,17 @@
 
 Ticket 07 puts every deterministic step in the CLI, so the stage is a plain loop over a job's records:
 resolve the reference, search, classify, take the ladder's pick, download it, and watch it until the file
-is on disk or the candidate is hopeless.
+is on disk or the candidate is hopeless. the user, 2026-10-12: `workers` of those ladders run at once, in
+threads — nearly all of a track's time is spent waiting, and the server's ceiling on transfers, not our
+loop, is what decides how many files move together.
 
 Four things are worth reading the code for.
 
 - **The disk decides, never the status.** The server drops a finished record sixty seconds after
   completion, so a later poll answers `not_found` about a download that in fact succeeded (the design notes).
   Every outcome here is settled by looking for the file.
-- **A rotated download is cancelled.** The server transfers at most two files at once, so a stalled
-  transfer left running does not merely waste bandwidth — it blocks the candidate we try next.
+- **A rotated download is cancelled.** The server transfers `max_downloads` files at once, so a stalled
+  transfer left running does not merely waste bandwidth — it holds a slot the candidate we try next wants.
 - **A peer that declared a queue is not a stall.** It gets a longer budget, and is not rotated on the
   45-second timer that a stalled connection earns (the design notes).
 - **A transfer in flight is never rotated on that timer either.** Bytes are the signal: only a transfer
@@ -19,7 +21,9 @@ Four things are worth reading the code for.
 
 from __future__ import annotations
 
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -34,7 +38,8 @@ from .rules import Candidate
 
 # Seconds to let peers answer a search, and how many results to ask for. Ticket 03: results are sorted and
 # truncated server-side, so a small cap discards good candidates before we ever see them.
-SEARCH_TIMEOUT = 12
+SEARCH_TIMEOUT = 7          # the server's own floor and default; the window is what peers answer within
+CALL_TIMEOUT = 15.0         # the user, 2026-10-12: a minute waiting on one track is too long
 MAX_RESULTS = 60
 
 # Ticket 04: candidates attempted per track, per pass.
@@ -177,7 +182,8 @@ def search(server: StdioServer, record: state.Record, *, later_pass: bool) -> li
     }
     if later_pass:
         arguments["free_slots_only"] = True
-    payload = slsk.check(server.call("search", arguments, timeout=SEARCH_TIMEOUT + 30), "search")
+    payload = slsk.check(server.call("search", arguments, timeout=SEARCH_TIMEOUT + CALL_TIMEOUT),
+                         "search")
     offered = payload.get("results") or []
     return [candidate for candidate in (candidate_of(item) for item in offered) if candidate is not None]
 
@@ -199,7 +205,8 @@ def await_transfer(
     clock,
 ) -> tuple[Move, str]:
     """Take one candidate as far as it goes. Returns how it ended and where the file is."""
-    payload = slsk.check(server.call("download", {"id": identifier(candidate)}, timeout=60), "download")
+    payload = slsk.check(server.call("download", {"id": identifier(candidate)}, timeout=CALL_TIMEOUT),
+                         "download")
     report = transfer_of(payload)
     local_path = report.local_path
     log(f"      asking {candidate.user} for {candidate.name}")
@@ -217,7 +224,7 @@ def await_transfer(
         sleep(report.wait_before_poll)
         report = transfer_of(
             slsk.check(
-                server.call("download_status", {"id": identifier(candidate)}, timeout=60),
+                server.call("download_status", {"id": identifier(candidate)}, timeout=CALL_TIMEOUT),
                 "download_status",
             )
         )
@@ -355,6 +362,23 @@ def one(
     return "failed"
 
 
+def one_at_a_time(lookup: Lookup) -> Lookup:
+    """The lookup, wrapped so it is asked once at a time.
+
+    MusicBrainz's rate limiter is a module global inside `musicbrainzngs` and their policy asks for one
+    request a second, so lookups queue here rather than racing each other inside a library that is not
+    written for it.
+    """
+    lock = threading.Lock()
+
+    class Serialised:
+        def find(self, query: str, limit: int = reference.LIMIT) -> list[reference.Recording]:
+            with lock:
+                return lookup.find(query, limit)
+
+    return Serialised()
+
+
 def run(
     config: Config,
     job: state.Job,
@@ -367,22 +391,44 @@ def run(
     clock=time.monotonic,
     retry: bool = False,
 ) -> Summary:
-    """The whole pass: every record the job holds, in order, writing as it goes."""
+    """The whole pass: every record the job holds, `workers` of them at a time, writing as it goes.
+
+    the user, 2026-10-12: one track at a time is nonsense. A track spends nearly all of its time waiting —
+    on MusicBrainz, on a search window, on a peer's queue — so the waiting overlaps instead of queueing,
+    and the server's own ceiling on transfers is what decides how many files actually move at once.
+    """
     records = job.records()
     summary = Summary()
 
-    for record in records:
+    # One track's story stays readable while others are running, so lines are printed under a lock.
+    printing = threading.Lock()
+
+    def say(line: str) -> None:
+        with printing:
+            log(line)
+
+    def work(record: state.Record) -> None:
         later_pass = retry or bool(record.candidates)
         try:
-            outcome = one(job, record, server, lookup, library=library, log=log, sleep=sleep,
+            outcome = one(job, record, server, lookup, library=library, log=say, sleep=sleep,
                           clock=clock, later_pass=later_pass)
         except (slsk.ToolError, ServerError) as error:
             record.status = state.RETRY_LATER
             outcome = "failed"
-            log(f"[{record.idx}] {record.label}: the server refused — {error}")
+            say(f"[{record.idx}] {record.label}: the server refused — {error}")
             job.append_event("refused", idx=record.idx, error=str(error))
         getattr(summary, outcome).append(record.idx)
-        job.write_records(records)          # a crash costs the current track and nothing else
+        job.write_records(records)          # a crash costs the tracks in flight and nothing else
+
+    if records:
+        lookup = one_at_a_time(lookup)
+        with ThreadPoolExecutor(max_workers=max(1, config.workers)) as pool:
+            list(pool.map(work, records))
+
+    # The lists fill in whatever order the tracks finish, so they are put back in track order to report.
+    for name in ("downloaded", "already_downloaded", "already_held", "in_review",
+                 "nothing_usable", "failed"):
+        getattr(summary, name).sort()
 
     job.write_status(config)
     # Deliberately not finished: the pipeline ends at the import, so `acquire` and `process` leave the run

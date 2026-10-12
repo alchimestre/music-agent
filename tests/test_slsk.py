@@ -76,3 +76,24 @@ def test_a_normal_payload_passes_straight_through():
 def test_a_payload_that_is_not_an_object_is_reported():
     with pytest.raises(slsk.ToolError, match="unexpected"):
         slsk.check("some text", "search")
+
+
+def test_the_ceilings_on_concurrency_reach_the_child(tmp_path, monkeypatch):
+    """2026-10-12: how much of this runs at once is decided in config.toml, not by the pinned build's own
+    defaults — which are 3 transfers, 4 searches, and a single operation that serialises every search."""
+    from music_agent import config as config_module
+    from music_agent import slsk as slsk_module
+
+    monkeypatch.setenv("SLSK_USERNAME", "someone")
+    monkeypatch.setenv("SLSK_PASSWORD", "secret")
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "[soulseek]\nmax_downloads = 20\nmax_searches = 8\nmax_operations = 8\nworkers = 20\n",
+        encoding="utf-8",
+    )
+
+    env = slsk_module.environment(config_module.load(config_path))
+
+    assert env["SLSK_MAX_CONCURRENT_DL"] == "20"
+    assert env["SLSK_MAX_CONCURRENT_SEARCH"] == "8"
+    assert env["SLSK_MAX_CONCURRENT_OPS"] == "8"
