@@ -31,6 +31,18 @@ from .parsing import fold
 # not something an installation sets.
 DEFAULT_TABLE_PATH = Path(__file__).resolve().parents[2] / "genres.toml"
 
+# Ticket 06, as the user settled it: a name that fits nothing is counted, and at five tracks it is put to
+# the user to accept or decline rather than staying blank for ever. The pipeline never mints a genre itself.
+PROPOSAL_THRESHOLD = 5
+
+
+@dataclass(frozen=True)
+class Proposal:
+    """A name that fitted nothing on enough tracks to be worth becoming a genre."""
+
+    name: str
+    tracks: int
+
 
 @dataclass(frozen=True)
 class Choice:
@@ -62,6 +74,41 @@ def table(path: Path | None = None) -> dict[str, str]:
     with source.open("rb") as handle:
         data = tomllib.load(handle)
     return {fold(name): mapped for name, mapped in (data.get("map") or {}).items()}
+
+
+def approved(path: Path | None = None) -> tuple[str, ...]:
+    """Genre names the collection is allowed to gain, which the database does not have yet.
+
+    They are what makes a new genre possible at all: `resolve` refuses to hand out a name the collection
+    does not have, so an approved name is the collection being told it may have this one (the design notes).
+    """
+    source = Path(path) if path is not None else DEFAULT_TABLE_PATH
+    if not source.is_file():
+        return ()
+    with source.open("rb") as handle:
+        data = tomllib.load(handle)
+    return tuple(str(name) for name in (data.get("approved") or ()))
+
+
+def vocabulary(held: Sequence[str], approved_names: Sequence[str] = ()) -> list[str]:
+    """What a genre may be: the collection's own names, plus the ones approved for it."""
+    known = list(held)
+    folded = {fold(name) for name in known}
+    return known + [name for name in approved_names if fold(name) not in folded]
+
+
+def proposals(counted: Mapping[str, int], *, mappings: Mapping[str, str],
+              threshold: int = PROPOSAL_THRESHOLD) -> list[Proposal]:
+    """The names worth putting to the user, the best-evidenced first (the design notes).
+
+    A name that already has a mapping is not a proposal: it resolved, or it pointed somewhere the
+    collection does not have, and either way the table is where that gets fixed.
+    """
+    return [
+        Proposal(name, tracks)
+        for name, tracks in sorted(counted.items(), key=lambda pair: (-pair[1], pair[0]))
+        if tracks >= threshold and fold(name) not in mappings
+    ]
 
 
 def resolve(offered: Sequence[str], *, vocabulary: Sequence[str],
