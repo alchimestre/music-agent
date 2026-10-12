@@ -108,6 +108,7 @@ class Sound:
     seconds: int | None = None
     sample_rate: int | None = None
     bit_rate: int | None = None
+    bit_depth: int | None = None
 
 
 def sound_of(path: Path) -> Sound:
@@ -115,6 +116,9 @@ def sound_of(path: Path) -> Sound:
 
     Read rather than measured: the import writes these into the collection, and a header costs about a
     millisecond where decoding the audio would cost a great deal more.
+
+    `bit_rate` is bits per second, as the header gives it. The collection wants kbps and the import converts;
+    the 1,214 AIFFs say 1411 where this says 1411200.
     """
     from mutagen import File as MutagenFile
 
@@ -126,10 +130,12 @@ def sound_of(path: Path) -> Sound:
     if info is None:
         return Sound()
     seconds = getattr(info, "length", None)
+    bits = getattr(info, "bits_per_sample", None) or getattr(info, "sample_size", None)
     return Sound(
         seconds=round(seconds) if seconds else None,
         sample_rate=getattr(info, "sample_rate", None),
         bit_rate=getattr(info, "bitrate", None),
+        bit_depth=int(bits) if bits else None,
     )
 
 

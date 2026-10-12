@@ -94,6 +94,33 @@ def backup(db, log) -> Path | None:
     return target
 
 
+def file_columns(path: Path) -> dict:
+    """A row's file-derived columns, read from the file itself, in rekordbox's own units.
+
+    Measured against the user's library rather than guessed: `BitRate` is **kbps** (1,214 of the AIFF rows say
+    1411 where mutagen says 1411200), `FileSize` is bytes as of this write — rekordbox's own value is a
+    snapshot that lags a re-tag — and `FileType` comes from pyrekordbox's enum (12 = AIFF), with `.aif`
+    treated as `.aiff` because the rows do and the enum has no `AIF` member.
+    """
+    from pyrekordbox.db6.tables import FileType
+
+    sound = library.sound_of(path)
+    columns: dict = {"FileNameL": path.name, "FileSize": path.stat().st_size}
+    member = getattr(FileType, "AIFF" if path.suffix.lower() == ".aif" else path.suffix.lstrip(".").upper(),
+                     None)
+    if member is not None:
+        columns["FileType"] = member.value
+    if sound.seconds is not None:
+        columns["Length"] = int(sound.seconds)
+    if sound.sample_rate:
+        columns["SampleRate"] = int(sound.sample_rate)
+    if sound.bit_rate:
+        columns["BitRate"] = int(sound.bit_rate) // 1000        # kbps, as rekordbox stores it
+    if sound.bit_depth:
+        columns["BitDepth"] = int(sound.bit_depth)
+    return columns
+
+
 def find_or_create(rows, create, name: str):
     """The row for a name, minted only when the collection does not already have it."""
     wanted = name.strip().casefold()
@@ -116,7 +143,7 @@ def add(db, record: state.Record, log) -> object:
         raise ImportFailed(f"the file is gone: {path}")
 
     written = tag.read(path)
-    sound = library.sound_of(path)
+    columns = file_columns(path)
     title = written.title or record.title or path.stem
     artist = written.artist or record.artist
     genre = written.genre or record.genre
@@ -132,13 +159,13 @@ def add(db, record: state.Record, log) -> object:
     if genre:
         relations["GenreID"] = find_or_create(db.get_genre(), db.add_genre, genre).ID
 
+    row_fields = {name: columns[name] for name in ("Length", "SampleRate", "BitRate", "BitDepth")
+                  if name in columns}
     return db.add_content(
         str(path),
         Title=title,
         ReleaseYear=int(year) if year.isdigit() else None,
-        Length=sound.seconds,
-        SampleRate=sound.sample_rate,
-        BitRate=sound.bit_rate,
+        **row_fields,
         **relations,
     )
 
@@ -151,15 +178,23 @@ def repoint(db, record: state.Record, log) -> bool:
     collection whose analysis lives under `~/Library/Pioneer/rekordbox/share`. This keeps the row's ID and
     its UUID, and the UUID is what the analysis is filed under — so the beat grid and the cues stay with
     the track without a file being moved.
+
+    The path is not the only thing that describes the old file. `FileNameL`, `FileSize`, `BitRate`,
+    `BitDepth`, `Length`, `SampleRate` and `FileType` were all written when the lossy copy was added, and
+    rekordbox reads *those* for what it shows — the user found every upgraded track still displaying the
+    m4a's bitrate and size on 2026-10-12. So they are rewritten from the file the row now points at.
     """
     row = next((one for one in db.get_content() if one.FolderPath == record.replaces), None)
     if row is None:
         return False
-    if not Path(record.local_path).is_file():
+    path = Path(record.local_path)
+    if not path.is_file():
         # Never point a row at a file that is not there: that is how a collection acquires rows whose
         # files have gone, and this project reports those rather than making them.
         raise ImportFailed(f"the file is gone: {record.local_path}")
-    row.FolderPath = str(Path(record.local_path))
+    row.FolderPath = str(path)
+    for column, value in file_columns(path).items():
+        setattr(row, column, value)
     log(f"      it replaces {Path(record.replaces).name}")
     return True
 
