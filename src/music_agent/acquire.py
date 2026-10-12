@@ -164,6 +164,7 @@ class Summary:
     in_review: list[int] = field(default_factory=list)
     nothing_usable: list[int] = field(default_factory=list)
     failed: list[int] = field(default_factory=list)
+    unsearched: list[int] = field(default_factory=list)   # the network stopped answering (the design notes)
 
     def report(self) -> str:
         parts = [
@@ -177,7 +178,51 @@ class Summary:
             parts.append(f"{len(self.already_downloaded)} already downloaded")
         if self.failed:
             parts.append(f"{len(self.failed)} to retry")
+        if self.unsearched:
+            parts.append(f"{len(self.unsearched)} not searched — the network had gone quiet")
         return " · ".join(parts)
+
+
+# Ticket 21, the second half. A search that comes back with nothing is a rare track; this many in a row is a
+# network that has stopped answering. On 2026-10-12 a pass spent 146 searches in a row that way and reported
+# 205 tracks as *nothing usable* — a fact about the network, written down as a fact about the tracks.
+QUIET_AFTER = 50
+
+
+@dataclass
+class QuietNetwork:
+    """Searches in a row that came back empty, and the decision to stop asking (the design notes).
+
+    The count is *in a row*: one hit anywhere means the network is answering, so it resets. The event is what
+    the loop watches — a thread that sees it stops starting work rather than spending a search to find out.
+    """
+
+    limit: int = QUIET_AFTER
+    stopped: threading.Event = field(default_factory=threading.Event)
+
+    def __post_init__(self) -> None:
+        self._lock = threading.Lock()
+        self._run = 0
+        self._trip = 0
+
+    def observe(self, found: int) -> None:
+        """One search's raw result count, as the child reports it."""
+        with self._lock:
+            self._run = 0 if found else self._run + 1
+            if self.limit and self._run >= self.limit and not self.stopped.is_set():
+                self._trip = self._run
+                self.stopped.set()
+
+    @property
+    def consecutive(self) -> int:
+        with self._lock:
+            return self._run
+
+    @property
+    def tripped_at(self) -> int:
+        """How long the run of empty searches was when the pass gave up on the network."""
+        with self._lock:
+            return self._trip
 
 
 class Pacer:
@@ -293,6 +338,7 @@ def one(
     clock,
     later_pass: bool,
     pacer: Pacer | None = None,
+    quiet: QuietNetwork | None = None,
 ) -> str:
     """Acquire one track. Returns which of the summary's lists it belongs in."""
     if record.local_path and Path(record.local_path).is_file():
@@ -349,7 +395,12 @@ def one(
 
     if pacer is not None:
         pacer.wait()                            # the design notes: the network's rate, never the loop's
-    added = merge(record, search(server, record, later_pass=later_pass))
+    found = search(server, record, later_pass=later_pass)
+    if quiet is not None:
+        # Ticket 21: the raw count, not what merged — a second pass over the same record adds nothing new
+        # and would otherwise look like a network answering with silence.
+        quiet.observe(len(found))
+    added = merge(record, found)
     job.append_event("searched", idx=record.idx, added=added, offered=len(record.candidates))
 
     if record.settled() is None:
@@ -450,6 +501,7 @@ def run(
     """
     records = job.records()
     summary = Summary()
+    quiet = QuietNetwork()
 
     # Ticket 21: the network's rate on searching, and ours to keep. Zero is the loop's own speed, which is
     # worth having only for a tracklist too small for the rate to matter.
@@ -464,10 +516,15 @@ def run(
             log(line)
 
     def work(record: state.Record) -> None:
+        if quiet.stopped.is_set():
+            # Ticket 21: the network has stopped answering, so the pass stops asking. The record is left
+            # exactly as it was — nothing is written about a search that never happened.
+            summary.unsearched.append(record.idx)
+            return
         later_pass = retry or bool(record.candidates)
         try:
             outcome = one(job, record, server, lookup, library=library, log=say, sleep=sleep,
-                          clock=clock, later_pass=later_pass, pacer=pacer)
+                          clock=clock, later_pass=later_pass, pacer=pacer, quiet=quiet)
         except (slsk.ToolError, ServerError) as error:
             record.status = state.RETRY_LATER
             outcome = "failed"
@@ -484,9 +541,15 @@ def run(
         with ThreadPoolExecutor(max_workers=max(1, config.workers)) as pool:
             list(pool.map(work, records))
 
+    if quiet.stopped.is_set():
+        job.append_event("network_quiet", consecutive=quiet.tripped_at,
+                         unsearched=len(summary.unsearched))
+        say(f"the last {quiet.tripped_at} searches came back with nothing — the network has stopped "
+            f"answering, so {len(summary.unsearched)} tracks were not searched at all")
+
     # The lists fill in whatever order the tracks finish, so they are put back in track order to report.
     for name in ("downloaded", "already_downloaded", "already_held", "in_review",
-                 "nothing_usable", "failed"):
+                 "nothing_usable", "failed", "unsearched"):
         getattr(summary, name).sort()
 
     job.write_status(config)

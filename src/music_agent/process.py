@@ -22,6 +22,7 @@ identified, genred, tagged and imported alike.
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
@@ -290,6 +291,91 @@ def retag(config: Config, job: state.Job, *, tools: Tools | None = None, log=pri
         (summary.retagged if record.genre else summary.cleared).append(record.idx)
         job.append_event("retagged", idx=record.idx, path=str(path), genre=record.genre)
         job.write_records(records)             # a crash costs the current track and nothing else
+    return summary
+
+
+@dataclass
+class Reconciled:
+    """What a reconcile pass came to, by track."""
+
+    reconciled: list[int] = field(default_factory=list)   # the record was set from its file
+    already: list[int] = field(default_factory=list)      # already agreed with its file
+    missing: list[int] = field(default_factory=list)      # downloaded, but no file of that name to find
+
+    def report(self) -> str:
+        parts = [f"{len(self.reconciled)} rebuilt from their files"]
+        if self.already:
+            parts.append(f"{len(self.already)} already agreed")
+        if self.missing:
+            parts.append(f"{len(self.missing)} downloaded but not found in a lane")
+        return " · ".join(parts)
+
+
+def reconcile(config: Config, job: state.Job, *, log=print) -> Reconciled:
+    """Rebuild the records from the files this run downloaded (the design notes).
+
+    A status is the run's memory of what happened, and memory goes wrong — a pass can reset it, a command can
+    be interrupted, a repair can be too eager. The files cannot go wrong: they are what is on disk. This sets
+    each record to what its own file says.
+
+    The provenance is the run's **`downloaded` events**, because only a record the run fetched can have left a
+    file in a lane. Matching by name across the library instead is exactly what put 168 tracks the user already
+    holds into this run's records on 2026-10-12, each with `replaces` equal to `local_path` — the pair the
+    import points a row at and then deletes. Nothing here is invented either: a record whose file is not on
+    disk is reported, never guessed at.
+    """
+    summary = Reconciled()
+    fetched: set[int] = set()
+    for line in (config.state_root / job.id / state.EVENTS).read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        event = json.loads(line)
+        if event.get("event") == "downloaded" and event.get("idx") is not None:
+            fetched.add(event["idx"])
+
+    # One scan of both lanes. Lossless first: when both hold a stem the lossless copy is the upgrade.
+    on_disk: dict[str, Path] = {}
+    for lane in (config.lossless, config.lossy):
+        if not lane.is_dir():
+            continue
+        for path in sorted(lane.iterdir()):
+            if path.is_file() and not path.name.startswith("."):
+                on_disk.setdefault(path.stem, path)
+
+    records = job.records()
+    doomed: list[int] = []
+    for record in records:
+        if record.idx not in fetched:
+            continue
+        path = on_disk.get(filename_for(record, ""))
+        if path is None:
+            summary.missing.append(record.idx)
+            log(f"[{record.idx}] {record.label}: downloaded, but no file of that name in a lane")
+            continue
+        written = tag.read(path)
+        status = state.TAGGED if written.title else state.NORMALIZED
+        if record.local_path == str(path) and record.status == status and record.genre == written.genre:
+            summary.already.append(record.idx)
+            continue
+        summary.reconciled.append(record.idx)
+        log(f"[{record.idx}] {record.label}: {status} · {path.parent.name}/{path.name} · "
+            f"{written.genre or '(no genre)'}")
+        record.local_path = str(path)
+        record.status = status
+        record.genre = written.genre
+        record.notes = ""
+        if record.replaces and Path(record.replaces) == path:
+            doomed.append(record.idx)
+
+    if doomed:
+        # Refused rather than written: the pair means the import would delete the file it just made a row
+        # point at, and a live music file is not worth the risk of trusting the caller got this right.
+        raise ProcessError(
+            f"refusing to write: {len(doomed)} records would point their row at the file this run made, "
+            f"which is the pair the import deletes afterwards: {doomed[:5]}")
+
+    job.write_records(records)
+    job.append_event("reconciled", records=summary.reconciled, missing=summary.missing)
     return summary
 
 

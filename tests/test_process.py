@@ -419,6 +419,47 @@ def test_a_service_that_fails_leaves_the_name_doing_the_work(tmp_path):
 # ── re-tagging what a changed table left behind ──────────────────────────────
 
 
+# ── rebuilding a record from its file (the design notes) ────────────────────────────
+
+
+def test_reconcile_reads_a_record_back_off_the_file_this_run_downloaded(tmp_path):
+    """Ticket 25: a status is memory and the file is the truth. The trap it must not fall into is the one
+    that matched by name across the whole library — a track the user already holds is not this run's."""
+    config = make_config(tmp_path)
+    config.lossless.mkdir(parents=True, exist_ok=True)
+    placed = aiff(config.lossless / "Kiasmos - Blurred.aiff")
+    tag.write(placed, tag.Tags(title="Blurred", artist="Kiasmos", genre="Techno"))
+    his_own = config.lossy / "Somebody - Elsewhere.mp3"
+    his_own.parent.mkdir(parents=True, exist_ok=True)
+    his_own.write_bytes(b"audio")
+    fetched = state.Record(idx=1, artist="Kiasmos", title="Blurred", status=state.PENDING)
+    never = state.Record(idx=2, artist="Somebody", title="Elsewhere", status=state.PENDING)
+    job = job_with(config, [fetched, never])
+    job.append_event("downloaded", idx=1, path=str(config.staging / "Kiasmos - Blurred.flac"))
+
+    summary = process.reconcile(config, job, log=lambda *_: None)
+
+    assert summary.reconciled == [1]
+    assert job.records()[0].status == state.TAGGED
+    assert job.records()[0].local_path == str(placed)
+    assert job.records()[0].genre == "Techno"
+    assert job.records()[1].status == state.PENDING, "a track the run never fetched is left alone"
+    assert job.records()[1].local_path == "", "and not adopted by name"
+
+
+def test_reconcile_names_what_it_cannot_find_rather_than_guessing(tmp_path):
+    config = make_config(tmp_path)
+    record = state.Record(idx=1, artist="Kiasmos", title="Blurred", status=state.RETRY_LATER)
+    job = job_with(config, [record])
+    job.append_event("downloaded", idx=1, path=str(config.staging / "Kiasmos - Blurred.flac"))
+
+    summary = process.reconcile(config, job, log=lambda *_: None)
+
+    assert summary.missing == [1]
+    assert summary.reconciled == []
+    assert job.records()[0].status == state.RETRY_LATER, "nothing is written about a file that is not there"
+
+
 def test_a_re_tag_replaces_the_genre_the_file_already_carries(tmp_path):
     """Ticket 24: the table moved under a tagged file, and a deliberate pass is what reaches the file."""
     config = make_config(tmp_path)
