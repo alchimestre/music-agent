@@ -20,6 +20,21 @@ from music_agent import importing, state, tag
 from music_agent.parsing import fold
 
 
+@pytest.fixture(autouse=True)
+def rekordbox_is_not_running(monkeypatch):
+    """Whether rekordbox is open is the user's machine, not this code, and it must not fail the suite.
+
+    `importing.run` refuses to commit while the app is up, and pyrekordbox guards its own `commit` the same
+    way, so a suite run with rekordbox open goes red for a reason that has nothing to do with the change
+    under test. Both are patched here. The guard keeps its own test, which patches `is_running` again and so
+    overrides this; the two tests that write to a copy of the real schema touch only a temp file.
+    """
+    import pyrekordbox.db6.database
+
+    monkeypatch.setattr(importing, "is_running", lambda: False)
+    monkeypatch.setattr(pyrekordbox.db6.database, "get_rekordbox_pid", lambda: None)
+
+
 class Row:
     def __init__(self, name: str, identifier: int) -> None:
         self.Name = name
