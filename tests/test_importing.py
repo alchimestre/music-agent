@@ -26,6 +26,15 @@ class Row:
         self.ID = identifier
 
 
+class ContentRow:
+    """A row of the collection itself, mutable in the one field the repoint touches."""
+
+    def __init__(self, path: str, identifier: int = 42, title: str = "Blurred") -> None:
+        self.FolderPath = path
+        self.ID = identifier
+        self.Title = title
+
+
 class FakeDatabase:
     """Records what it was asked to add, and refuses a path twice the way pyrekordbox does."""
 
@@ -33,6 +42,7 @@ class FakeDatabase:
         self.existing = {"genre": [genre] if genre else [], "artist": [artist] if artist else [],
                          "album": [], "label": []}
         self.added: list[dict] = []
+        self.content: list[ContentRow] = []
         self.committed = 0
         self._next = 100
         self.session = SimpleNamespace(get_bind=lambda: SimpleNamespace(
@@ -46,6 +56,7 @@ class FakeDatabase:
         self._next += 1
         return Row(name, self._next)
 
+    def get_content(self): return list(self.content)
     def get_genre(self): return self._rows("genre")
     def get_artist(self): return self._rows("artist")
     def get_album(self): return self._rows("album")
@@ -297,5 +308,111 @@ def test_a_track_added_to_a_copy_of_the_real_collection(tmp_path):
         assert row.SampleRate == 44100
         assert row.BPM is None, "never written"
         assert getattr(row, "KeyName", None) is None, "never written"
+    finally:
+        database.close()
+
+
+# ── the upgrade: repointing a row rather than adding one ─────────────────────
+
+
+def a_lossy_file(tmp_path: Path, name: str = "Kiasmos - Blurred.mp3") -> Path:
+    where = tmp_path / "Losy Tracks" / name
+    where.parent.mkdir(parents=True, exist_ok=True)
+    where.write_bytes(b"the lossy copy the user already had")
+    return where
+
+
+def test_a_record_that_replaces_a_row_repoints_it_rather_than_adding(tmp_path):
+    """Tickets 09 and 16: the upgrade keeps the row, so the cues, the playlists and the history it
+    carries survive the swap."""
+    config = make_config(tmp_path)
+    old = a_lossy_file(tmp_path)
+    record = tagged(tmp_path)
+    record.replaces = str(old)
+    job = job_with(config, [record])
+    database = FakeDatabase()
+    database.content = [ContentRow(str(old))]
+
+    summary = importing.run(config, job, db=database, backup_first=False, log=quiet)
+
+    assert summary.repointed == [1], summary.report()
+    assert database.added == [], "nothing was added: the row was already there"
+    assert database.content[0].FolderPath == record.local_path
+    assert database.content[0].ID == 42, "the row keeps its identity, and its analysis with it"
+    assert database.committed == 1
+    assert not old.is_file(), "the user's decision: the file being replaced goes"
+    assert job.records()[0].status == state.IMPORTED
+
+
+def test_a_repoint_that_finds_no_row_adds_instead_and_keeps_the_file(tmp_path):
+    """If the row is gone, the track is simply new — and nothing deletes a file the collection may
+    still be using."""
+    config = make_config(tmp_path)
+    old = a_lossy_file(tmp_path)
+    record = tagged(tmp_path)
+    record.replaces = str(old)
+    job = job_with(config, [record])
+    database = FakeDatabase()
+
+    summary = importing.run(config, job, db=database, backup_first=False, log=quiet)
+
+    assert summary.imported == [1]
+    assert summary.repointed == []
+    assert old.is_file()
+
+
+def test_nothing_is_deleted_when_the_import_itself_fails(tmp_path):
+    config = make_config(tmp_path)
+    old = a_lossy_file(tmp_path)
+    record = tagged(tmp_path)
+    record.replaces = str(old)
+    Path(record.local_path).unlink()                    # the new file is gone
+    job = job_with(config, [record])
+    database = FakeDatabase()
+    database.content = [ContentRow(str(old))]
+
+    summary = importing.run(config, job, db=database, backup_first=False, log=quiet)
+
+    assert summary.failed == [1]
+    assert old.is_file(), "the copy in the collection is not collateral"
+    assert database.content[0].FolderPath == str(old), "and the row still points at it"
+
+
+def test_a_repoint_against_a_copy_of_the_real_collection(tmp_path):
+    """The mechanism itself, on the real schema: a plain write keeps the row, its ID and its UUID — and
+    the UUID is what the analysis is filed under, so the beat grid and the cues stay with the track.
+
+    Everything this touches is a temp file: the copy's row is pointed at one first, so the delete that
+    follows can never reach a real one.
+    """
+    from pyrekordbox import Rekordbox6Database
+
+    live = Path("~/Library/Pioneer/rekordbox/master.db").expanduser()
+    if not live.is_file():
+        pytest.skip("no rekordbox collection here to copy")
+
+    work = tmp_path / "master.db"
+    shutil.copy2(live, work)
+    database = Rekordbox6Database(work)
+    try:
+        row = next(r for r in database.get_content() if r.FolderPath and "Losy Tracks" in r.FolderPath)
+        identifier, uuid, title = row.ID, row.UUID, row.Title
+        old = a_lossy_file(tmp_path, "Whatever - Old.mp3")
+        row.FolderPath = str(old)
+        database.commit(autoinc=True)
+
+        config = make_config(tmp_path)
+        record = tagged(tmp_path, name="Whatever - New.aiff")
+        record.replaces = str(old)
+        job = job_with(config, [record])
+
+        summary = importing.run(config, job, db=database, backup_first=False, log=quiet)
+
+        again = next(r for r in database.get_content() if r.ID == identifier)
+        assert summary.repointed == [1], summary.report()
+        assert again.FolderPath == record.local_path
+        assert again.UUID == uuid, "the analysis is filed under this, so it follows the track"
+        assert again.Title == title, "a repoint moves the path and leaves the row alone"
+        assert not old.is_file(), "and the file it replaced is gone"
     finally:
         database.close()

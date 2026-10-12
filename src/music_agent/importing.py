@@ -44,11 +44,14 @@ class Summary:
     """What a pass came to, by track."""
 
     imported: list[int] = field(default_factory=list)
+    repointed: list[int] = field(default_factory=list)
     already: list[int] = field(default_factory=list)
     failed: list[int] = field(default_factory=list)
 
     def report(self) -> str:
         parts = [f"{len(self.imported)} imported"]
+        if self.repointed:
+            parts.append(f"{len(self.repointed)} upgraded")
         if self.already:
             parts.append(f"{len(self.already)} already in the collection")
         if self.failed:
@@ -140,6 +143,27 @@ def add(db, record: state.Record, log) -> object:
     )
 
 
+def repoint(db, record: state.Record, log) -> bool:
+    """Point the row that already holds this track at the new file (tickets 09 and 16).
+
+    A plain write of the path, deliberately **not** `update_content_path`: that helper also reads and moves
+    the track's ANLZ analysis, locating it from the audio file's own drive, so it fails for a master
+    collection whose analysis lives under `~/Library/Pioneer/rekordbox/share`. This keeps the row's ID and
+    its UUID, and the UUID is what the analysis is filed under — so the beat grid and the cues stay with
+    the track without a file being moved.
+    """
+    row = next((one for one in db.get_content() if one.FolderPath == record.replaces), None)
+    if row is None:
+        return False
+    if not Path(record.local_path).is_file():
+        # Never point a row at a file that is not there: that is how a collection acquires rows whose
+        # files have gone, and this project reports those rather than making them.
+        raise ImportFailed(f"the file is gone: {record.local_path}")
+    row.FolderPath = str(Path(record.local_path))
+    log(f"      it replaces {Path(record.replaces).name}")
+    return True
+
+
 def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=print) -> Summary:
     """Every tagged track into the collection, behind one commit and one backup."""
     if is_running():
@@ -158,9 +182,14 @@ def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=pr
         if where is not None:
             log(f"backed the collection up to {where.name}")
 
+    replaced: list[Path] = []
     for record in tagged:
         try:
-            add(db, record, log)
+            repointed = repoint(db, record, log) if record.replaces else False
+            if not repointed:
+                if record.replaces:
+                    log(f"[{record.idx}] {record.label}: the row it was to replace is gone — adding it")
+                add(db, record, log)
         except ImportFailed as error:
             record.notes = str(error)
             summary.failed.append(record.idx)
@@ -177,12 +206,29 @@ def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=pr
             continue
         record.status = state.IMPORTED
         record.notes = ""
-        summary.imported.append(record.idx)
-        job.append_event("imported", idx=record.idx, path=record.local_path)
-        log(f"[{record.idx}] {record.label}: imported")
+        if repointed:
+            summary.repointed.append(record.idx)
+            replaced.append(Path(record.replaces))
+            job.append_event("repointed", idx=record.idx, was=record.replaces, now=record.local_path)
+            log(f"[{record.idx}] {record.label}: upgraded — the row now points at the lossless file")
+        else:
+            summary.imported.append(record.idx)
+            job.append_event("imported", idx=record.idx, path=record.local_path)
+            log(f"[{record.idx}] {record.label}: imported")
 
     db.commit(autoinc=True)                 # one commit for the whole run (the design notes)
     job.write_records(records)              # after the commit, so a crash cannot lose it
+
+    for old in replaced:
+        # the user's decision, 2026-10-12: the file being replaced goes. After the commit and never before,
+        # so nothing can be deleted while the collection still points at it.
+        try:
+            if old.is_file():
+                old.unlink()
+                job.append_event("replaced_file_deleted", path=str(old))
+                log(f"      removed the lossy file it replaced: {old.name}")
+        except OSError as error:
+            log(f"      could not remove {old.name}: {error}")
     job.write_status(config)
     if not summary.failed:
         # The pipeline ends here, so this is where a run is finished: acquire and process leave it open

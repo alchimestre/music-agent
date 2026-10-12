@@ -23,7 +23,7 @@ from pathlib import Path
 
 from .config import Config
 from .parsing import fold, parse_filename
-from .rules import AUDIO_EXTENSIONS, DURATION_WINDOW
+from .rules import AUDIO_EXTENSIONS, DURATION_WINDOW, LOSSLESS_EXTENSIONS
 
 
 class Unreadable(RuntimeError):
@@ -44,6 +44,14 @@ class Held:
     def key(self) -> tuple[str, str]:
         """The identity a match is made on — folded, so accents and case cannot break it (tickets 09, 14)."""
         return (fold(self.artist), fold(self.title))
+
+    @property
+    def lossless(self) -> bool:
+        """Which lane this copy is in, from its extension — the rule the matcher uses for candidates.
+
+        Ticket 09: a lossy copy does not make a track held, when a lossless one could replace it.
+        """
+        return Path(self.path).suffix.lower().lstrip(".") in LOSSLESS_EXTENSIONS
 
 
 def path_key(path: str | Path) -> str:
@@ -79,6 +87,15 @@ class Library:
             if row.seconds is not None and abs(row.seconds - seconds) <= DURATION_WINDOW:
                 return row
         return None
+
+    def rows_for(self, artist: str, title: str) -> list[Held]:
+        """Every row under this name, whatever its length.
+
+        The upgrade case needs this and the ordinary case must not use it: a length mismatch usually means
+        a different version, but when the copy in the collection *is* the reference — because MusicBrainz
+        holds no recording for a white-label — the name is the only thing left to recognise it by.
+        """
+        return list(self._by_key.get((fold(artist), fold(title)), []))
 
     def __len__(self) -> int:
         return sum(len(rows) for rows in self._by_key.values())
