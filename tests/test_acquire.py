@@ -107,9 +107,14 @@ class Quiet:
 
 
 def setup(tmp_path: Path, *, results: list[dict], download: str | None = None, tracks: int = 1):
-    """A config, a job holding `tracks` tracks, and a stand-in server wired to the scenario."""
+    """A config, a job holding `tracks` tracks, and a stand-in server wired to the scenario.
+
+    Pacing is off here: these tests are about the loop and the download policy, and a pace would put sleeps
+    of its own into a clock the test moves by hand. Ticket 21's pace has its own test, which sets one.
+    """
     config_path = tmp_path / "config.toml"
-    config_path.write_text(f'[paths]\nstaging = "{tmp_path / "staging"}"\nstate = "state"\n',
+    config_path.write_text(f'[paths]\nstaging = "{tmp_path / "staging"}"\nstate = "state"\n'
+                           "[soulseek]\nsearch_interval = 0.0\n",
                            encoding="utf-8")
     (tmp_path / "staging").mkdir()
     config = config_module.load(config_path)
@@ -488,6 +493,32 @@ def test_the_pass_works_on_several_tracks_at_once(tmp_path):
                + summary.in_review + summary.nothing_usable + summary.failed)
     assert sorted(settled) == [1, 2]
     assert len(job.records()) == 2
+
+
+def test_searches_are_spaced_out_rather_than_fired_as_fast_as_the_loop_can(tmp_path):
+    """Ticket 21. A pass asked for 330 searches in six minutes and everything after the first seconds came
+    back empty — no error, no warning, and nothing in the child or in aioslsk that keeps to a rate or
+    reports one being refused. So the gap between two searches is the pass's own to keep.
+
+    One worker, so the reservations run in a known order and the gaps are exact; a pace that only held
+    with the parallelism turned off would be no pace at all, which is what the busy-wait below checks.
+    """
+    from dataclasses import replace
+
+    config, job, server, calls = setup(tmp_path, results=[], tracks=4)
+    config = replace(config, search_interval=3.0, workers=1)
+    clock = Clock()
+    gaps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        gaps.append(seconds)
+        clock.tick(seconds)
+
+    with server:
+        acquire.run(config, job, server, Reference(), log=lambda line: None, sleep=sleep, clock=clock)
+
+    assert len(tools_called(calls)) == 4, "the pace must not cost a track its search"
+    assert gaps == [3.0, 3.0, 3.0], "four tracks, three gaps, each exactly the interval"
 
 
 def test_the_musicbrainz_lookup_is_asked_one_at_a_time():

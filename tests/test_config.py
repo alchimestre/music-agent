@@ -57,6 +57,14 @@ def test_a_malformed_file_is_an_error(tmp_path):
         load(write(tmp_path, "this is not toml = = ="))
 
 
+def test_the_search_pace_comes_from_the_file(tmp_path):
+    """Ticket 21: a pass keeps to the network's searching rate rather than the loop's speed, so how fast
+    that is is a decision in the config — and the shipped default is a pace, not the loop's own speed."""
+    config = load(write(tmp_path, "[soulseek]\nsearch_interval = 2.5\n"))
+    assert config.search_interval == 2.5
+    assert DEFAULTS.search_interval > 0, "the default must pace searches rather than trust the network"
+
+
 def test_the_shipped_config_is_valid_and_agrees_with_the_defaults():
     config = load(config_module.DEFAULT_CONFIG_PATH)
     assert config.staging == DEFAULTS.staging

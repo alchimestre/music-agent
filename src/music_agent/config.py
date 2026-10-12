@@ -47,6 +47,10 @@ class Config:
     max_searches: int
     max_operations: int
     workers: int
+    # A floor on the gap between two searches we ask for, in seconds, and ours rather than the child's:
+    # nothing in the pinned build paces searches, and nothing in it reports one being ignored (the design notes).
+    # 0 turns the pace off.
+    search_interval: float
     slsk_username_env: str
     slsk_password_env: str
     convert_tool: Path
@@ -91,6 +95,10 @@ DEFAULTS = Config(
     max_searches=8,
     max_operations=8,
     workers=20,
+    # Ticket 21: a pass on 2026-10-12 fired 330 searches in six minutes — eight at a time — and every
+    # search after the first seconds was answered with nothing, silently. Five seconds is twelve a minute,
+    # a quarter of that rate. The threshold is a guess, which is why it is a knob.
+    search_interval=5.0,
     # The map keeps both of these canonical, so the CLI drives them instead of reimplementing them. The
     # normalizer needs only ffmpeg and mutagen, and mutagen is one of our own dependencies, so it runs
     # under this interpreter.
@@ -140,6 +148,7 @@ def load(path: Path | None = None) -> Config:
         max_searches=int(soulseek.get("max_searches", DEFAULTS.max_searches)),
         max_operations=int(soulseek.get("max_operations", DEFAULTS.max_operations)),
         workers=int(soulseek.get("workers", DEFAULTS.workers)),
+        search_interval=float(soulseek.get("search_interval", DEFAULTS.search_interval)),
         slsk_username_env=credentials.get("soulseek_user", DEFAULTS.slsk_username_env),
         slsk_password_env=credentials.get("soulseek_password", DEFAULTS.slsk_password_env),
         convert_tool=_resolve(tools.get("convert", str(DEFAULTS.convert_tool)), base),

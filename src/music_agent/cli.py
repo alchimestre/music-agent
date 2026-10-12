@@ -152,7 +152,11 @@ def _acquire(config: config_module.Config, args: argparse.Namespace) -> int:
 
     try:
         shelf = library.open(config)
-        with mcp.StdioServer(list(config.soulseek_command), env=slsk.environment(config)) as server:
+        # Ticket 21: the child logs what each search came to, one line per track — `Search complete: 0 raw
+        # results` was the only thing that knew the network had stopped answering, and it was thrown away.
+        # stderr keeps the pass's own report clean on stdout.
+        with mcp.StdioServer(list(config.soulseek_command), env=slsk.environment(config),
+                             on_log=lambda line: print(f"slsk: {line}", file=sys.stderr)) as server:
             summary = acquire.run(config, job, server, reference.lookup(config),
                                   library=shelf, retry=args.retry)
     except (slsk.MissingCredential, mcp.ServerError, library.Unreadable) as error:
