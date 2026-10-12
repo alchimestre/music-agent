@@ -140,6 +140,8 @@ def test_a_tagged_track_becomes_a_row(tmp_path):
     assert written["GenreID"] == 1, "the collection's own Techno, not a new one"
     assert written["Length"] == 0, "the tiny fixture's own length"
     assert written["SampleRate"] == 44100
+    assert written["BitRate"] == 1411, "kbps: the header says 1411200 and the collection stores kbps"
+    assert written["BitDepth"] == 16
     assert job.records()[0].status == state.IMPORTED
 
 
@@ -321,6 +323,11 @@ def test_a_track_added_to_a_copy_of_the_real_collection(tmp_path):
         assert row.ReleaseYear == 2017
         assert row.Length == 0
         assert row.SampleRate == 44100
+        assert row.BitRate == 1411, "kbps: the header says 1411200 and the collection stores kbps"
+        assert row.BitDepth == 16
+        assert row.FileType == 12, "pyrekordbox's own code for an AIFF, which it derives from the suffix"
+        assert row.FileNameL == "Music Agent - Test Track.aiff"
+        assert row.FileSize == Path(record.local_path).stat().st_size
         assert row.BPM is None, "never written"
         assert getattr(row, "KeyName", None) is None, "never written"
     finally:
@@ -374,6 +381,32 @@ def test_a_record_that_replaces_a_row_repoints_it_rather_than_adding(tmp_path):
     assert database.committed == 1
     assert not old.is_file(), "the user's decision: the file being replaced goes"
     assert job.records()[0].status == state.IMPORTED
+
+
+def test_a_repoint_rewrites_the_columns_that_describe_the_file(tmp_path):
+    """the user found every upgraded track still displaying the old m4a's bitrate and size on 2026-10-12:
+    rekordbox shows the row's own columns, not the file it points at, and `repoint` had only moved the path.
+
+    The values come from the file now, in the units rekordbox's own rows carry — its 1,214 AIFFs say 1411
+    where mutagen says 1411200 — and 12 is its code for AIFF.
+    """
+    config = make_config(tmp_path)
+    old = a_lossy_file(tmp_path)
+    record = tagged(tmp_path)
+    record.replaces = str(old)
+    job = job_with(config, [record])
+    database = FakeDatabase()
+    database.content = [ContentRow(str(old))]
+
+    importing.run(config, job, db=database, backup_first=False, log=quiet)
+
+    row = database.content[0]
+    assert row.FileNameL == "Kiasmos - Blurred.aiff", "what the old file was called is no longer true"
+    assert row.FileType == 12
+    assert row.BitRate == 1411, "kbps: the unit the own rows use, not the header's bits per second"
+    assert row.BitDepth == 16
+    assert row.SampleRate == 44100
+    assert row.FileSize == Path(record.local_path).stat().st_size
 
 
 def test_a_repoint_that_finds_no_row_adds_instead_and_keeps_the_file(tmp_path):
@@ -445,6 +478,8 @@ def test_a_repoint_against_a_copy_of_the_real_collection(tmp_path):
         assert again.FolderPath == record.local_path
         assert again.UUID == uuid, "the analysis is filed under this, so it follows the track"
         assert again.Title == title, "a repoint moves the path and leaves the row alone"
+        assert again.BitRate == 1411, "and the columns that describe the file survive the real write"
+        assert again.FileType == 12 and again.FileNameL == "Whatever - New.aiff"
         assert not old.is_file(), "and the file it replaced is gone"
     finally:
         database.close()
