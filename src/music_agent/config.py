@@ -41,6 +41,12 @@ class Config:
     soulseek_command: tuple[str, ...]
     soulseek_listen_port: int
     soulseek_obfuscated_port: int
+    # How much of the acquisition runs at once. The first three are the child's own ceilings, handed to it
+    # as SLSK_* variables; `workers` is how many tracks a pass works on at a time.
+    max_downloads: int
+    max_searches: int
+    max_operations: int
+    workers: int
     slsk_username_env: str
     slsk_password_env: str
     convert_tool: Path
@@ -78,6 +84,13 @@ DEFAULTS = Config(
     # the obfuscated listener alongside it.
     soulseek_listen_port=20000,
     soulseek_obfuscated_port=20001,
+    # the user, 2026-10-12: the user runs twenty transfers at a time himself, and one at a time is nonsense. The
+    # server's own defaults are 3 transfers, 4 searches and *one* operation — that last is the connection
+    # lock, which holds a search for its whole window, so searches cannot overlap at all until it is raised.
+    max_downloads=20,
+    max_searches=8,
+    max_operations=8,
+    workers=20,
     # The map keeps both of these canonical, so the CLI drives them instead of reimplementing them. The
     # normalizer needs only ffmpeg and mutagen, and mutagen is one of our own dependencies, so it runs
     # under this interpreter.
@@ -123,6 +136,10 @@ def load(path: Path | None = None) -> Config:
         soulseek_obfuscated_port=int(
             soulseek.get("obfuscated_port", DEFAULTS.soulseek_obfuscated_port)
         ),
+        max_downloads=int(soulseek.get("max_downloads", DEFAULTS.max_downloads)),
+        max_searches=int(soulseek.get("max_searches", DEFAULTS.max_searches)),
+        max_operations=int(soulseek.get("max_operations", DEFAULTS.max_operations)),
+        workers=int(soulseek.get("workers", DEFAULTS.workers)),
         slsk_username_env=credentials.get("soulseek_user", DEFAULTS.slsk_username_env),
         slsk_password_env=credentials.get("soulseek_password", DEFAULTS.slsk_password_env),
         convert_tool=_resolve(tools.get("convert", str(DEFAULTS.convert_tool)), base),

@@ -92,3 +92,68 @@ def test_closing_twice_is_harmless():
     server = open_server("normal")
     server.close()
     server.close()
+
+
+DEFERRING = '''
+import json, sys
+
+pending = []
+
+
+def out(message):
+    sys.stdout.write(json.dumps(message) + "\\n")
+    sys.stdout.flush()
+
+
+def answer(message_id, payload):
+    out({"jsonrpc": "2.0", "id": message_id,
+         "result": {"content": [{"type": "text", "text": json.dumps(payload)}]}})
+
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    message = json.loads(line)
+    method = message.get("method")
+    if method == "initialize":
+        out({"jsonrpc": "2.0", "id": message["id"],
+             "result": {"protocolVersion": "2024-11-05", "serverInfo": {}}})
+        continue
+    if method == "tools/list":
+        out({"jsonrpc": "2.0", "id": message["id"],
+             "result": {"tools": [{"name": "first"}, {"name": "second"}]}})
+        continue
+    name = (message.get("params") or {}).get("name")
+    if not name:                         # the notifications/initialized handshake, which asks nothing
+        continue
+    if name == "first":
+        pending.append(message)          # held back, so its answer lands after the next call's
+        continue
+    answer(message["id"], {"which": name})
+    for held in pending:
+        answer(held["id"], {"which": "first"})
+    pending.clear()
+'''
+
+
+def test_answers_are_routed_when_they_come_back_out_of_order(tmp_path):
+    """Calls in flight together, answered in the wrong order: the first call must still get its own
+    answer. A shared queue would let one call read the other's and leave it waiting for one already
+    spent — which is what the acquisition would hit the moment two tracks are searched at once."""
+    import threading
+    import time
+
+    script = tmp_path / "deferring.py"
+    script.write_text(DEFERRING, encoding="utf-8")
+
+    with StdioServer([sys.executable, str(script)], startup_timeout=10) as server:
+        first: dict = {}
+        asker = threading.Thread(target=lambda: first.update(server.call("first", timeout=10)))
+        asker.start()
+        time.sleep(0.2)                       # so the two calls are genuinely in flight together
+        second = server.call("second", timeout=10)
+        asker.join(timeout=10)
+
+    assert second == {"which": "second"}
+    assert first == {"which": "first"}

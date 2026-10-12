@@ -106,8 +106,8 @@ class Quiet:
         self.clock.tick(10)     # a fixed step, so a budget is crossed in a countable number of polls
 
 
-def setup(tmp_path: Path, *, results: list[dict], download: str | None = None):
-    """A config, a job holding one track, and a stand-in server wired to the scenario."""
+def setup(tmp_path: Path, *, results: list[dict], download: str | None = None, tracks: int = 1):
+    """A config, a job holding `tracks` tracks, and a stand-in server wired to the scenario."""
     config_path = tmp_path / "config.toml"
     config_path.write_text(f'[paths]\nstaging = "{tmp_path / "staging"}"\nstate = "state"\n',
                            encoding="utf-8")
@@ -115,7 +115,9 @@ def setup(tmp_path: Path, *, results: list[dict], download: str | None = None):
     config = config_module.load(config_path)
 
     job = state.create(config, "test")
-    job.write_records([state.Record(idx=1, artist="Kiasmos", title="Blurred")])
+    titles = ["Blurred"] + [f"Another {index}" for index in range(2, tracks + 1)]
+    job.write_records([state.Record(idx=index, artist="Kiasmos", title=title)
+                       for index, title in enumerate(titles, start=1)])
 
     env = dict(os.environ)
     env["FAKE_RESULTS"] = json.dumps(results)
@@ -435,3 +437,85 @@ def test_a_server_that_refuses_is_left_to_retry_rather_than_crashing(tmp_path):
     assert summary.failed == [1]
     assert job.records()[0].status == state.RETRY_LATER
     assert any("refused" in line for line in quiet.lines)
+
+
+# ── how much of it runs at once (2026-10-12) ─────────────────────────────────────────────────────
+
+
+def test_the_pass_works_on_several_tracks_at_once(tmp_path):
+    """the user: one at a time is nonsense. Two tracks have to be waiting on their own downloads at the
+    same moment, which a pass that works through them in turn can never do — it would sit in its first
+    poll until the barrier gave up."""
+    import threading
+
+    config, job, server, calls = setup(tmp_path, results=GOOD + [{
+        "id": "peerA:Music\\Kiasmos - Another 2.flac",
+        "username": "peerA",
+        "filename": "Music\\Kiasmos - Another 2.flac",
+        "extension": "flac",
+        "bitrate": 900,
+        "duration_sec": 449,
+        "queue_size": 0,
+    }], tracks=2)
+    clock = Clock()
+    met = threading.Barrier(2, timeout=5)
+    guard = threading.Lock()
+    waited: set[str] = set()
+
+    class AnswersAnyTitle:
+        """The stand-in lookup answers for one title only, and a track with no reference is reviewed
+        rather than downloaded — so this one resolves whatever it is asked about and both tracks poll."""
+
+        def find(self, query: str, limit: int = 25) -> list[reference.Recording]:
+            asked = query.split('recording:"')[1].split('"')[0]
+            return [reference.Recording(title=asked, artist="Kiasmos", length_ms=449_000)]
+
+    def sleep(seconds: float) -> None:
+        clock.tick(10)
+        mine = threading.current_thread().name
+        with guard:
+            first = mine not in waited
+            if first:
+                waited.add(mine)
+        if first:
+            met.wait()      # once per worker, so a pass that runs them in turn never gets its second
+
+    with server:
+        summary = acquire.run(config, job, server, AnswersAnyTitle(), log=lambda line: None,
+                              sleep=sleep, clock=clock)
+
+    settled = (summary.downloaded + summary.already_downloaded + summary.already_held
+               + summary.in_review + summary.nothing_usable + summary.failed)
+    assert sorted(settled) == [1, 2]
+    assert len(job.records()) == 2
+
+
+def test_the_musicbrainz_lookup_is_asked_one_at_a_time():
+    """Their rate limiter is a module global and their policy asks for one request a second, so our calls
+    queue behind one another rather than racing inside a library that is not written for it."""
+    import threading
+    import time
+
+    inside = 0
+    most = 0
+    guard = threading.Lock()
+
+    class Watched:
+        def find(self, query: str, limit: int = 25) -> list[reference.Recording]:
+            nonlocal inside, most
+            with guard:
+                inside += 1
+                most = max(most, inside)
+            time.sleep(0.05)
+            with guard:
+                inside -= 1
+            return []
+
+    serialised = acquire.one_at_a_time(Watched())
+    threads = [threading.Thread(target=serialised.find, args=(f"q{index}",)) for index in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert most == 1
