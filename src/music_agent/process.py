@@ -231,6 +231,68 @@ def normalize(config: Config, folder: Path, *, run: Runner, log) -> None:
     log(f"      normalized {folder}")
 
 
+@dataclass
+class Retagged:
+    """What a re-tag pass came to, by track."""
+
+    retagged: list[int] = field(default_factory=list)   # a genre was resolved and written
+    cleared: list[int] = field(default_factory=list)    # the old name came off and nothing replaced it
+    failed: list[int] = field(default_factory=list)
+
+    def report(self) -> str:
+        parts = [f"{len(self.retagged)} re-tagged"]
+        if self.cleared:
+            parts.append(f"{len(self.cleared)} cleared")
+        if self.failed:
+            parts.append(f"{len(self.failed)} failed")
+        return " · ".join(parts)
+
+
+def retag(config: Config, job: state.Job, *, tools: Tools | None = None, log=print) -> Retagged:
+    """Re-derive the genre on tracks already placed, and write it even though one is there (the design notes).
+
+    Ticket 10 stops a *run* from re-genring a track, because a genre cannot be undone after import and
+    changing one therefore has to be deliberate. This is the deliberate half of that rule: the table has
+    changed, and the tracks tagged under the old one carry names the collection no longer has. The genre is
+    resolved again from the services and written over whatever the file holds; when nothing resolves, the
+    old name is taken off, because the import reads the *file* and would mint a row for it.
+    """
+    tools = tools or Tools()
+    summary = Retagged()
+    records = job.records()
+    for record in records:
+        if record.status not in {state.NORMALIZED, state.TAGGED, state.IMPORTED}:
+            continue
+        path = Path(record.local_path)
+        if not path.is_file():
+            record.notes = f"the file is gone: {path}"
+            summary.failed.append(record.idx)
+            log(f"[{record.idx}] {record.label}: {record.notes}")
+            job.write_records(records)
+            continue
+
+        found = identify_one(record, tools, log)
+        # No ungenred event here, deliberately: the design notes counts names across runs, and these were counted
+        # the first time round. Counting them again would inflate a proposal rather than inform one.
+        apply_genre(record, found, tools, log)
+        try:
+            tag.write(path, tags_for(found, genre_name=record.genre), replace_genre=True, log=log)
+        except tag.TagError as error:
+            record.notes = str(error)
+            summary.failed.append(record.idx)
+            job.append_event("retag_failed", idx=record.idx, error=str(error))
+            log(f"[{record.idx}] {record.label}: {error}")
+            job.write_records(records)
+            continue
+
+        record.genre = tag.read(path).genre    # the record follows the file, as it does in a run
+        record.notes = ""
+        (summary.retagged if record.genre else summary.cleared).append(record.idx)
+        job.append_event("retagged", idx=record.idx, path=str(path), genre=record.genre)
+        job.write_records(records)             # a crash costs the current track and nothing else
+    return summary
+
+
 def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print) -> Summary:
     """Everything staging holds: identified, genred, converted, placed, normalized, tagged."""
     tools = tools or Tools()

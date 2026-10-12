@@ -65,6 +65,11 @@ def _build_parser() -> argparse.ArgumentParser:
                            help="a run by id; the newest unfinished one by default")
     importing.add_argument("--no-backup", action="store_true",
                            help="skip copying the collection first (not recommended)")
+
+    retag = commands.add_parser("retag", parents=[common],
+                                help="re-derive the genre on files already placed, replacing what they carry")
+    retag.add_argument("--job", default=None, metavar="ID",
+                       help="a run by id; the newest unfinished one by default")
     return parser
 
 
@@ -125,6 +130,29 @@ def _process(config: config_module.Config, args: argparse.Namespace) -> int:
     print(summary.report())
     if summary.ungenred:
         print(f"{len(summary.ungenred)} without a genre from the table — the working procedure decides those")
+    if summary.failed:
+        print(f"music-agent status --job {job.id}")
+    return 0
+
+
+def _retag(config: config_module.Config, args: argparse.Namespace) -> int:
+    """Re-derive the genre on tracks already placed, over whatever their files carry (the design notes)."""
+    job = _job(config, args)
+    if job is None:
+        print(f"nothing to re-tag: no run under {config.state_root}", file=sys.stderr)
+        return 1
+
+    try:
+        shelf = library.open(config)
+        vocabulary = genre.vocabulary(shelf.genres(), genre.approved())
+        tools = process.Tools.live(config, vocabulary=vocabulary, mappings=genre.table())
+    except (slsk.MissingCredential, library.Unreadable) as error:
+        print(error, file=sys.stderr)
+        return 1
+
+    summary = process.retag(config, job, tools=tools)
+    print()
+    print(summary.report())
     if summary.failed:
         print(f"music-agent status --job {job.id}")
     return 0
@@ -248,6 +276,8 @@ def main(argv: list[str] | None = None) -> int:
         return _acquire(config, args)
     if args.command == "process":
         return _process(config, args)
+    if args.command == "retag":
+        return _retag(config, args)
     if args.command == "import":
         return _import(config, args)
     return 2                                        # unreachable: the subparser requires a command

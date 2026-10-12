@@ -416,6 +416,49 @@ def test_a_service_that_fails_leaves_the_name_doing_the_work(tmp_path):
     assert written.album == "", "and nothing invented beyond it"
 
 
+# ── re-tagging what a changed table left behind ──────────────────────────────
+
+
+def test_a_re_tag_replaces_the_genre_the_file_already_carries(tmp_path):
+    """Ticket 24: the table moved under a tagged file, and a deliberate pass is what reaches the file."""
+    config = make_config(tmp_path)
+    config.lossless.mkdir(parents=True, exist_ok=True)
+    path = aiff(config.lossless / "Kiasmos - Blurred.aiff")
+    tag.write(path, tag.Tags(title="Blurred", artist="Kiasmos", genre="Pop"))
+    record = state.Record(idx=1, artist="Kiasmos", title="Blurred", local_path=str(path),
+                          status=state.TAGGED)
+    job = job_with(config, [record])
+    hearing, matches, brainz, discogs = identification(genres=("jazz",))
+    tools = process.Tools(hearing=hearing, matches=matches, brainz=brainz, discogs=discogs,
+                          vocabulary=["Jazz & Soul"], mappings={"jazz": "Jazz & Soul"})
+
+    summary = process.retag(config, job, tools=tools, log=lambda *_: None)
+
+    assert tag.read(path).genre == "Jazz & Soul", "written over the name the old table left"
+    assert job.records()[0].genre == "Jazz & Soul", "the record follows the file, as it does in a run"
+    assert summary.retagged == [1]
+
+
+def test_a_re_tag_that_resolves_to_nothing_takes_the_old_name_off(tmp_path):
+    """Ticket 24: the import reads the file, so a name the collection has not got has to come off."""
+    config = make_config(tmp_path)
+    config.lossless.mkdir(parents=True, exist_ok=True)
+    path = aiff(config.lossless / "Ivete Sangalo - Raiz.aiff")
+    tag.write(path, tag.Tags(title="Raiz", artist="Ivete Sangalo", genre="Baiuca;Galicia;Music"))
+    record = state.Record(idx=1, artist="Ivete Sangalo", title="Raiz", local_path=str(path),
+                          status=state.TAGGED)
+    job = job_with(config, [record])
+    hearing, matches, brainz, discogs = identification(styles=("krautrock",))
+    tools = process.Tools(hearing=hearing, matches=matches, brainz=brainz, discogs=discogs,
+                          vocabulary=["Jazz & Soul"], mappings={"jazz": "Jazz & Soul"})
+
+    summary = process.retag(config, job, tools=tools, log=lambda *_: None)
+
+    assert tag.read(path).genre == ""
+    assert summary.cleared == [1]
+    assert summary.retagged == []
+
+
 def test_a_name_that_fitted_nothing_is_recorded_so_it_can_be_counted(tmp_path):
     """Ticket 06: five tracks carrying a name that fits nothing is what turns it into a proposal."""
     config = make_config(tmp_path)
