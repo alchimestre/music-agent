@@ -310,6 +310,27 @@ def test_a_track_already_downloaded_is_not_fetched_again(tmp_path):
     assert job.records()[0].local_path == str(landed)
 
 
+def test_a_track_this_run_already_placed_and_tagged_is_not_searched_again(tmp_path):
+    """Ticket 09, one status further on. Until the import runs the collection still points at the lossy copy
+    being replaced, so the dedupe alone finds a finished track "not held" and re-downloads it, resetting the
+    status — which is how a retry pass left 43 placed and tagged records unimportable on 2026-10-12."""
+    config, job, server, calls = setup(tmp_path, results=GOOD)
+    placed = config.lossless / "Kiasmos - Blurred.aiff"
+    placed.parent.mkdir(parents=True, exist_ok=True)
+    placed.write_bytes(b"audio")
+    record = job.records()[0]
+    record.status = state.TAGGED
+    record.local_path = str(placed)
+    job.write_records([record])
+
+    with server:
+        summary, quiet = pass_once(config, job, server, Reference(), calls)
+
+    assert summary.already_downloaded == [1], quiet.lines
+    assert tools_called(calls) == [], "not even a search: the file it produced is right there"
+    assert job.records()[0].status == state.TAGGED, "and its status is left where it was"
+
+
 def test_a_later_pass_asks_only_for_peers_with_free_slots(tmp_path):
     """Ticket 04: peer attributes may scope a retry pass, and never the first one."""
     config, job, server, calls = setup(tmp_path, results=[])

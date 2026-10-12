@@ -337,6 +337,23 @@ def a_lossy_file(tmp_path: Path, name: str = "Kiasmos - Blurred.mp3") -> Path:
     return where
 
 
+def test_a_record_whose_row_already_points_at_its_file_is_left_alone(tmp_path):
+    """The delete at the end is what makes this worth refusing: repoint would write the path, then the file
+    it "replaced" would be removed, and the row would end up pointing at nothing at all."""
+    config = make_config(tmp_path)
+    record = tagged(tmp_path)
+    record.replaces = record.local_path                  # the pair nothing should ever produce
+    job = job_with(config, [record])
+    database = FakeDatabase()
+    database.content = [ContentRow(str(record.local_path))]
+
+    summary = importing.run(config, job, db=database, backup_first=False, log=quiet)
+
+    assert summary.failed == [record.idx]
+    assert summary.repointed == [] and summary.imported == []
+    assert Path(record.local_path).is_file(), "the file the delete would have taken is still here"
+
+
 def test_a_record_that_replaces_a_row_repoints_it_rather_than_adding(tmp_path):
     """Tickets 09 and 16: the upgrade keeps the row, so the cues, the playlists and the history it
     carries survive the swap."""
