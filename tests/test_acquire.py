@@ -516,6 +516,48 @@ def test_the_pass_works_on_several_tracks_at_once(tmp_path):
     assert len(job.records()) == 2
 
 
+# ── a network that stops answering (the design notes, second half, 2026-10-12) ──────────────────────────
+
+
+def test_a_run_of_empty_searches_is_a_network_that_has_gone_quiet():
+    quiet = acquire.QuietNetwork(limit=3)
+    for _ in range(3):
+        quiet.observe(0)
+
+    assert quiet.stopped.is_set()
+    assert quiet.tripped_at == 3
+
+
+def test_any_hit_resets_the_run_of_empty_searches():
+    """The count is *in a row*: the network answering once means it is answering, so the pass keeps going."""
+    quiet = acquire.QuietNetwork(limit=3)
+    for found in (0, 0, 7, 0, 0):
+        quiet.observe(found)
+
+    assert not quiet.stopped.is_set()
+    assert quiet.consecutive == 2
+
+
+def test_a_network_that_stops_answering_stops_the_pass(tmp_path):
+    """What this prevents, measured: on 2026-10-12 a pass spent 146 searches in a row against a silent network
+    and wrote 205 tracks down as *nothing usable* — a fact about the network, recorded as a fact about the
+    tracks. The invariant asserted here is the one that matters: every track is either searched or named."""
+    total = acquire.QUIET_AFTER + 12
+    config, job, server, calls = setup(tmp_path, results=[], tracks=total)
+
+    with server:
+        summary, quiet = pass_once(config, job, server, Reference(), calls)
+
+    searched = tools_called(calls).count("search")
+    assert acquire.QUIET_AFTER <= searched < acquire.QUIET_AFTER + config.workers, \
+        f"it stopped asking after {searched} searches"
+    assert len(summary.unsearched) + searched == total, "every track is searched or named, never dropped"
+    assert len(summary.nothing_usable) == searched, \
+        "the tracks that were searched found nothing and say so; the ones never asked say nothing at all"
+    assert any("stopped answering" in line for line in quiet.lines)
+    assert "network_quiet" in (config.state_root / job.id / "events.jsonl").read_text(encoding="utf-8")
+
+
 def test_searches_are_spaced_out_rather_than_fired_as_fast_as_the_loop_can(tmp_path):
     """Ticket 21. A pass asked for 330 searches in six minutes and everything after the first seconds came
     back empty — no error, no warning, and nothing in the child or in aioslsk that keeps to a rate or

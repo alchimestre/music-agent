@@ -70,6 +70,11 @@ def _build_parser() -> argparse.ArgumentParser:
                                 help="re-derive the genre on files already placed, replacing what they carry")
     retag.add_argument("--job", default=None, metavar="ID",
                        help="a run by id; the newest unfinished one by default")
+
+    reconcile = commands.add_parser("reconcile", parents=[common],
+                                    help="rebuild the run's records from the files it downloaded")
+    reconcile.add_argument("--job", default=None, metavar="ID",
+                           help="a run by id; the newest unfinished one by default")
     return parser
 
 
@@ -158,6 +163,24 @@ def _retag(config: config_module.Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def _reconcile(config: config_module.Config, args: argparse.Namespace) -> int:
+    """Rebuild the run's records from the files this run downloaded (the design notes)."""
+    job = _job(config, args)
+    if job is None:
+        print(f"nothing to reconcile: no run under {config.state_root}", file=sys.stderr)
+        return 1
+
+    try:
+        summary = process.reconcile(config, job)
+    except process.ProcessError as error:
+        print(error, file=sys.stderr)
+        return 1
+
+    print()
+    print(summary.report())
+    return 0
+
+
 def _acquire(config: config_module.Config, args: argparse.Namespace) -> int:
     if args.tracks is not None:
         requests = tracklist.read(args.tracks)
@@ -195,6 +218,8 @@ def _acquire(config: config_module.Config, args: argparse.Namespace) -> int:
     print(summary.report())
     if summary.in_review or summary.nothing_usable:
         print(f"music-agent status --job {job.id} --queue")
+    if summary.unsearched:
+        print("the network stopped answering part-way through — run this again when it is back")
     return 0
 
 
@@ -278,6 +303,8 @@ def main(argv: list[str] | None = None) -> int:
         return _process(config, args)
     if args.command == "retag":
         return _retag(config, args)
+    if args.command == "reconcile":
+        return _reconcile(config, args)
     if args.command == "import":
         return _import(config, args)
     return 2                                        # unreachable: the subparser requires a command

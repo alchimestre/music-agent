@@ -51,3 +51,8 @@ all, because a filter can remove the only peer holding a rare track. A **later p
 starts — is the one allowed to restrict itself to peers with free slots, and it moves on to candidates it
 has not asked before rather than repeating a question that was already answered. A track that fails
 across two passes is not retried again.
+
+A pass also stops early when the **network goes quiet**, and the distinction it rests on is the useful part: a
+search that comes back with nothing means a rare track, but fifty in a row means the network has stopped
+answering. The pass reports the tracks it never reached as **not searched** and leaves them as they were,
+rather than searching them into the same silence and calling the result a fact about the tracks.
