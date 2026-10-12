@@ -184,6 +184,16 @@ def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=pr
 
     replaced: list[Path] = []
     for record in tagged:
+        if record.replaces and Path(record.replaces) == Path(record.local_path):
+            # Nothing should produce this pair — a record whose row already points at the file this run
+            # produced. It did, once, from a repair that matched records to files by name across the whole
+            # library, and the cost is a live music file: repoint would write that path and the delete below
+            # would then remove it, leaving the row pointing at nothing. Refused rather than trusted.
+            record.notes = "the row already points at this file"
+            summary.failed.append(record.idx)
+            job.append_event("refused", idx=record.idx, reason="replaces == local_path")
+            log(f"[{record.idx}] {record.label}: the row already points at this file — left alone")
+            continue
         try:
             repointed = repoint(db, record, log) if record.replaces else False
             if not repointed:

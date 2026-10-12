@@ -295,8 +295,13 @@ def one(
     pacer: Pacer | None = None,
 ) -> str:
     """Acquire one track. Returns which of the summary's lists it belongs in."""
-    if record.status == state.DOWNLOADED and record.local_path and Path(record.local_path).is_file():
-        return "already_downloaded"
+    if record.local_path and Path(record.local_path).is_file():
+        # The file is the truth, not the status. A record this run has already placed — normalized, tagged
+        # or imported — must not be searched for again: until the import runs the collection still points at
+        # the lossy copy being replaced, so the dedupe alone finds it "not held", re-downloads it and resets
+        # the status, which is how 43 finished tracks became unimportable on 2026-10-12.
+        if record.status in {state.DOWNLOADED, state.NORMALIZED, state.TAGGED, state.IMPORTED}:
+            return "already_downloaded"
 
     if not record.candidates:
         # Ticket 13: resolved once, then written into the record — a resumed run never re-queries, and a
