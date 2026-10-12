@@ -180,7 +180,7 @@ def test_the_decision_to_wait_rotate_or_give_up(status, connection, on_disk, stu
 # ── the flow ─────────────────────────────────────────────────────────────────
 
 
-def test_a_download_that_lands_is_recorded_and_the_run_finishes(tmp_path):
+def test_a_download_that_lands_is_recorded_and_the_run_left_open(tmp_path):
     landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
     config, job, server, calls = setup(tmp_path, results=GOOD,
                                        download=f"downloading:transferring:90000:{landed}")
@@ -195,7 +195,7 @@ def test_a_download_that_lands_is_recorded_and_the_run_finishes(tmp_path):
     assert record.format == "flac"
     assert record.local_path == str(landed)
     assert record.tried == ["peerA:Music\\Kiasmos - Blurred.flac"]
-    assert job.finished()
+    assert not job.finished(), "the import finishes a run, not this stage"
     assert "download" in tools_called(calls)
 
 
@@ -335,7 +335,7 @@ def test_a_track_the_library_already_holds_is_not_even_searched(tmp_path):
     assert record.status == state.FOUND_IN_LIBRARY
     assert record.local_path == ""
     assert tools_called(calls) == [], "an already-held track should not have been searched for"
-    assert job.finished()
+    assert not job.finished(), "the import finishes a run, not this stage"
 
 
 def test_a_track_the_library_holds_at_another_length_is_still_fetched(tmp_path):

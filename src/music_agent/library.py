@@ -84,16 +84,41 @@ class Library:
         return sum(len(rows) for rows in self._by_key.values())
 
 
-def seconds_of(path: Path) -> int | None:
-    """A file's length, read from its header. Absent when it cannot be read at all."""
+@dataclass(frozen=True)
+class Sound:
+    """What a header says about a file, which is all the import needs of it."""
+
+    seconds: int | None = None
+    sample_rate: int | None = None
+    bit_rate: int | None = None
+
+
+def sound_of(path: Path) -> Sound:
+    """A file's length, sample rate and bit rate, read from its header.
+
+    Read rather than measured: the import writes these into the collection, and a header costs about a
+    millisecond where decoding the audio would cost a great deal more.
+    """
     from mutagen import File as MutagenFile
 
     try:
         audio = MutagenFile(path)
-        length = getattr(getattr(audio, "info", None), "length", None)
+        info = getattr(audio, "info", None)
     except Exception:
-        return None
-    return round(length) if length else None
+        return Sound()
+    if info is None:
+        return Sound()
+    seconds = getattr(info, "length", None)
+    return Sound(
+        seconds=round(seconds) if seconds else None,
+        sample_rate=getattr(info, "sample_rate", None),
+        bit_rate=getattr(info, "bitrate", None),
+    )
+
+
+def seconds_of(path: Path) -> int | None:
+    """A file's length alone, for the places that want nothing else."""
+    return sound_of(path).seconds
 
 
 def read_database() -> tuple[list[Held], list[str]]:

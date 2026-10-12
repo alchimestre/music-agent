@@ -346,6 +346,6 @@ def run(
         job.write_records(records)          # a crash costs the current track and nothing else
 
     job.write_status(config)
-    if not summary.failed:
-        job.finish()
+    # Deliberately not finished: the pipeline ends at the import, so `acquire` and `process` leave the run
+    # open and the next command picks the same one up without being told which (the design notes).
     return summary
