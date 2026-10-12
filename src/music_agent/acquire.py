@@ -26,7 +26,7 @@ from pathlib import Path
 
 from . import reference, rules, slsk, state
 from .config import Config
-from .library import Library
+from .library import Held, Library
 from .mcp import ServerError, StdioServer
 from .parsing import search_query
 from .reference import Lookup
@@ -260,17 +260,40 @@ def one(
         log(f"[{record.idx}] {record.label}: "
             + (f"reference {seconds}s" if seconds else "no MusicBrainz reference — review only"))
 
-    # Ticket 09: nothing is fetched that the collection already holds. This is asked before the search, so
-    # a track already in the library never costs a request either.
+    # Ticket 09: nothing is fetched that the collection already holds — unless the copy it holds is lossy
+    # and a lossless one can be had. That is what an upgrade is, and it is asked before the search so a
+    # track already held costs no request either.
+    upgrade: Held | None = None
     if library is not None:
-        found = library.held(record.artist, record.title, record.duration_s)
-        if found is not None:
+        held = library.held(record.artist, record.title, record.duration_s)
+        if held is None:
+            # The length may be the only reason that missed, and for an upgrade there may be no
+            # MusicBrainz length at all. So the name is asked on its own, and a lossy copy found that way
+            # is the reference: the same track by definition, with a length measurable here and now.
+            for row in library.rows_for(record.artist, record.title):
+                if not row.lossless and row.seconds is not None:
+                    held = row
+                    break
+        if held is not None and held.lossless:
             record.status = state.FOUND_IN_LIBRARY
-            record.notes = f"already held at {found.path}" if found.path else "already held"
-            job.append_event("already_held", idx=record.idx, path=found.path, genre=found.genre)
+            record.notes = f"already held at {held.path}" if held.path else "already held"
+            job.append_event("already_held", idx=record.idx, path=held.path, genre=held.genre)
             log(f"[{record.idx}] {record.label}: already in the library"
-                + (f" — {found.path}" if found.path else ""))
+                + (f" — {held.path}" if held.path else ""))
             return "already_held"
+        if held is not None:
+            # Held, but only as a lossy copy: that is an upgrade rather than a reason to skip (the design notes),
+            # and the lane is what decides it — not whether the lookup happened to match.
+            upgrade = held
+            record.replaces = held.path
+            if record.duration_s is None:
+                record.duration_s = held.seconds
+                job.append_event("reference", idx=record.idx, seconds=held.seconds,
+                                 from_="the copy in the collection")
+                log(f"[{record.idx}] {record.label}: reference {held.seconds}s, from the copy in the "
+                    "collection — MusicBrainz has nothing for this one")
+            else:
+                log(f"[{record.idx}] {record.label}: held as a lossy copy — looking for a lossless one")
 
     added = merge(record, search(server, record, later_pass=later_pass))
     job.append_event("searched", idx=record.idx, added=added, offered=len(record.candidates))
@@ -288,6 +311,15 @@ def one(
          if identifier(verdict.candidate) not in tried),
         key=rules.rank,
     )
+    if upgrade is not None:
+        # Ticket 09: a lossless copy is strictly better than the lossy one held; a lossy copy is not better
+        # than what the user already has, so only the better lane is worth fetching.
+        queue = [candidate for candidate in queue if candidate.lossless]
+        if not queue:
+            record.status = state.PENDING
+            job.append_event("no_upgrade_offered", idx=record.idx, replaces=upgrade.path)
+            log(f"[{record.idx}] {record.label}: nothing lossless offered — the copy the user has stands")
+            return "in_review"
 
     for candidate in queue[:MAX_CANDIDATES]:
         record.tried.append(identifier(candidate))
@@ -299,6 +331,13 @@ def one(
             record.status = state.DOWNLOADED
             job.append_event("downloaded", idx=record.idx, path=local_path,
                              peer=candidate.user, size=candidate.size_bytes)
+            if upgrade is not None:
+                record.notes = f"upgrades {upgrade.path}"
+                job.append_event("upgrade_downloaded", idx=record.idx, replaces=upgrade.path,
+                                 path=local_path)
+                log(f"[{record.idx}] {record.label}: a lossless copy from {candidate.user} → {local_path}"
+                    f"  (replacing the lossy one at import)")
+                return "downloaded"
             log(f"[{record.idx}] {record.label}: from {candidate.user} → {local_path}")
             return "downloaded"
 

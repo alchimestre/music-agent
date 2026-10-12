@@ -318,6 +318,76 @@ def test_a_later_pass_asks_only_for_peers_with_free_slots(tmp_path):
     assert searches[1]["free_slots_only"] is True
 
 
+class Nothing:
+    """A reference that resolves nothing, the way a white-label does."""
+
+    def find(self, query, limit=25):
+        return []
+
+
+LOSSY_ONLY = [
+    {
+        "id": "peerA:Music\\Kiasmos - Blurred.m4a",
+        "username": "peerA",
+        "filename": "Music\\Kiasmos - Blurred.m4a",
+        "extension": "m4a",
+        "bitrate": 320,
+        "duration_sec": 449,
+        "queue_size": 0,
+    }
+]
+
+
+def held_lossy(tmp_path):
+    """The collection holding this track, but only as a lossy copy."""
+    return library.Library(
+        [library.Held("Kiasmos", "Blurred", 449, path=str(tmp_path / "Losy Tracks" / "Kiasmos - Blurred.mp3"))],
+        [],
+    )
+
+
+def test_a_lossy_copy_held_is_an_upgrade_not_a_skip(tmp_path):
+    """Ticket 09: a lossy copy does not make a track held, when a lossless one can be had."""
+    landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
+    config, job, server, calls = setup(tmp_path, results=GOOD,
+                                       download=f"downloading:transferring:90000:{landed}")
+    landed.write_bytes(b"the lossless one")
+
+    with server:
+        summary, quiet = pass_once(config, job, server, Reference(), calls, shelf=held_lossy(tmp_path))
+
+    record = job.records()[0]
+    assert summary.downloaded == [1], quiet.lines
+    assert record.replaces.endswith("Kiasmos - Blurred.mp3")
+    assert "upgrades" in record.notes
+
+
+def test_the_copy_in_the_collection_is_the_reference_when_musicbrainz_has_none(tmp_path):
+    """Ticket 13 governs a bare tracklist; this is not one. Four of five of the user's lossy tracks have no
+    MusicBrainz recording at all, and the copy in hand is the same track by definition."""
+    landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
+    config, job, server, calls = setup(tmp_path, results=GOOD,
+                                       download=f"downloading:transferring:90000:{landed}")
+    landed.write_bytes(b"the lossless one")
+
+    with server:
+        summary, quiet = pass_once(config, job, server, Nothing(), calls, shelf=held_lossy(tmp_path))
+
+    assert summary.downloaded == [1], quiet.lines
+    assert job.records()[0].duration_s == 449, "the held file's own length"
+
+
+def test_a_lossy_candidate_is_not_an_upgrade(tmp_path):
+    """A lossy copy is not better than the lossy copy the user already has."""
+    config, job, server, calls = setup(tmp_path, results=LOSSY_ONLY)
+
+    with server:
+        summary, quiet = pass_once(config, job, server, Reference(), calls, shelf=held_lossy(tmp_path))
+
+    assert summary.in_review == [1], quiet.lines
+    assert "download" not in tools_called(calls)
+
+
 def test_a_track_the_library_already_holds_is_not_even_searched(tmp_path):
     """Ticket 09: nothing is fetched that the collection holds. It is asked before the search, so an
     already-held track costs no request at all — which is exactly what the first smoke run showed it

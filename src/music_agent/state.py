@@ -86,6 +86,9 @@ class Record:
     local_path: str = ""
     format: str = ""
     genre: str = ""
+    # An upgrade: the path of the file in the collection this one is to replace (the design notes). Empty for a
+    # track that is simply new.
+    replaces: str = ""
     notes: str = ""
     candidates: list[Candidate] = field(default_factory=list)
     # The candidates we have already asked a peer for, as `user:path`. Recorded so a retry pass moves on
