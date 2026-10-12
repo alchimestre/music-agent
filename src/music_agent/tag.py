@@ -114,17 +114,23 @@ def read(path: Path) -> Tags:
     )
 
 
-def write(path: Path, tags: Tags, *, log=lambda *_: None) -> list[str]:
-    """Set the frames this project owns. Returns the names of the ones that changed something."""
+def write(path: Path, tags: Tags, *, replace_genre: bool = False, log=lambda *_: None) -> list[str]:
+    """Set the frames this project owns. Returns the names of the ones that changed something.
+
+    `replace_genre` is the deliberate act the design notes withholds from a run. A run never replaces a genre,
+    because a genre cannot be undone after import; `music-agent retag` passes this, and when the tags carry
+    no genre at all it takes an existing one *off* rather than leaving a name the collection has not got,
+    which is what the import would mint a row for.
+    """
     suffix = path.suffix.lower()
     if suffix in {".aiff", ".aif", ".mp3"}:
-        return _write_id3(path, tags)
+        return _write_id3(path, tags, replace_genre=replace_genre)
     if suffix in {".m4a", ".mp4"}:
-        return _write_mp4(path, tags)
-    return _write_vorbis(path, tags, log)
+        return _write_mp4(path, tags, replace_genre=replace_genre)
+    return _write_vorbis(path, tags, replace_genre=replace_genre, log=log)
 
 
-def _write_id3(path: Path, tags: Tags) -> list[str]:
+def _write_id3(path: Path, tags: Tags, *, replace_genre: bool = False) -> list[str]:
     from mutagen import File as MutagenFile
     from mutagen.id3 import TALB, TCON, TDRC, TIT2, TPE1, TPE2, TPUB, TXXX, UFID
 
@@ -137,9 +143,12 @@ def _write_id3(path: Path, tags: Tags) -> list[str]:
         audio.add_tags()
 
     written = []
+    if replace_genre and "genre" not in tags.filled() and "TCON" in audio.tags:
+        del audio.tags["TCON"]                  # nothing resolves now: take the old name off (the design notes)
+        written.append("genre")
     for name, value in tags.filled().items():
         if name in _ID3_FRAMES:
-            if name == "genre" and "TCON" in audio.tags:
+            if name == "genre" and not replace_genre and "TCON" in audio.tags:
                 continue                        # the design notes: an existing genre is never replaced
             audio.tags[_ID3_FRAMES[name]] = frames[_ID3_FRAMES[name]](encoding=3, text=[value])
             written.append(name)
@@ -154,7 +163,7 @@ def _write_id3(path: Path, tags: Tags) -> list[str]:
     return written
 
 
-def _write_mp4(path: Path, tags: Tags) -> list[str]:
+def _write_mp4(path: Path, tags: Tags, *, replace_genre: bool = False) -> list[str]:
     from mutagen.mp4 import MP4, MP4FreeForm
 
     audio = MP4(path)
@@ -162,9 +171,12 @@ def _write_mp4(path: Path, tags: Tags) -> list[str]:
         audio.add_tags()
 
     written = []
+    if replace_genre and "genre" not in tags.filled() and "\xa9gen" in audio.tags:
+        del audio.tags["\xa9gen"]               # the design notes, as above
+        written.append("genre")
     for name, value in tags.filled().items():
         if name in _MP4_ATOMS:
-            if name == "genre" and "\xa9gen" in audio.tags:
+            if name == "genre" and not replace_genre and "\xa9gen" in audio.tags:
                 continue                        # the design notes, as above
             audio.tags[_MP4_ATOMS[name]] = [value]
             written.append(name)
@@ -176,7 +188,7 @@ def _write_mp4(path: Path, tags: Tags) -> list[str]:
     return written
 
 
-def _write_vorbis(path: Path, tags: Tags, log) -> list[str]:
+def _write_vorbis(path: Path, tags: Tags, *, replace_genre: bool = False, log=lambda *_: None) -> list[str]:
     """Everything else the library holds — an ogg, an opus, a flac that never needed converting.
 
     The generic interface writes the ordinary fields and not the ids, which is a smaller cache than the
@@ -194,10 +206,13 @@ def _write_vorbis(path: Path, tags: Tags, log) -> list[str]:
     keys = {"title": "title", "artist": "artist", "album": "album", "album_artist": "albumartist",
             "year": "date", "genre": "genre", "catalog_number": "catalognumber", "label": "label"}
     written = []
+    if replace_genre and "genre" not in tags.filled() and "genre" in audio.tags:
+        del audio.tags["genre"]                 # the design notes, as above
+        written.append("genre")
     for name, value in tags.filled().items():
         if name not in keys:
             continue
-        if name == "genre" and "genre" in audio.tags:
+        if name == "genre" and not replace_genre and "genre" in audio.tags:
             continue
         audio.tags[keys[name]] = [value]
         written.append(name)

@@ -191,6 +191,30 @@ def test_a_format_no_tagger_knows_is_refused(tmp_path):
         tag.write(path, everything())
 
 
+def test_a_deliberate_replacement_is_what_retag_asks_for(tmp_path):
+    """Ticket 24: a run never replaces a genre, so the act of changing one has to be asked for by name."""
+    from mutagen.aiff import AIFF
+
+    path = aiff(tmp_path / "Blurred.aiff")
+    tag.write(path, tag.Tags(genre="Ambient / Experimental"))
+    written = tag.write(path, tag.Tags(genre="Techno"), replace_genre=True)
+
+    assert "genre" in written
+    assert str(AIFF(path).tags["TCON"]) == "Techno"
+
+
+def test_a_deliberate_replacement_with_nothing_takes_the_frame_off(tmp_path):
+    """The old name is one the collection has not got, and the import would mint a row for it."""
+    from mutagen.aiff import AIFF
+
+    path = aiff(tmp_path / "Blurred.aiff")
+    tag.write(path, tag.Tags(genre="Baiuca;Galicia;Music"))
+    written = tag.write(path, tag.Tags(title="Blurred"), replace_genre=True)
+
+    assert "genre" in written
+    assert "TCON" not in AIFF(path).tags
+
+
 def test_writing_twice_changes_nothing_the_second_time(tmp_path):
     path = aiff(tmp_path / "Blurred.aiff")
     tag.write(path, everything())
