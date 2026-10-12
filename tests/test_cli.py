@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from music_agent import config as config_module
-from music_agent import state
+from music_agent import library, state
 from music_agent.cli import main
 from music_agent.rules import Candidate
 
@@ -126,3 +126,37 @@ def test_a_name_on_too_few_tracks_is_not_put_to_him(tmp_path, capsys):
     main(["--config", str(config_path), "status", "--queue"])
 
     assert "to become a genre" not in capsys.readouterr().out
+
+
+def test_the_genres_to_choose_between_are_printed_with_the_tracks_that_need_one(tmp_path, capsys,
+                                                                               monkeypatch):
+    """The genre is the one judgement left to a model, and it has to be made among the collection's own
+    genres — so they are printed beside the tracks waiting for one."""
+    config_path = make_config(tmp_path)
+    config = config_module.load(config_path)
+    job = state.create(config, "run")
+    job.write_records([state.Record(idx=1, artist="Kiasmos", title="Blurred",
+                                    status=state.TAGGED, genre="")])
+    shelf = library.Library([], ["Techno", "Jazz"])
+    monkeypatch.setattr(library, "open", lambda config: shelf)
+
+    main(["--config", str(config_path), "status", "--queue"])
+
+    out = capsys.readouterr().out
+    assert "waiting on a genre" in out
+    assert "Jazz" in out and "Techno" in out, "the vocabulary the choice is made from"
+
+
+def test_the_collection_is_not_opened_when_no_track_needs_a_genre(tmp_path, monkeypatch):
+    """Status is a display command; the database is asked only when there is a judgement to make."""
+    config_path = make_config(tmp_path)
+    config = config_module.load(config_path)
+    job = state.create(config, "run")
+    job.write_records([state.Record(idx=1, artist="Kiasmos", title="Blurred",
+                                    status=state.TAGGED, genre="Techno")])
+
+    def never(config):
+        raise AssertionError("the collection was read for nothing")
+
+    monkeypatch.setattr(library, "open", never)
+    assert main(["--config", str(config_path), "status", "--queue"]) == 0
