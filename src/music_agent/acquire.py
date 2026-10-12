@@ -6,7 +6,7 @@ is on disk or the candidate is hopeless. the user, 2026-10-12: `workers` of thos
 threads — nearly all of a track's time is spent waiting, and the server's ceiling on transfers, not our
 loop, is what decides how many files move together.
 
-Four things are worth reading the code for.
+Five things are worth reading the code for.
 
 - **The disk decides, never the status.** The server drops a finished record sixty seconds after
   completion, so a later poll answers `not_found` about a download that in fact succeeded (the design notes).
@@ -17,6 +17,10 @@ Four things are worth reading the code for.
   45-second timer that a stalled connection earns (the design notes).
 - **A transfer in flight is never rotated on that timer either.** Bytes are the signal: only a transfer
   that has stopped moving bytes for minutes is dead.
+- **Searches are paced, and the pace is ours.** The network answers searches at a rate, nothing below us
+  keeps to it, and nothing below us says when it has stopped answering at all — a throttled search and a
+  rare track are the same empty payload (the design notes). So the pass spaces its own searches out and says what
+  the pace is; the overlap the child allows is a consequence of that rate, never the target.
 """
 
 from __future__ import annotations
@@ -38,12 +42,19 @@ from .rules import Candidate
 
 # Seconds to let peers answer a search, and how many results to ask for. Ticket 03: results are sorted and
 # truncated server-side, so a small cap discards good candidates before we ever see them.
-SEARCH_TIMEOUT = 7          # the server's own floor and default; the window is what peers answer within
+SEARCH_TIMEOUT = 12         # the child sleeps exactly this long after the query goes out, so it is how long
+                            # a peer has to answer at all. Seven had been taken as the child's own floor, and
+                            # discarded peers answering at second ten; the design notes: with the pace below
+                            # deciding how much searching happens at once, a generous window costs nothing.
 CALL_TIMEOUT = 15.0         # the user, 2026-10-12: a minute waiting on one track is too long
 MAX_RESULTS = 60
 
-# Ticket 04: candidates attempted per track, per pass.
-MAX_CANDIDATES = 3
+# Ticket 22: candidates attempted per track, per pass. Three was the, chosen when a pass was bound
+# by its workers — so one track's bad luck could not be allowed to spend the pass. What a pass costs now is
+# the searching (the pace), not the attempting, so an untried candidate is only a peer that may be
+# gone by a later pass: 38 Ready ones were left that way in a single 2026-10-12 pass. Ten rather than
+# unbounded, because the budgets below still bound a track's total time.
+MAX_CANDIDATES = 10
 
 # Ticket 04: a connection that never transferred a byte is rotated after 45 seconds.
 CONNECT_BUDGET = 45.0
@@ -169,6 +180,34 @@ class Summary:
         return " · ".join(parts)
 
 
+class Pacer:
+    """Let searches start no more often than `interval` seconds apart.
+
+    Ticket 21: the network answers searches at a rate, and nothing between this loop and it keeps to that
+    rate — the child fires whatever it is handed, and neither it nor aioslsk reports a search being ignored.
+    So the pace is kept here. It is a gap between two searches rather than a cap on how many run at once,
+    because the open searches are only a consequence: at five seconds a search, a twelve-second window
+    leaves about two open, and the child's own ceiling never binds.
+    """
+
+    def __init__(self, interval: float, *, clock=time.monotonic, sleep=time.sleep) -> None:
+        self._interval = interval
+        self._clock = clock
+        self._sleep = sleep
+        self._lock = threading.Lock()
+        self._earliest: float | None = None      # when the next search may start
+
+    def wait(self) -> None:
+        """Hold this call back until its search may start."""
+        with self._lock:
+            now = self._clock()
+            start = now if self._earliest is None else max(now, self._earliest)
+            self._earliest = start + self._interval
+            delay = start - now
+        if delay > 0:
+            self._sleep(delay)
+
+
 def search(server: StdioServer, record: state.Record, *, later_pass: bool) -> list[Candidate]:
     """Ask the server, and read back what it offered.
 
@@ -253,6 +292,7 @@ def one(
     sleep,
     clock,
     later_pass: bool,
+    pacer: Pacer | None = None,
 ) -> str:
     """Acquire one track. Returns which of the summary's lists it belongs in."""
     if record.status == state.DOWNLOADED and record.local_path and Path(record.local_path).is_file():
@@ -302,6 +342,8 @@ def one(
             else:
                 log(f"[{record.idx}] {record.label}: held as a lossy copy — looking for a lossless one")
 
+    if pacer is not None:
+        pacer.wait()                            # the design notes: the network's rate, never the loop's
     added = merge(record, search(server, record, later_pass=later_pass))
     job.append_event("searched", idx=record.idx, added=added, offered=len(record.candidates))
 
@@ -396,9 +438,18 @@ def run(
     the user, 2026-10-12: one track at a time is nonsense. A track spends nearly all of its time waiting —
     on MusicBrainz, on a search window, on a peer's queue — so the waiting overlaps instead of queueing,
     and the server's own ceiling on transfers is what decides how many files actually move at once.
+
+    Ticket 21: the searching does not overlap freely, though. What is parallel here is the transfers and
+    the waiting on them; searches go out at `config.search_interval`, because that rate is the network's
+    and not this loop's.
     """
     records = job.records()
     summary = Summary()
+
+    # Ticket 21: the network's rate on searching, and ours to keep. Zero is the loop's own speed, which is
+    # worth having only for a tracklist too small for the rate to matter.
+    pacer = (Pacer(config.search_interval, clock=clock, sleep=sleep)
+             if config.search_interval > 0 else None)
 
     # One track's story stays readable while others are running, so lines are printed under a lock.
     printing = threading.Lock()
@@ -411,7 +462,7 @@ def run(
         later_pass = retry or bool(record.candidates)
         try:
             outcome = one(job, record, server, lookup, library=library, log=say, sleep=sleep,
-                          clock=clock, later_pass=later_pass)
+                          clock=clock, later_pass=later_pass, pacer=pacer)
         except (slsk.ToolError, ServerError) as error:
             record.status = state.RETRY_LATER
             outcome = "failed"
@@ -422,6 +473,9 @@ def run(
 
     if records:
         lookup = one_at_a_time(lookup)
+        if pacer is not None:
+            say(f"one search every {config.search_interval:g}s"
+                " — the network's rate, not this loop's (the design notes)")
         with ThreadPoolExecutor(max_workers=max(1, config.workers)) as pool:
             list(pool.map(work, records))
 
