@@ -100,6 +100,14 @@ and can be checked against it. A lossy offer is never an upgrade — a second lo
 first — and an offer whose length cannot be verified buys nothing worth a question, because the alternative is
 a copy that already works. Both are ruled out rather than shown. An upgrade is `Record.replaces`.
 
+## Duplicate
+
+Two rows in the collection for one track: the same folded artist, title and mix, with lengths inside the
+pipeline's one-second window (the identity, so two mixes of one title are never one track). A hand
+import leaves them, usually beside the lossy copy the pipeline had already upgraded. `music-agent dedupe`
+merges them — the row holding the better copy survives, what the other held moves onto it, and the redundant
+file leaves the lanes rather than being deleted.
+
 ## Repoint
 
 Pointing an entry that describes a file a run replaced at the file it made instead, rather than removing the

@@ -33,7 +33,6 @@ set -a; source .env; set +a
 Commands in the order a run uses them. Each one works on the same run, so they are typed in sequence.
 
 ```
-music-agent playlist <URL> --out <file>         # a public Spotify playlist, written as a tracklist
 music-agent acquire --tracks <file|URL>         # search and download into staging
 music-agent status --queue                      # what the run has not settled, and why
 music-agent review                              # the queue as text, for the caller to put to the user
@@ -42,6 +41,7 @@ music-agent retag                               # re-derive the genre on files a
 music-agent reconcile                           # rebuild the records from the files this run made
 music-agent status --files                      # files nothing points at, and rows whose file is gone
 music-agent import                              # into rekordbox, which must be closed first
+music-agent dedupe                              # one row per track; dry run, --apply merges
 ```
 
 `acquire` and `process` take hours on a long tracklist. `review`, `status` and `import` take seconds.
@@ -49,6 +49,13 @@ music-agent import                              # into rekordbox, which must be 
 **Traktor's collection is not this project's business.** It has no database and no API — its collection is one
 XML file — and it is reconciled by `~/projects/traktor-nml`, which reads this project's job state as data to
 learn which file replaced which. `traktor-nml apply` after an acquisition, with Traktor closed.
+
+**One row per track: `music-agent dedupe`.** A hand import can leave a second row beside a track the
+collection already held — usually the lossy copy the pipeline later upgraded — and this merges them. The row
+holding the better copy survives (lossless beats lossy; then the one the library has used; then the measured
+one; then the older), everything the other still held moves onto it (playlist lines, plays, My Tags, cues),
+and the redundant file leaves the lanes for `paths.duplicates` rather than being deleted. It is a dry run until
+`--apply`, and what it leaves behind in Traktor is a dead entry: `traktor-nml purge` takes those out.
 
 ## The queue
 

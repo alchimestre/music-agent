@@ -12,7 +12,8 @@ from music_agent.rules import Candidate
 
 def make_config(tmp_path: Path):
     path = tmp_path / "config.toml"
-    path.write_text('[paths]\nstate = "state"\n', encoding="utf-8")
+    path.write_text('[paths]\nstate = "state"\n'
+                    'lossless = "lossless"\nlossy = "lossy"\n', encoding="utf-8")
     return config_module.load(path)
 
 

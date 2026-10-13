@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import sys
+from argparse import Namespace
 from pathlib import Path
 
 from audio_files import aiff
 
 from music_agent import cli as cli_module
 from music_agent import config as config_module
-from music_agent import library, state
+from music_agent import library, spotify, state
 from music_agent.cli import main
 from music_agent.mcp import StdioServer
 from music_agent.rules import Candidate
@@ -29,7 +30,8 @@ EMPTY = state.Record(idx=3, artist="Sven Wunder", title="Lotus", duration_s=260,
 
 def make_config(tmp_path: Path) -> Path:
     path = tmp_path / "config.toml"
-    path.write_text('[paths]\nstate = "state"\n', encoding="utf-8")
+    path.write_text('[paths]\nstate = "state"\n'
+                    'lossless = "lossless"\nlossy = "lossy"\n', encoding="utf-8")
     return path
 
 
@@ -419,3 +421,56 @@ def test_accepting_carries_the_record_on_to_process(tmp_path, capsys, monkeypatc
     assert record.local_path == str(landed)
     assert "accepted" in out
     assert "music-agent process" in out, "the next command is the useful thing to say"
+
+
+def test_a_playlist_url_starts_the_run_a_file_would_have(tmp_path, monkeypatch):
+    """the user, 2026-10-13: *I'd rather pass a playlist url the same way I pass a file.* So `--tracks` takes
+    both, and what a file's stem gave the run a playlist's own name gives it."""
+    config = config_module.load(make_paths_config(tmp_path))
+    monkeypatch.setattr(cli_module.spotify, "playlist",
+                        lambda source, timeout=None: spotify.Playlist(
+                            name="Rock Classics",
+                            lines=("Kiasmos - Blurred", "Ntogn - Ame No Hi (Original Mix)")))
+
+    job = cli_module._start(config, Namespace(
+        tracks="https://open.spotify.com/playlist/37i9dQZF1DWXRqgorJj26U?si=12ab", name=None))
+
+    assert job.id.endswith("-rock-classics")
+    assert [(record.artist, record.title, record.mix) for record in job.records()] == [
+        ("Kiasmos", "Blurred", ""), ("Ntogn", "Ame No Hi", "Original Mix")]
+
+
+def test_a_file_still_starts_its_run_the_way_it_always_did(tmp_path):
+    """The path branch is the one that was there first, and a URL is not allowed to disturb it."""
+    config = config_module.load(make_paths_config(tmp_path))
+    tracklist = tmp_path / "Kiasmos - Blurred.txt"
+    tracklist.write_text("Kiasmos - Blurred\n", encoding="utf-8")
+
+    job = cli_module._start(config, Namespace(tracks=str(tracklist), name=None))
+
+    assert job.id.endswith("-kiasmos-blurred")
+    assert [(record.artist, record.title) for record in job.records()] == [("Kiasmos", "Blurred")]
+
+
+def test_a_playlist_that_cannot_be_read_starts_nothing(tmp_path, monkeypatch, capsys):
+    """A refused playlist has to arrive as what Spotify said, and it must not leave a run behind."""
+    config = config_module.load(make_paths_config(tmp_path))
+
+    def refuse(source, timeout=None):
+        raise spotify.PlaylistError("Spotify answered 400 for /api/token: Unauthorized request")
+
+    monkeypatch.setattr(cli_module.spotify, "playlist", refuse)
+
+    assert cli_module._start(config, Namespace(
+        tracks="https://open.spotify.com/playlist/37i9dQZF1DWXRqgorJj26U", name=None)) is None
+    assert "400" in capsys.readouterr().err
+    assert not list((tmp_path / "state").glob("*")), "nothing is started for a playlist nobody could read"
+
+
+def test_a_tracklist_that_cannot_be_read_says_so(tmp_path, capsys):
+    """A path with a typo in it is the likeliest way this command is ever wrong, and it has to read like the
+    playlist refusal beside it rather than like a traceback."""
+    config = config_module.load(make_paths_config(tmp_path))
+
+    assert cli_module._start(config, Namespace(tracks=str(tmp_path / "nope.txt"), name=None)) is None
+    assert f"cannot read {tmp_path / 'nope.txt'}" in capsys.readouterr().err
