@@ -97,3 +97,58 @@ def test_the_ceilings_on_concurrency_reach_the_child(tmp_path, monkeypatch):
     assert env["SLSK_MAX_CONCURRENT_DL"] == "20"
     assert env["SLSK_MAX_CONCURRENT_SEARCH"] == "8"
     assert env["SLSK_MAX_CONCURRENT_OPS"] == "8"
+
+
+def test_the_wall_of_peer_refusals_is_counted_rather_than_printed():
+    """2026-10-13: aioslsk logs one warning per peer it could not connect to. They arrive by the dozen,
+    none of them is actionable, and one refused peer is one candidate that cannot be served."""
+    said = []
+    logs = slsk.ChildLog(log=said.append)
+    wall = (
+        "WARNING:aioslsk.network.network:failed to fulfill ConnectToPeer request : "
+        "ConnectToPeer.Response(username='oyeattache', typ='P', ip='68.54.115.113', port=62749, ticket=14174,"
+        " privileged=False, obfuscated_port_amount=1, obfuscated_port=62750) : "
+        "PeerConnectionError('failed connect on user request')"
+    )
+
+    for _ in range(12):
+        logs(wall)
+    assert said == []
+
+    logs.report()
+    assert said == ["slsk: 12 peer connections refused — the network, not the run"]
+
+
+def test_a_traceback_keeps_its_exception_and_loses_its_frames():
+    """2026-10-13: one discarded response made aioslsk log an ERROR and five lines of frames."""
+    said = []
+    logs = slsk.ChildLog(log=said.append)
+
+    for line in [
+        "ERROR:aioslsk.network.connection:[server.slsknet.org:2416] error during callback : "
+        "GetPeerAddress.Response(username='Kalesony', ip='77.236.3.89', port=49488)",
+        "Traceback (most recent call last):",
+        '  File "/home/user/.cache/uv/archive-v0/oZfObPwQF1g5rGWw/lib/python3.13/site-packages/'
+        'aioslsk/network/connection.py", line 550, in _perform_message_callback',
+        "    await self.network.on_message_received(message, self)",
+        "asyncio.InvalidStateError: invalid state",
+    ]:
+        logs(line)
+
+    assert len(said) == 2
+    assert said[0].startswith("slsk: ERROR:aioslsk.network.connection")
+    assert said[1] == "slsk: asyncio.InvalidStateError: invalid state (frames suppressed)"
+
+
+def test_the_line_that_says_the_network_went_quiet_survives_the_filter():
+    """Ticket 21 leans on that one line, so nothing may swallow it — and indentation alone is not a frame."""
+    said = []
+    logs = slsk.ChildLog(log=said.append)
+
+    logs("INFO:aioslsk.network.network:Search complete: 0 raw results")
+    logs("    an indented line that is not a traceback")
+
+    assert said == [
+        "slsk: INFO:aioslsk.network.network:Search complete: 0 raw results",
+        "slsk:     an indented line that is not a traceback",
+    ]

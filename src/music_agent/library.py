@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import Config
-from .parsing import fold, parse_filename
+from .parsing import bare_title, extract_mix, fold, parse_filename
 from .rules import AUDIO_EXTENSIONS, DURATION_WINDOW, LOSSLESS_EXTENSIONS
 
 
@@ -23,13 +23,19 @@ class Unreadable(RuntimeError):
 
 @dataclass(frozen=True)
 class Held:
-    """One track the collection holds, whether from the database or from the directories."""
+    """One track the collection holds, whether from the database or from the directories.
+
+    `title` is the bare title and `mix` the version beside it, the same split the tracklist reader makes of a
+    request — the two sides are looked up against each other by name, so a row titled `Galbi (feat Leïla
+    Koumiya)` and a request titled `Galbi` have to arrive at the same key (2026-10-13).
+    """
     artist: str
     title: str
     seconds: int | None = None
     path: str = ""
     genre: str = ""
     content_id: int | None = None
+    mix: str = ""
 
     @property
     def key(self) -> tuple[str, str]:
@@ -146,7 +152,8 @@ def read_database() -> tuple[list[Held], list[str]]:
         identifier = str(getattr(row, "ID", "") or "")
         rows.append(Held(
             artist=(getattr(row.Artist, "Name", "") or "") if row.Artist else "",
-            title=title,
+            title=bare_title(title),
+            mix=extract_mix(title),
             seconds=getattr(row, "Length", None),
             path=getattr(row, "FolderPath", "") or "",
             genre=(getattr(row.Genre, "Name", "") or "") if row.Genre else "",
@@ -166,7 +173,7 @@ def read_directories(config: Config) -> list[Held]:
             if path.suffix.lower().lstrip(".") not in AUDIO_EXTENSIONS:
                 continue
             parsed = parse_filename(path.name)
-            found.append(Held(artist=parsed.artist, title=parsed.title,
+            found.append(Held(artist=parsed.artist, title=parsed.title, mix=parsed.mix,
                               seconds=seconds_of(path), path=str(path)))
     return found
 

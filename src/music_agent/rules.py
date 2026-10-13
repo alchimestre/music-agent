@@ -157,6 +157,36 @@ def version_matches(candidate: Candidate, request: Request) -> bool:
     return mix_matches(request.mix, candidate.mix)
 
 
+def _judged_by_name(candidate: Candidate, request: Request) -> Verdict | None:
+    """What the file itself says, which no reference length is needed to read.
+
+    A wrong artist, a wrong track, a wrong version, or a lossy file under the quality floor is not a question
+    worth putting to a person, whether or not a length could have checked it. On 2026-10-13 a request for one
+    remix was offered fifteen files of the same EP — six of them other tracks, most of the rest the original —
+    because the queue's one question was asked before the name was read.
+    """
+    parsed = parse_filename(candidate.path)
+
+    if not parsed.title:
+        return Verdict(candidate, Label.NEEDS_YOU, "the filename names no track")
+
+    if not artists_appear(request.artist, candidate.path):
+        return Verdict(candidate, Label.REJECTED, "a different artist")
+
+    if not appears_in(request.title, parsed.title):
+        return Verdict(candidate, Label.REJECTED, "a different track")
+
+    # Below the floor a lossy file is ruled out rather than offered (2026-10-12: the design notes sent these to
+    # review, and the user read that queue and answered).
+    if not candidate.lossless and candidate.bitrate is not None and candidate.bitrate < QUALITY_FLOOR:
+        return Verdict(candidate, Label.REJECTED, f"{candidate.bitrate} kbps — below the quality floor")
+
+    if not version_matches(candidate, request):
+        return Verdict(candidate, Label.REJECTED, f"a different mix — {candidate.mix or 'unnamed'}")
+
+    return None
+
+
 def classify(candidate: Candidate, request: Request) -> Verdict:
     """What would happen to this candidate if it were left alone.
 
@@ -182,38 +212,27 @@ def classify(candidate: Candidate, request: Request) -> Verdict:
             return Verdict(candidate, Label.REJECTED,
                            "nothing to check it against, and the copy held already plays")
 
-    if candidate.duration is None:
-        return Verdict(candidate, Label.NEEDS_YOU, "the peer reports no length")
-
-    if request.ref_duration is None:
+    if candidate.duration is None or request.ref_duration is None:
+        # Nothing can judge the length, so the queue's one question is what is left — but only for a file
+        # that is this track at all. What the name says needs no reference length to read.
+        named = _judged_by_name(candidate, request)
+        if named is not None:
+            return named
+        if candidate.duration is None:
+            return Verdict(candidate, Label.NEEDS_YOU, "the peer reports no length")
         return Verdict(candidate, Label.NEEDS_YOU, "no reference length for this track")
 
     offset = candidate.duration - request.ref_duration
     if abs(offset) > DURATION_WINDOW:
         return Verdict(candidate, Label.REJECTED, "runs %+d s against the reference" % offset)
 
-    # The length says how big it is; the name says what it is. A run of the right duration is still
-    # the wrong track. The artist is looked for across the whole path because peers keep it in the
-    # folder — `…\Aphex Twin\Selected Ambient Works 85-92\12 Delphium.m4a` — and the title is looked
-    # for in the basename, which is the one place a title is always written (the design notes).
-    parsed = parse_filename(candidate.path)
-
-    if not parsed.title:
-        return Verdict(candidate, Label.NEEDS_YOU, "the filename names no track")
-
-    if not artists_appear(request.artist, candidate.path):
-        return Verdict(candidate, Label.REJECTED, "a different artist")
-
-    if not appears_in(request.title, parsed.title):
-        return Verdict(candidate, Label.REJECTED, "a different track")
-
-    # Below the floor a lossy file is ruled out rather than offered (2026-10-12: the design notes sent these to
-    # review, and the user read that queue and answered).
-    if not candidate.lossless and candidate.bitrate is not None and candidate.bitrate < QUALITY_FLOOR:
-        return Verdict(candidate, Label.REJECTED, f"{candidate.bitrate} kbps — below the quality floor")
-
-    if not version_matches(candidate, request):
-        return Verdict(candidate, Label.REJECTED, f"a different mix — {candidate.mix or 'unnamed'}")
+    # The length says how big it is; the name says what it is. A run of the right duration is still the wrong
+    # track. The artist is looked for across the whole path because peers keep it in the folder — `…\Aphex
+    # Twin\Selected Ambient Works 85-92\12 Delphium.m4a` — and the title is looked for in the basename, which
+    # is the one place a title is always written (the design notes).
+    named = _judged_by_name(candidate, request)
+    if named is not None:
+        return named
 
     if mix_matches(request.mix, candidate.mix):
         return Verdict(candidate, Label.READY, "same mix, length matches")

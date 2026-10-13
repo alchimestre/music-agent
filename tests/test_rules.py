@@ -69,8 +69,26 @@ def test_a_peer_that_reports_no_length_needs_a_human():
 def test_a_track_with_no_reference_length_can_never_be_settled():
     """Ticket 13: resolve the length from MusicBrainz, else the track is review-only."""
     unresolved = Request(artist="Kraftwerk", title="Neonlicht", ref_duration=None)
-    assert verdict_for("Artist - Title (Original Mix).flac", unresolved,
+    assert verdict_for("Kraftwerk - Neonlicht (Original Mix).flac", unresolved,
                        duration=300) is Label.NEEDS_YOU
+
+
+def test_a_file_that_names_another_track_is_not_even_asked_about():
+    """2026-10-13: the queue's one question goes only to a file that is this track at all — what the name
+    says needs no reference length to read. the user was offered fifteen files of one EP, six of them other
+    tracks entirely, for a request that named a single remix."""
+    unresolved = Request(artist="Kraftwerk", title="Neonlicht", ref_duration=None)
+    verdict = classify(candidate("Kraftwerk - Autobahn (Original Mix).flac", duration=300), unresolved)
+    assert verdict.label is Label.REJECTED
+    assert "a different track" in verdict.reason
+
+
+def test_a_version_that_was_not_asked_for_is_not_even_asked_about():
+    """Same day, same complaint: the request named the Belaria remix, and the queue offered the original."""
+    unresolved = Request(artist="Costello", title="Madbot", mix="Belaria Remix", ref_duration=None)
+    verdict = classify(candidate("Costello - Madbot (Original Mix).flac", duration=300), unresolved)
+    assert verdict.label is Label.REJECTED
+    assert "a different mix" in verdict.reason
 
 
 # -- junk is ruled out outright --------------------------------------------

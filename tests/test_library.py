@@ -196,3 +196,22 @@ def test_nothing_left_behind_is_reported_as_such(tmp_path, monkeypatch):
                                        path=str(config.lossless / "Kiasmos - Blurred.wav"))], []))
 
     assert library.unpointed(config).empty() is True
+
+
+def test_a_stored_title_is_split_the_way_a_tracklist_splits_one(tmp_path, monkeypatch):
+    """2026-10-13: the collection indexed a row under its whole stored title while a request looked for the
+    bare one, so `Galbi (feat Leïla Koumiya)` read as a track the collection did not hold — searched as if
+    it were new, carrying no upgrade flag, and its queue offered copies of the entire EP."""
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(Title="Galbi (feat Leïla Koumiya)", Artist=SimpleNamespace(Name="KasbaH"),
+                          Length=199, FolderPath="/Music/Losy Tracks/Galbi.m4a", Genre=None, ID=1)
+    monkeypatch.setattr("pyrekordbox.Rekordbox6Database",
+                        lambda *args, **kwargs: SimpleNamespace(get_content=lambda: [row], get_genre=lambda: []))
+    monkeypatch.setattr(library, "read_directories", lambda config: [])
+
+    shelf = library.open(make_config(tmp_path))
+
+    found = shelf.held("KasbaH", "Galbi", 199)
+    assert found is not None, "the row answers to the bare title a tracklist produces"
+    assert (found.title, found.mix) == ("Galbi", ""), "a credit is neither the title nor a version"

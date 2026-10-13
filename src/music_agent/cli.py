@@ -20,6 +20,7 @@ from . import process
 from . import reference
 from .parsing import fold
 from . import review
+from .rules import hms
 from . import slsk
 from . import state
 from . import tracklist
@@ -59,7 +60,7 @@ def _build_parser() -> argparse.ArgumentParser:
     review_command.add_argument("--not-found", dest="not_found", type=int, default=None, metavar="IDX",
                                 help="no usable copy exists for that track")
     review_command.add_argument("--list", action="store_true",
-                                help="just print the queue; this is what runs when there is no terminal")
+                                help="print the queue and stop; what a run with no decision flag does")
 
     acquire = commands.add_parser("acquire", parents=[common],
                                   help="search Soulseek for a tracklist, into staging")
@@ -216,15 +217,17 @@ def _acquire(config: config_module.Config, args: argparse.Namespace) -> int:
         if job is None:
             return 1
 
+    # Ticket 21: the child logs what each search came to, one line per track — `Search complete: 0 raw
+    # results` was the only thing that knew the network had stopped answering, and it was thrown away.
+    # stderr keeps the pass's own report clean on stdout, and the filter keeps the walls out of stderr.
+    logs = slsk.ChildLog()
     try:
         shelf = library.open(config)
-        # Ticket 21: the child logs what each search came to, one line per track — `Search complete: 0 raw
-        # results` was the only thing that knew the network had stopped answering, and it was thrown away.
-        # stderr keeps the pass's own report clean on stdout.
         with mcp.StdioServer(list(config.soulseek_command), env=slsk.environment(config),
-                             on_log=lambda line: print(f"slsk: {line}", file=sys.stderr)) as server:
+                             on_log=logs) as server:
             summary = acquire.run(config, job, server, reference.lookup(config),
                                   library=shelf, retry=args.retry)
+        logs.report()
     except (slsk.MissingCredential, mcp.ServerError, library.Unreadable) as error:
         print(error, file=sys.stderr)
         return 1
@@ -240,17 +243,28 @@ def _acquire(config: config_module.Config, args: argparse.Namespace) -> int:
     return 0
 
 
-def _queue(job: state.Job) -> None:
-    """The queue, split by why each track is in it. A candidate's number is what `review --accept` takes."""
+def _queue(job: state.Job) -> state.Queue:
+    """The queue, split by why each track is in it. A candidate's number is what `review --accept` takes.
+
+    Returns the queue as well as printing it, so a caller that wants to add to the report does not read the
+    run twice.
+    """
     waiting = state.queue(job)
     print()
     if waiting.needs_you:
         print(f"{len(waiting.needs_you)} need{'s' if len(waiting.needs_you) == 1 else ''} a decision:")
         for record in waiting.needs_you:
-            print(f"  [{record.idx}] {record.label}")
-            for number, verdict in enumerate(record.offered(), start=1):
-                print(f"      {number}. {verdict.label.value:<9} {verdict.candidate.user:<18}"
-                      f"{verdict.candidate.ext:<6}{verdict.reason}")
+            offered = record.offered()
+            reference = f"reference {hms(record.duration_s)}" if record.duration_s else "no reference length"
+            print(f"\n  [{record.idx}] {record.label} — {reference}")
+            for reason in dict.fromkeys(verdict.reason for verdict in offered):
+                print(f"      {reason}")
+            for number, verdict in enumerate(offered, start=1):
+                candidate = verdict.candidate
+                length = f"{hms(candidate.duration)}".strip()
+                if candidate.duration is not None and record.duration_s:
+                    length += f" {candidate.duration - record.duration_s:+d}s"
+                print(f"    {number:>3}. {candidate.ext:<6}{length:<9}{candidate.user:<18}{candidate.name}")
     else:
         print("the queue is empty")
 
@@ -271,6 +285,8 @@ def _queue(job: state.Job) -> None:
         print(f"{len(waiting.decided)} settled by hand — no pass will ask about them again:")
         for record in waiting.decided:
             print(f"  [{record.idx}] {record.label}: {record.decision}")
+
+    return waiting
 
 
 def _files(config: config_module.Config, job: state.Job) -> int:
@@ -302,8 +318,9 @@ def _files(config: config_module.Config, job: state.Job) -> int:
 def _review(config: config_module.Config, args: argparse.Namespace) -> int:
     """Settle by hand what the rule would not.
 
-    The queue is durable state and this is one client of it, so the same decisions can be written from here,
-    from the queue screen or by the working procedure, and nothing in the pipeline waits on any of them.
+    There is no screen: the queue prints as text and the caller shows it as a menu, so a decision is asked
+    for where the person already is (the design notes). The flags below stay the one writer of the decision axis,
+    which is what keeps a menu, a script and the working procedure from drifting apart.
     """
     job = _target(config, args, "review")
     if job is None:
@@ -317,10 +334,12 @@ def _review(config: config_module.Config, args: argparse.Namespace) -> int:
 
     try:
         if args.accept is not None:
+            logs = slsk.ChildLog()
             settled = review.accept(
                 job, args.accept, number=args.candidate,
                 server_factory=lambda: mcp.StdioServer(list(config.soulseek_command),
-                                                       env=slsk.environment(config)))
+                                                       env=slsk.environment(config), on_log=logs))
+            logs.report()
             print(settled.report())
             print(f"music-agent process --job {job.id}   # convert, place and normalize it")
             return 0
@@ -337,13 +356,11 @@ def _review(config: config_module.Config, args: argparse.Namespace) -> int:
         print(error, file=sys.stderr)
         return 1
 
-    if args.list or not (sys.stdin.isatty() and sys.stdout.isatty()):
-        # No terminal to draw a screen on: the queue is what the working procedure reads, and it is the same list.
-        _queue(job)
-        return 0
-
-    from . import review_tui                  # textual is only needed by the screen
-    return review_tui.run(config, job)
+    waiting = _queue(job)
+    if waiting.needs_you:
+        print("\nsettle one by hand: music-agent review --accept IDX --candidate N"
+              "   (or --skip IDX, or --not-found IDX)")
+    return 0
 
 
 def _genres(config: config_module.Config, job: state.Job) -> None:

@@ -51,10 +51,22 @@ def fold(text: str) -> str:
     return unicodedata.normalize("NFC", " ".join(spaced.casefold().split()))
 
 
+# A parenthetical that credits somebody is not a version. `Galbi (feat Leïla Koumiya)` is one track, with or
+# without the credit, and reading the credit as a mix made a request demand a version by that name — so the
+# file that *is* the track came out a wrong version and was rejected (2026-10-13).
+_CREDITS = frozenset({"feat", "ft", "featuring", "with"})
+
+
 def extract_mix(name: str) -> str:
-    """The trailing parenthesised mix — 'Original Mix', a remixer's name, or ''."""
+    """The trailing parenthesised mix — 'Original Mix', a remixer's name, or ''.
+
+    A credit is not a mix: `(feat X)` and `(ft. X)` return ''.
+    """
     groups = _PARENTHESISED.findall(name.rsplit(".", 1)[0])
-    return groups[-1].strip() if groups else ""
+    if not groups:
+        return ""
+    trailing = groups[-1].strip()
+    return "" if fold(trailing).split(" ")[0].rstrip(".") in _CREDITS else trailing
 
 
 def strip_code_tail(name: str) -> str:

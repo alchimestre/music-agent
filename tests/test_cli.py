@@ -96,7 +96,8 @@ def test_the_queue_lists_what_needs_a_decision(tmp_path, capsys):
     assert "Ntogn - Mines" in out
     assert "the peer reports no length" in out
     assert "Kiasmos" not in out                     # settled, so not the human's problem
-    assert "1. Needs you" in out, "the number is what review --accept takes"
+    assert "1. aiff" in out, "a candidate line starts with the number review --accept takes"
+    assert "Ntogn - Mines.aiff" in out, "and names the file that number would fetch"
     assert "every one was refused" in out           # and the unusable one is named, and why
 
 
@@ -292,7 +293,7 @@ def test_review_of_a_track_that_is_not_in_the_run_is_an_error(tmp_path, capsys):
 
 
 def test_review_with_no_terminal_prints_the_queue(tmp_path, capsys):
-    """The skill reads the queue rather than drawing it."""
+    """The skill reads the queue rather than drawing it: the track, why it is there, and what a number takes."""
     config_path = make_config(tmp_path)
     seed(config_path, [SETTLED, WAITING])
 
@@ -300,7 +301,9 @@ def test_review_with_no_terminal_prints_the_queue(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert "Ntogn - Mines" in out
-    assert "Needs you" in out
+    assert "the peer reports no length" in out
+    assert "Ntogn - Mines.aiff" in out
+    assert "settle one by hand" in out
 
 
 def test_accepting_without_a_candidate_to_take_is_refused(tmp_path, capsys):
@@ -404,7 +407,8 @@ def test_accepting_carries_the_record_on_to_process(tmp_path, capsys, monkeypatc
     fake = {"FAKE_RESULTS": "[]", "FAKE_DOWNLOAD": f"downloading:transferring:90000:{landed}"}
     monkeypatch.setattr(cli_module.slsk, "environment", lambda config: {})
     monkeypatch.setattr(cli_module.mcp, "StdioServer",
-                        lambda command, env=None: StdioServer([sys.executable, FAKE], env=fake))
+                        lambda command, env=None, on_log=None:
+                        StdioServer([sys.executable, FAKE], env=fake, on_log=on_log))
 
     assert main(["--config", str(config_path), "review", "--accept", "2"]) == 0
 

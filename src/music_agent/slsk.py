@@ -21,6 +21,44 @@ class ToolError(RuntimeError):
         self.message = message
 
 
+class ChildLog:
+    """The child's stderr, made readable: what can be acted on, and none of the walls.
+
+    aioslsk logs one warning per peer whose connection it could not broker. They arrive by the dozen, they
+    say nothing a person can do, and one refused peer is one candidate that cannot be served — so they are
+    counted and reported once. A traceback is a failure worth knowing about, but its frames are the wall:
+    the exception keeps its line and loses the rest. Nothing is lost outright — `mcp.StdioServer` keeps the
+    child's last lines and quotes them when a call fails.
+    """
+
+    NOISE = "failed to fulfill ConnectToPeer request"
+    OPENING = "Traceback (most recent call last):"
+
+    def __init__(self, log=print) -> None:
+        self._log = log
+        self._frames = False
+        self.refused = 0
+
+    def __call__(self, line: str) -> None:
+        if self.NOISE in line:
+            self.refused += 1
+            return
+        if line.strip() == self.OPENING:
+            self._frames = True
+            return
+        if self._frames:
+            if line[:1].isspace():  # a frame, or the source line beneath it
+                return
+            self._frames = False
+            line = f"{line.strip()} (frames suppressed)"
+        self._log(f"slsk: {line}")
+
+    def report(self) -> None:
+        """What the refusals came to, in one line, at the end of a pass."""
+        if self.refused:
+            self._log(f"slsk: {self.refused} peer connections refused — the network, not the run")
+
+
 def environment(config: Config) -> dict[str, str]:
     """The child's environment: the credentials, our own ports, and its ceilings.
 
