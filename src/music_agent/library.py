@@ -146,6 +146,12 @@ def read_database() -> tuple[list[Held], list[str]]:
     database = Rekordbox6Database()
     rows: list[Held] = []
     for row in database.get_content():
+        # rekordbox never deletes a row: taking a track out of the collection sets `rb_local_deleted`, and the
+        # app hides it from then on. A removed row is not held, and it is not a row whose file has gone either —
+        # it is not a row, which is why this stops the report of missing files at the collection the app shows.
+        # (`update_lossy_list.py` has always filtered this the same way; this was the odd one out.)
+        if getattr(row, "rb_local_deleted", 0):
+            continue
         title = row.Title or ""
         if not title:
             continue
