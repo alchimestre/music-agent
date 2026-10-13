@@ -92,7 +92,9 @@ class FakeDatabase:
 
 def make_config(tmp_path: Path) -> config_module.Config:
     path = tmp_path / "config.toml"
-    path.write_text(f'[paths]\nstaging = "{tmp_path}/staging"\nstate = "state"\n', encoding="utf-8")
+    path.write_text(f'[paths]\nstaging = "{tmp_path}/staging"\n'
+                    f'lossless = "{tmp_path}/Loseless Tracks"\n'
+                    f'lossy = "{tmp_path}/Losy Tracks"\nstate = "state"\n', encoding="utf-8")
     (tmp_path / "staging").mkdir()
     return config_module.load(path)
 

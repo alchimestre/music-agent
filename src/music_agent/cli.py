@@ -22,6 +22,7 @@ from .parsing import fold
 from . import review
 from .rules import hms
 from . import slsk
+from . import spotify
 from . import state
 from . import tracklist
 
@@ -64,8 +65,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     acquire = commands.add_parser("acquire", parents=[common],
                                   help="search Soulseek for a tracklist, into staging")
-    acquire.add_argument("--tracks", type=Path, default=None, metavar="FILE",
-                         help="the tracklist to start a run from; omit it to continue a run")
+    acquire.add_argument("--tracks", default=None, metavar="FILE|URL",
+                         help="the tracklist to start a run from — a file, or the URL of a public Spotify "
+                              "playlist; omit it to continue a run")
     acquire.add_argument("--name", default=None, metavar="NAME",
                          help="what to call the run (default: the tracklist's own name)")
     acquire.add_argument("--retry", action="store_true",
@@ -83,6 +85,13 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="re-derive the genre on files already placed, replacing what they carry")
     commands.add_parser("reconcile", parents=[common],
                         help="rebuild the run's records from the files it downloaded")
+    dedupe = commands.add_parser(
+        "dedupe", parents=[common],
+        help="merge the rows that are one track, keeping the better copy (dry run unless --apply)")
+    dedupe.add_argument("--apply", action="store_true",
+                        help="write it; without this nothing is merged")
+    dedupe.add_argument("--leave-files", action="store_true",
+                        help="merge the rows but leave the redundant files where they are")
     return parser
 
 
@@ -109,6 +118,46 @@ def _import(config: config_module.Config, args: argparse.Namespace) -> int:
         database.close()
 
     _report(summary, job, len(summary.failed))
+    return 0
+
+
+def _dedupe(config: config_module.Config, args: argparse.Namespace) -> int:
+    """The rows that are one track, merged into the better copy — a dry run until `--apply` is given.
+
+    The collection is the whole scope, not a run: a duplicate arrives when something imports a track the
+    collection already holds, which is not a run's business to notice. What it leaves behind in Traktor is a
+    dead entry, so the report says where to go next.
+    """
+    from pyrekordbox import Rekordbox6Database
+
+    from . import duplicates
+
+    try:
+        database = Rekordbox6Database()
+    except Exception as error:                      # pyrekordbox raises its own types and its own messages
+        print(f"cannot read the rekordbox collection ({error}) — is rekordbox installed?", file=sys.stderr)
+        return 1
+
+    try:
+        summary = duplicates.run(config, db=database, apply=args.apply,
+                                 quarantine_files=not args.leave_files)
+    except duplicates.NotClosed as error:
+        print(error, file=sys.stderr)
+        return 1
+
+    if not summary.merges:
+        print("no duplicates: every track in the collection is held once")
+        return 0
+    for line in summary.lines():
+        print(f"  {line}")
+    print()
+    if not args.apply:
+        print(f"{summary.report()} — nothing merged yet: music-agent dedupe --apply merges them")
+        return 0
+    print(summary.report())
+    if summary.files:
+        print(f"the files that left the lanes are in {config.duplicates}")
+        print("traktor-nml purge takes out the Traktor entries they left behind")
     return 0
 
 
@@ -200,18 +249,45 @@ def _reconcile(config: config_module.Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def _start(config: config_module.Config, args: argparse.Namespace) -> state.Job | None:
+    """The run `--tracks` starts: a file, or a public Spotify playlist read the same way one is.
+
+    A playlist is read here rather than written out first, because handing over a URL should cost no more
+    than handing over a file — and the text it is parsed from is the text a tracklist file would have held.
+    """
+    name = None
+    if spotify.names_a_playlist(args.tracks):
+        try:
+            found = spotify.playlist(args.tracks)
+        except spotify.PlaylistError as error:
+            print(error, file=sys.stderr)
+            return None
+        requests, name = tracklist.parse(found.text()), found.name
+    else:
+        try:
+            requests = tracklist.read(Path(args.tracks).expanduser())
+        except (OSError, UnicodeDecodeError) as error:
+            reason = getattr(error, "strerror", None) or error
+            print(f"cannot read {args.tracks} ({reason})", file=sys.stderr)
+            return None
+
+    if not requests:
+        print(f"{args.tracks} names no tracks", file=sys.stderr)
+        return None
+
+    job = state.create(config, args.name or name or Path(args.tracks).stem)
+    job.write_records([
+        state.Record(idx=index, artist=request.artist, title=request.title, mix=request.mix)
+        for index, request in enumerate(requests, start=1)
+    ])
+    print(f"run {job.id} · {len(requests)} tracks · staging {config.staging}")
+    return job
+
+
 def _acquire(config: config_module.Config, args: argparse.Namespace) -> int:
     if args.tracks is not None:
-        requests = tracklist.read(args.tracks)
-        if not requests:
-            print(f"{args.tracks} names no tracks", file=sys.stderr)
+        if _start(config, args) is None:
             return 1
-        job = state.create(config, args.name or args.tracks.stem)
-        job.write_records([
-            state.Record(idx=index, artist=request.artist, title=request.title, mix=request.mix)
-            for index, request in enumerate(requests, start=1)
-        ])
-        print(f"run {job.id} · {len(requests)} tracks · staging {config.staging}")
     else:
         job = _target(config, args, "continue")
         if job is None:
@@ -444,6 +520,8 @@ def main(argv: list[str] | None = None) -> int:
         return _reconcile(config, args)
     if args.command == "import":
         return _import(config, args)
+    if args.command == "dedupe":
+        return _dedupe(config, args)
     return 2                                        # unreachable: the subparser requires a command
 
 

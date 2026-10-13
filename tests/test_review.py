@@ -63,7 +63,10 @@ def a_waiting_track(idx: int = 2) -> state.Record:
 def setup(tmp_path: Path) -> tuple[config_module.Config, state.Job, list[str]]:
     config_path = tmp_path / "config.toml"
     staging = tmp_path / "staging"
-    config_path.write_text(f'[paths]\nstaging = "{staging}"\nstate = "state"\n'
+    config_path.write_text(f'[paths]\nstaging = "{staging}"\n'
+                           f'lossless = "{tmp_path / "Loseless Tracks"}"\n'
+                           f'lossy = "{tmp_path / "Losy Tracks"}"\n'
+                           'state = "state"\n'
                            "[soulseek]\nsearch_interval = 0.0\n", encoding="utf-8")
     staging.mkdir()
     config = config_module.load(config_path)

@@ -13,7 +13,7 @@ from music_agent import slsk
 def make_config(tmp_path: Path, credentials: str = "") -> config_module.Config:
     path = tmp_path / "config.toml"
     path.write_text(
-        '[paths]\nstaging = "staging"\nstate = "state"\n'
+        '[paths]\nstaging = "staging"\nlossless = "lossless"\nlossy = "lossy"\nstate = "state"\n'
         '[soulseek]\nlisten_port = 20000\nobfuscated_port = 20001\n'
         + credentials,
         encoding="utf-8",
