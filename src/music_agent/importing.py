@@ -180,7 +180,8 @@ def repoint(db, record: state.Record, log) -> bool:
 
 
 def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=print) -> Summary:
-    """Every tagged track into the collection, behind one commit and one backup."""
+    """Every tagged track into the collection, behind one backup and two commits — see the comment on the
+    first commit for why the upgrades and the additions cannot share one."""
     if is_running():
         raise NotClosed("rekordbox is running, and pyrekordbox will not commit while it is — close it, "
                         "then run this again")
@@ -198,6 +199,14 @@ def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=pr
             log(f"backed the collection up to {where.name}")
 
     replaced: list[Path] = []
+    pending: list[state.Record] = []
+
+    def failed(record: state.Record, error: Exception) -> None:
+        record.notes = str(error)
+        summary.failed.append(record.idx)
+        job.append_event("import_failed", idx=record.idx, error=str(error))
+        log(f"[{record.idx}] {record.label}: {error}")
+
     for record in tagged:
         if record.replaces and Path(record.replaces) == Path(record.local_path):
             # Nothing should produce a row that already points at the file this run made: repoint would
@@ -208,17 +217,37 @@ def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=pr
             job.append_event("refused", idx=record.idx, reason="replaces == local_path")
             log(f"[{record.idx}] {record.label}: the row already points at this file — left alone")
             continue
+        if not record.replaces:
+            pending.append(record)
+            continue
         try:
-            repointed = repoint(db, record, log) if record.replaces else False
-            if not repointed:
-                if record.replaces:
-                    log(f"[{record.idx}] {record.label}: the row it was to replace is gone — adding it")
-                add(db, record)
+            repointed = repoint(db, record, log)
         except ImportFailed as error:
-            record.notes = str(error)
-            summary.failed.append(record.idx)
-            job.append_event("import_failed", idx=record.idx, error=str(error))
-            log(f"[{record.idx}] {record.label}: {error}")
+            failed(record, error)
+            continue
+        if not repointed:
+            log(f"[{record.idx}] {record.label}: the row it was to replace is gone — adding it")
+            pending.append(record)
+            continue
+        record.status = state.IMPORTED
+        record.notes = ""
+        summary.repointed.append(record.idx)
+        replaced.append(Path(record.replaces))
+        job.append_event("repointed", idx=record.idx, was=record.replaces, now=record.local_path)
+        log(f"[{record.idx}] {record.label}: upgraded — the row now points at the lossless file")
+
+    # The upgrades go in first, on their own commit. pyrekordbox mints a new row's ID as an *int* while every
+    # ID read back from the collection is *text*, and a flush carrying both kinds has to sort them together,
+    # which SQLAlchemy refuses: `InvalidRequestError: Could not sort objects by primary key`. On 2026-10-13 a
+    # run of 47 upgrades and 4 additions computed every write and then committed none of them.
+    if replaced:
+        db.commit(autoinc=True)
+
+    for record in pending:
+        try:
+            add(db, record)
+        except ImportFailed as error:
+            failed(record, error)
             continue
         except ValueError as error:
             # pyrekordbox raises this for a path already in the collection: a duplicate, not a failure.
@@ -230,18 +259,13 @@ def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=pr
             continue
         record.status = state.IMPORTED
         record.notes = ""
-        if repointed:
-            summary.repointed.append(record.idx)
-            replaced.append(Path(record.replaces))
-            job.append_event("repointed", idx=record.idx, was=record.replaces, now=record.local_path)
-            log(f"[{record.idx}] {record.label}: upgraded — the row now points at the lossless file")
-        else:
-            summary.imported.append(record.idx)
-            job.append_event("imported", idx=record.idx, path=record.local_path)
-            log(f"[{record.idx}] {record.label}: imported")
+        summary.imported.append(record.idx)
+        job.append_event("imported", idx=record.idx, path=record.local_path)
+        log(f"[{record.idx}] {record.label}: imported")
 
-    db.commit(autoinc=True)                 # one commit for the whole run
-    job.write_records(records)              # after the commit, so a crash cannot lose it
+    if pending:
+        db.commit(autoinc=True)             # the additions, likewise
+    job.write_records(records)              # after the commits, so a crash cannot lose it
 
     for old in replaced:
         # The replaced file goes only after the commit, so nothing is deleted while the collection still

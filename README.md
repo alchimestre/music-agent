@@ -35,7 +35,7 @@ Commands in the order a run uses them. Each one works on the same run, so they a
 ```
 music-agent acquire --tracks <file>             # search and download into staging
 music-agent status --queue                      # what the run has not settled, and why
-music-agent review                              # the queue on screen, to settle tracks by hand
+music-agent review                              # the queue as text, for the caller to put to the user
 music-agent process                             # identify, genre, convert, normalize, tag
 music-agent retag                               # re-derive the genre on files already tagged
 music-agent reconcile                           # rebuild the records from the files this run made
@@ -45,29 +45,24 @@ music-agent import                              # into rekordbox, which must be 
 
 `acquire` and `process` take hours on a long tracklist. `review`, `status` and `import` take seconds.
 
-## The screen
+## The queue
 
 ```sh
 music-agent review
 ```
 
-On a terminal this opens the review queue: the tracks that need a decision on the left, the candidates for
-the selected track as cards on the right. The card holds the file, its peer, its length against the
-reference, and the reason the system will not take it alone.
-
-```
-a  accept      s  skip      f  not found      n / p  next / previous candidate      q  quit
-```
-
-The same decisions are available as flags, which is how an agent drives them:
+The tracks the rule will not settle, as text: each track, its candidates numbered, and the reason each was
+left alone. There is no screen — the caller puts the queue to a person as a menu, one question per track,
+the candidates as the options with *skip* and *not found* beside them — and the answer comes back here:
 
 ```sh
-music-agent review --accept 12 --candidate 2
-music-agent review --skip 12
-music-agent review --not-found 12
+music-agent review --accept 12 --candidate 2   # fetch that one and hand the record to process
+music-agent review --skip 12                   # passed over for now
+music-agent review --not-found 12              # no usable copy exists; nothing will ask again
 ```
 
-With no terminal, `music-agent review` prints the queue instead of drawing it.
+Those three flags are the only writers of the decision axis (`GLOSSARY.md`), which is what keeps a menu, a
+script and the working procedure from drifting apart. `--list` prints the queue and stops.
 
 ## The agent glue
 

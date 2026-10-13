@@ -30,7 +30,8 @@ records something already done.
 - **skipped** (`–`) — passed over for now.
 - **not found** (`✗`) — no usable copy exists.
 
-`music-agent review` is the only thing that writes this axis — its flags and its screen alike — and every
+`music-agent review` is the only thing that writes this axis — its flags are the whole interface, a menu in the
+harness being nothing but a way to arrive at them — and every
 pass reads it: a track the user has decided is left alone rather than searched again, because that is what
 deciding it means.
 

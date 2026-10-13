@@ -404,6 +404,25 @@ def test_a_genre_nothing_maps_is_left_for_the_skill_and_said_so(tmp_path):
     assert tag.read(config.lossless / "Kiasmos - Blurred.aiff").genre == ""
 
 
+def test_a_track_the_services_know_nothing_about_says_so(tmp_path):
+    """2026-10-13: with nothing offered the stage logged no genre line at all, so a reader of the run could
+    not tell "no genre" from "no answer". The log is the only record of a track's source genres — the written
+    tag keeps the family and nothing else — and a rule that reads sources off the run needs every track's own
+    line, including this one."""
+    config = make_config(tmp_path)
+    record = state.Record(idx=1, artist="Kiasmos", title="Blurred",
+                          local_path=str(aiff(tmp_path / "staging" / "Blurred.aiff")),
+                          status=state.DOWNLOADED, format="aiff")
+    job = job_with(config, [record])
+    tools = with_identification(FakeRunner())
+    said: list[str] = []
+
+    summary = process.run(config, job, tools=tools, log=said.append)
+
+    assert summary.ungenred == [1], summary.report()
+    assert any("no genre offered" in line for line in said), said
+
+
 def test_a_genre_the_table_knows_is_taken_from_the_services(tmp_path):
     """MusicBrainz's genres are the weak second opinion behind Discogs styles (the design notes)."""
     config = make_config(tmp_path)

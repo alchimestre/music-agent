@@ -133,6 +133,15 @@ def test_the_mix_is_the_trailing_parenthesised_part():
     assert extract_mix("A - B (One) (Two).flac") == "Two"
 
 
+def test_a_credit_is_not_a_version():
+    """2026-10-13: reading `(feat X)` as a mix made a request for `Galbi (feat Leïla Koumiya)` demand a
+    version by that name, so the file that *is* the track came out a wrong version and was rejected."""
+    assert extract_mix("KasbaH - Galbi (feat Leïla Koumiya).flac") == ""
+    assert extract_mix("X - Y (ft. Someone).flac") == ""
+    assert extract_mix("X - Y (featuring Someone).flac") == ""
+    assert extract_mix("X - Y (with Someone).flac") == ""
+
+
 # -- one version, however it is written (the design notes) -------------------------
 
 @pytest.mark.parametrize("wanted, have", [

@@ -157,8 +157,8 @@ def test_bpm_and_key_are_never_written(tmp_path):
     assert not any("key" in name.lower() for name in written)
 
 
-def test_one_commit_covers_the_whole_run(tmp_path):
-    """Ticket 07: one batch commit and one backup, rather than one per track."""
+def test_one_commit_covers_every_addition_in_a_run(tmp_path):
+    """Ticket 07: one batch commit rather than one per track. Three additions are one commit, not three."""
     config = make_config(tmp_path)
     job = job_with(config, [tagged(tmp_path, 1, "One.aiff"), tagged(tmp_path, 2, "Two.aiff"),
                             tagged(tmp_path, 3, "Three.aiff")])
@@ -168,6 +168,26 @@ def test_one_commit_covers_the_whole_run(tmp_path):
 
     assert len(summary.imported) == 3
     assert database.committed == 1
+
+
+def test_an_upgrade_and_an_addition_do_not_share_a_commit(tmp_path):
+    """2026-10-13: they cannot. pyrekordbox mints a new row's ID as an int while every ID read back from the
+    collection is text, and one flush carrying both kinds has to sort them together, which raises
+    `InvalidRequestError: Could not sort objects by primary key` — the run of 47 upgrades and 4 additions
+    that computed every write and committed none of them."""
+    config = make_config(tmp_path)
+    upgraded = tagged(tmp_path, 1, "One.aiff")
+    upgraded.replaces = str(a_lossy_file(tmp_path, "Old.mp3"))
+    added = tagged(tmp_path, 2, "Two.aiff")
+    job = job_with(config, [upgraded, added])
+    database = FakeDatabase()
+    database.content = [ContentRow(upgraded.replaces)]
+
+    summary = importing.run(config, job, db=database, backup_first=False, log=quiet)
+
+    assert summary.repointed == [1], summary.report()
+    assert summary.imported == [2], summary.report()
+    assert database.committed == 2, "the upgrades commit first, the additions after"
 
 
 def test_an_existing_relation_is_reused_and_a_new_one_is_minted(tmp_path):
@@ -480,5 +500,45 @@ def test_a_repoint_against_a_copy_of_the_real_collection(tmp_path):
         assert again.BitRate == 1411, "and the columns that describe the file survive the real write"
         assert again.FileType == 12 and again.FileNameL == "Whatever - New.aiff"
         assert not old.is_file(), "and the file it replaced is gone"
+    finally:
+        database.close()
+
+
+def test_a_repoint_and_an_add_in_one_run_against_a_copy_of_the_real_collection(tmp_path):
+    """2026-10-13: an upgrade run does both. Most tracks repoint the row that held the lossy copy; the ones
+    whose row has gone are added. pyrekordbox mints a new row's ID as an *int* — `generate_unused_id` returns
+    one — while every ID read back from the collection is *text*, so one flush carrying both has to sort them
+    together and cannot: `InvalidRequestError: Could not sort objects by primary key`.
+
+    That is what a run of 47 upgrades and 4 additions hit: it computed every write and committed none.
+    """
+    from pyrekordbox import Rekordbox6Database
+
+    live = Path("~/Library/Pioneer/rekordbox/master.db").expanduser()
+    if not live.is_file():
+        pytest.skip("no rekordbox collection here to copy")
+
+    work = tmp_path / "master.db"
+    shutil.copy2(live, work)
+    database = Rekordbox6Database(work)
+    try:
+        row = next(r for r in database.get_content() if r.FolderPath and "Losy Tracks" in r.FolderPath)
+        old = a_lossy_file(tmp_path, "Whatever - Old.mp3")
+        row.FolderPath = str(old)
+        database.commit(autoinc=True)
+
+        config = make_config(tmp_path)
+        upgraded = tagged(tmp_path, index=1, name="Whatever - New.aiff")
+        upgraded.replaces = str(old)
+        added = tagged(tmp_path, index=2, name="Nothing - To Repoint.aiff")
+        added.replaces = str(tmp_path / "gone.mp3")
+        job = job_with(config, [upgraded, added])
+
+        summary = importing.run(config, job, db=database, backup_first=False, log=quiet)
+
+        assert summary.repointed == [1], summary.report()
+        assert summary.imported == [2], summary.report()
+        assert next(r for r in database.get_content() if r.FolderPath == upgraded.local_path)
+        assert next(r for r in database.get_content() if r.FolderPath == added.local_path)
     finally:
         database.close()

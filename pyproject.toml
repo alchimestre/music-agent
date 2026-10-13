@@ -13,8 +13,6 @@ dependencies = [
     "musicbrainzngs==0.7.1",
     "pyrekordbox==0.4.3",
     "mutagen",
-    "textual==8.2.8",
-    "rich==15.0.0",
 ]
 
 [project.scripts]

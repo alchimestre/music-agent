@@ -17,7 +17,7 @@ from . import reference, rules, slsk, state
 from .config import Config
 from .library import Held, Library
 from .mcp import ServerError, StdioServer
-from .parsing import search_query
+from .parsing import mix_matches, search_query
 from .reference import Lookup
 from .rules import Candidate
 
@@ -370,9 +370,12 @@ def _prepare(
     held = library.held(record.artist, record.title, record.duration_s)
     if held is None:
         # The length may be the only reason that missed, and for an upgrade there may be no MusicBrainz
-        # length at all. So the name is asked on its own; a lossy copy found that way is the reference.
+        # length at all. So the name is asked on its own — but the *version* still has to agree, or a remix
+        # would repoint the row that holds the original, and a row whose length rekordbox never had is still
+        # the copy this track would replace (2026-10-13: three tracks went unmatched that way and were
+        # searched as if the collection did not hold them).
         for row in library.rows_for(record.artist, record.title):
-            if not row.lossless and row.seconds is not None:
+            if not row.lossless and mix_matches(record.mix, row.mix):
                 held = row
                 break
     if held is None:
@@ -387,7 +390,7 @@ def _prepare(
     # Held, but only as a lossy copy: an upgrade rather than a reason to skip, and the lane decides it, not
     # whether the lookup happened to match.
     record.replaces = held.path
-    if record.duration_s is None:
+    if record.duration_s is None and held.seconds is not None:
         record.duration_s = held.seconds
         job.append_event("reference", idx=record.idx, seconds=held.seconds,
                          from_="the copy in the collection")

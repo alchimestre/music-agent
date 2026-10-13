@@ -142,6 +142,11 @@ def apply_genre(record: state.Record, found: identify.Identified, tools: Tools, 
         log(f"      genre {choice.genre!r}, from {choice.source!r}")
     elif offered:
         log(f"      nothing in the table for {offered} — the working procedure decides this one")
+    else:
+        # 2026-10-13: silence here read as a missing answer. The run's log is the only record of what a
+        # track's source genres were — the written tag keeps the family and nothing else — so every track
+        # needs a line, including the ones the services had nothing to say about.
+        log("      no genre offered — MusicBrainz and Discogs had nothing for it")
     return choice
 
 
@@ -430,7 +435,9 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
             # An existing genre is never replaced, so the record has to follow the file rather than claim a
             # genre the file does not carry — the import reads the record, not the tag.
             kept = tag.read(Path(record.local_path)).genre
-            log(f"      it already carried a genre, so {kept!r} stays rather than {record.genre!r}")
+            offered = list(found[record.idx].styles) + list(found[record.idx].genres)
+            log(f"      it already carried a genre, so {kept!r} stays, not {record.genre!r} "
+                f"(which came from {offered})")
             record.genre = kept
         record.status = state.TAGGED
         summary.tagged.append(record.idx)
