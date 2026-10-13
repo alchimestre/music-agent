@@ -1,11 +1,7 @@
 """Turning names into the strings we compare, and back.
 
-Ticket 14 measured the library this has to survive: 298 files with diacritics, 117 credits joined with
-`&`, 60 with `feat.`, 41 with a trailing label code, and brackets that mean two different things.
-
-The fold lives here and nothing else defines one, so query building, matching, dedupe and the backfill
-orphan test agree by construction — the design notes measured why that matters, having found that the database
-stores NFC while `os.walk` returns NFD, so a byte comparison matched 1342 of 1627 paths.
+The fold lives here and nowhere else, so query building, matching and dedupe agree by construction — the
+database stores NFC while `os.walk` returns NFD, so a byte comparison is not an option.
 """
 
 from __future__ import annotations
@@ -38,11 +34,9 @@ KNOWN_MARKERS = frozenset({"digi only", "vinyl only", "web"})
 
 def fold(text: str) -> str:
     """The one comparison fold: Latin accents stripped, punctuation to spaces, case folded, whitespace
-    collapsed. `Claude François` and `claude francois` fold alike.
-
-    Only a mark that follows an ASCII letter is dropped, because that is what a Latin accent
-    decomposes to. Japanese voicing and Cyrillic marks are parts of letters in their own right —
-    folding `かたぎり` into `かたきり` would collide two different names rather than unify one.
+    collapsed. Only a mark following an ASCII letter is dropped, because that is what a Latin accent
+    decomposes to; Japanese voicing and Cyrillic marks are parts of letters, and folding them would
+    collide two different names rather than unify one.
     """
     decomposed = unicodedata.normalize("NFKD", unicodedata.normalize("NFC", text))
     kept: list[str] = []
@@ -64,10 +58,8 @@ def extract_mix(name: str) -> str:
 
 
 def strip_code_tail(name: str) -> str:
-    """Drop a trailing bracket only when it is a code, never when it is part of the name.
-
-    `Lask - Black Ibis [PRA005]` loses its code. `Ø [Phase] - Burden Of Proof` keeps its bracket,
-    because stripping every bracket would rename that artist to `Ø` (the design notes).
+    """Drop a trailing bracket only when it is a code, never when it is part of the name:
+    `Ø [Phase] - Burden Of Proof` keeps its bracket, or the artist would become `Ø`.
     """
     match = _TRAILING_BRACKET.search(name)
     if not match:
@@ -98,10 +90,7 @@ def primary_artist(text: str) -> str:
 
 
 def appears_in(wanted: str, text: str) -> bool:
-    """Does the wanted string fold into the text as a whole run of words?
-
-    Containment on word boundaries, not a substring: `of` must not match `often`.
-    """
+    """Containment on word boundaries, not a substring: `of` must not match `often`."""
     wanted_words = fold(wanted).split()
     if not wanted_words:
         return False
@@ -113,10 +102,8 @@ def appears_in(wanted: str, text: str) -> bool:
 def artists_appear(wanted: str, path: str) -> bool:
     """Is every artist the request names present in the peer's path?
 
-    Ticket 14 splits credits, so a request naming two artists needs both to be there. The whole path
-    is searched rather than the basename alone, because peers routinely leave the artist in the folder
-    and name the file `12 Delphium.m4a`. A folder never *rejects* anything — it only supplies what the
-    basename omits.
+    The whole path is searched rather than the basename alone, because peers routinely leave the artist
+    in the folder and name the file `12 Delphium.m4a`.
     """
     named = credits(wanted)
     return bool(named) and all(appears_in(artist, path) for artist in named)
@@ -125,32 +112,55 @@ def artists_appear(wanted: str, path: str) -> bool:
 def bare_title(text: str) -> str:
     """The title with its mix suffix and any trailing label code taken off.
 
-    One definition, because three things must agree about where a title ends: the search query, the
-    name matching in `rules`, and the tracklist reader. `Black Ibis [PRA005]` loses the code,
-    `Blurred (Extended Mix)` loses the mix, and `Ø [Phase]` keeps its name (the design notes).
+    One definition, because the search query, the name matching in `rules` and the tracklist reader
+    must agree about where a title ends.
     """
     return _TRAILING_PARENS.sub("", strip_code_tail(text)).strip()
 
 
-def mix_matches(wanted: str, have: str) -> bool:
-    """Ticket 05: a bare request means the original, and a named version must appear in the other.
+# A bare title is the same version as `… (Original Mix)` / `… (Original Version)`, and every other suffix
+# is its own version. Peers write one version a dozen ways — `original_mix`, `Original Mix`, `ORIGINAL MIX`
+# — so the equivalence is on the folded text rather than on the spelling.
+_ORIGINAL_MIXES = frozenset({"", "original", "original mix", "original version"})
 
-    `ENERGY` matches `ENERGY (Original Mix)` but not `ENERGY (Victor Ruiz Remix)`, and a remix
-    satisfies only a request that names it.
+# What makes a version somebody else's version rather than one of its own edits. Compared against folded
+# text, so the entries are written folded — `re-edit` folds to `re edit`. A word list rather than a rule
+# about who is named, because both spellings count: `(Made by Pete Remix)` and `(suray_remix)`.
+_REMIX_MARKERS = ("remix", "rmx", "bootleg", "refix", "rework", "re edit", "reedit", "flip", "mashup")
+
+
+def is_original(mix: str) -> bool:
+    """Whether this names the original — `(Original Mix)`, `(Original Version)`, or nothing."""
+    return fold(mix) in _ORIGINAL_MIXES
+
+
+def is_remix(mix: str) -> bool:
+    """Whether this names somebody else's version of the track."""
+    text = fold(mix)
+    return any(marker in text for marker in _REMIX_MARKERS)
+
+
+def mix_matches(wanted: str, have: str) -> bool:
+    """A bare request means the original, and a named version must be that version.
+
+    `ENERGY` matches `ENERGY (Original Mix)` but not `ENERGY (Victor Ruiz Remix)`, and a remix satisfies
+    only a request that names it. Text is compared folded, so `(Kate Stein Remix)` and
+    `(kate_stein_remix)` are one remix.
+
+    This is the *equivalence*, and it is what reference resolution filters with: a bare request has to
+    resolve to the original's length, or the window it sets would reject the files that are the original.
+    What a bare request is willing to *take* is wider, and lives in `rules.version_matches`.
     """
-    want = wanted.strip().lower()
-    other = have.strip().lower()
-    if not want:
-        return other == "" or other.startswith("original")
-    return want in other
+    if is_original(wanted):
+        return is_original(have)
+    return fold(wanted) == fold(have)
 
 
 def search_query(artist: str, title: str) -> str:
-    """`artist title`, and nothing else.
+    """`artist title`, and nothing else, folded.
 
-    The mix suffix and any trailing label code come off first, and no genre word is ever added —
-    extra words return zero results. The query goes out folded, because peers routinely drop accents
-    (the design notes).
+    The mix suffix and any trailing label code come off, and no genre word is added — extra words
+    return zero results, and peers routinely drop accents.
     """
     return fold(f"{artist} {bare_title(title)}")
 
@@ -168,16 +178,13 @@ class ParsedName:
 def parse_filename(path: str) -> ParsedName:
     """Read a peer's path back into its parts.
 
-    Peers overwhelmingly organise a share as `Artist/Album/Track`, so the leading track number comes
-    off the basename and the folder above it is carried as an album hint — something to show a human
-    and to judge a release against, never something that decides a match (the design notes).
-
-    The basename supplies the artist when it names one. When it does not, the artist is left empty
-    rather than guessed: the caller searches the whole path for it, because that is where it usually
-    is.
+    Peers organise a share as `Artist/Album/Track`, so the leading track number comes off the basename
+    and the folder above it becomes an album hint — shown to a human, never used to decide a match. An
+    unnamed artist is left empty rather than guessed: the caller searches the whole path, because that is
+    where it usually is.
     """
-    name = PurePosixPath(path.replace("\\", "/")).name
-    parent = PurePosixPath(path.replace("\\", "/")).parent.name
+    source = PurePosixPath(path.replace("\\", "/"))
+    name = source.name
     stem = name.rsplit(".", 1)[0] if "." in name else name
     mix = extract_mix(name)
     if mix:
@@ -191,4 +198,4 @@ def parse_filename(path: str) -> ParsedName:
     without_number = _TRACK_PREFIX.sub("", title).strip()
     if without_number:
         title = without_number
-    return ParsedName(artist.strip(), title, mix, parent)
+    return ParsedName(artist.strip(), title, mix, source.parent.name)

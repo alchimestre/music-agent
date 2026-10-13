@@ -1,23 +1,7 @@
-"""The processing stage: what was downloaded, into the collection, identified and tagged on the way.
+"""The processing stage: staged downloads into the collection, identified and tagged on the way.
 
-Ticket 07 puts the writes here, and the map keeps two tools canonical rather than reimplementing them:
-`convert_to_aiff.sh` converts, and the normalizer measures and rewrites in place. This stage drives both,
-identifies and tags, and owns what none of them knows about — which lane a file belongs in, what it is
-called once it arrives, and the order everything runs in.
-
-The order is not the one the map lists, and the reason is in the converter: it carries metadata across
-(`-map_metadata 0` with `-write_id3v2 1`), so anything written before it survives. Identification and
-tagging therefore run **ahead of** conversion, which also means the fingerprint is taken from the file as
-it was downloaded rather than from a re-encode of it.
-
-Three facts read out of the converter rather than assumed. It keeps a file's **basename** and changes only
-the extension, so a peer's `08 - Solution.flac` arrives as `08 - Solution.aiff` and has to be renamed to
-the house convention the library already uses. It **carries metadata across**, as above. And it **deletes
-its input on success**, which is why it cannot simply be pointed at the staging directory: the lossy files
-there must not be converted, and neither must another record's.
-
-Lossy files are never converted (the design notes). They go to the lossy lane as they are, and both lanes are
-identified, genred, tagged and imported alike.
+Identification and tagging run **ahead of** conversion, because the converter carries metadata across, so the
+fingerprint is of the file as downloaded. Lossy files are never converted; both lanes are treated alike.
 """
 
 from __future__ import annotations
@@ -51,13 +35,15 @@ def execute(argv: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(argv, capture_output=True, text=True, check=False)
 
 
+def _failure_detail(result: subprocess.CompletedProcess) -> str:
+    """The last thing the tool said, for a failure message."""
+    lines = (result.stderr or result.stdout or "").strip().splitlines()
+    return lines[-1] if lines else "no output"
+
+
 @dataclass
 class Tools:
-    """What the stage reaches outside itself with, so a test can hand it fakes.
-
-    Every seam is optional. Without the identification ones the stage still converts, places and
-    normalizes — which is what it did before it could identify anything.
-    """
+    """What the stage reaches outside itself with, so a test can hand it fakes."""
 
     runner: Runner = execute
     hearing: identify.Hearing | None = None
@@ -106,7 +92,6 @@ _UNSAFE = str.maketrans({"/": "-", "\\": "-", ":": "-", "\0": ""})
 def filename_for(record: state.Record, suffix: str) -> str:
     """The house convention the library already uses: `Artist - Title`, with the mix in parentheses.
 
-    Ticket 05 measured it — 1457 of 1627 files carry no version marker, and the names are `Artist - Track`.
     A white-label request has no artist, so its title stands alone.
     """
     name = f"{record.artist} - {record.title}" if record.artist else record.title
@@ -117,7 +102,7 @@ def filename_for(record: state.Record, suffix: str) -> str:
 
 
 def tags_for(found: identify.Identified, *, genre_name: str = "") -> tag.Tags:
-    """Ticket 07's field list, and only that list: never BPM or key."""
+    """The fields a tag carries, and only those: never BPM or key."""
     return tag.Tags(
         title=found.title, artist=found.artist, album=found.album,
         album_artist=found.album_artist, year=found.year, label=found.label,
@@ -128,11 +113,7 @@ def tags_for(found: identify.Identified, *, genre_name: str = "") -> tag.Tags:
 
 
 def identify_one(record: state.Record, tools: Tools, log) -> identify.Identified:
-    """What the file is, or what its name says it is when nothing can be asked (the design notes).
-
-    A service being unreachable is deliberately not fatal: the track still has a name, and the tags it
-    can carry from that name are better than no track at all.
-    """
+    """What the file is, or what its name says it is when nothing can be asked."""
     if not tools.identifies:
         return identify.from_filename(record.request)
     try:
@@ -145,10 +126,10 @@ def identify_one(record: state.Record, tools: Tools, log) -> identify.Identified
 
 
 def apply_genre(record: state.Record, found: identify.Identified, tools: Tools, log) -> genre.Choice:
-    """Resolve the genre against the collection's own vocabulary, or leave it blank (the design notes).
+    """Resolve the genre against the collection's own vocabulary, or leave it blank.
 
-    Discogs styles come first and MusicBrainz genres second: that order was measured, and it is not what
-    one would guess. MusicBrainz's own genres had `electronic` claiming ten different library genres.
+    Discogs styles come first and MusicBrainz genres second: that order was measured, and it is not what one
+    would guess — MusicBrainz's own genres had `electronic` claiming ten different library genres.
     """
     offered = list(found.styles) + list(found.genres)
     if tools.vocabulary:
@@ -168,8 +149,8 @@ def convert(config: Config, source: Path, *, run: Runner, log) -> Path:
     """Run the canonical converter over one file, in a directory of its own.
 
     The script converts everything it finds in the directory it is given, so it is handed a pen holding
-    exactly this file. It deletes its input on success; on failure the input is put back, because the
-    script does not always survive to clean up after itself.
+    exactly this file. It deletes its input on success; on failure the input is put back, because the script
+    does not always survive to clean up after itself.
     """
     with tempfile.TemporaryDirectory(prefix="music-agent-convert-") as pen:
         parked = Path(pen) / source.name
@@ -179,18 +160,13 @@ def convert(config: Config, source: Path, *, run: Runner, log) -> Path:
         if result.returncode != 0 or not produced.is_file():
             if parked.exists():
                 shutil.move(str(parked), source)
-            detail = (result.stderr or result.stdout or "").strip().splitlines()
-            raise ProcessError(f"conversion failed: {detail[-1] if detail else 'no output'}")
+            raise ProcessError(f"conversion failed: {_failure_detail(result)}")
         log(f"      converted to {produced.name}")
         return produced
 
 
 def place(config: Config, record: state.Record, *, run: Runner, log) -> Path:
-    """Get one file into the lane it belongs in, under the name the collection uses.
-
-    Returns where the file now is, because everything after this — normalizing, tagging, importing —
-    needs the path rather than the lane.
-    """
+    """Get one file into the lane it belongs in, under the name the collection uses."""
     source = Path(record.local_path)
     if not source.is_file():
         raise ProcessError(f"the staged file is gone: {source}")
@@ -203,13 +179,12 @@ def place(config: Config, record: state.Record, *, run: Runner, log) -> Path:
     if lossless and suffix not in {".aiff", ".aif"}:
         source = convert(config, source, run=run, log=log)
 
-    # One extension for one format: `.aif` is an AIFF by another name, and pyrekordbox cannot add one —
-    # `add_content` upper-cases the suffix and asks its `FileType` enum for a member that does not exist
-    # (`AIF`), raising an `AttributeError` where it only catches a `ValueError`. So the copy is *renamed* as
-    # it is placed, never converted: the audio is already exactly what the collection wants.
+    # One extension for one format: pyrekordbox's `add_content` upper-cases the suffix and has no `AIF`
+    # member, so a `.aif` copy is renamed as it is placed, never converted — the audio is already what the
+    # collection wants.
     target = folder / filename_for(record, ".aiff" if source.suffix.lower() == ".aif" else source.suffix)
     if target.exists():
-        # Never overwrite: a name already taken means something the dedupe did not catch, and a quiet
+        # Never overwrite: a name already taken is something the dedupe did not catch, and a quiet
         # replacement would destroy a file rather than report a conflict.
         raise ProcessError(f"a file of that name is already there: {target}")
     shutil.move(str(source), target)
@@ -220,9 +195,8 @@ def place(config: Config, record: state.Record, *, run: Runner, log) -> Path:
 def normalize(config: Config, folder: Path, *, run: Runner, log) -> None:
     """Let the canonical normalizer look at the whole directory.
 
-    A directory, not a file, because that is how it keeps its own state (the design notes) — it records what it
-    has done inside the directory it is run on, and re-measuring 1283 files to loudness a handful would be
-    the wrong trade.
+    A directory, not a file, because that is where it keeps its own state: re-measuring a whole lane to
+    loudness a handful of files would be the wrong trade.
     """
     result = run([
         sys.executable, str(config.normalize_tool), str(folder),
@@ -231,8 +205,7 @@ def normalize(config: Config, folder: Path, *, run: Runner, log) -> None:
         "--tolerance", str(config.tolerance_lu),
     ])
     if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip().splitlines()
-        raise ProcessError(f"normalizing {folder} failed: {detail[-1] if detail else 'no output'}")
+        raise ProcessError(f"normalizing {folder} failed: {_failure_detail(result)}")
     log(f"      normalized {folder}")
 
 
@@ -253,14 +226,12 @@ class Retagged:
         return " · ".join(parts)
 
 
-def retag(config: Config, job: state.Job, *, tools: Tools | None = None, log=print) -> Retagged:
-    """Re-derive the genre on tracks already placed, and write it even though one is there (the design notes).
+def retag(job: state.Job, *, tools: Tools | None = None, log=print) -> Retagged:
+    """Re-derive the genre on tracks already placed, and write it even though one is there.
 
-    Ticket 10 stops a *run* from re-genring a track, because a genre cannot be undone after import and
-    changing one therefore has to be deliberate. This is the deliberate half of that rule: the table has
-    changed, and the tracks tagged under the old one carry names the collection no longer has. The genre is
-    resolved again from the services and written over whatever the file holds; when nothing resolves, the
-    old name is taken off, because the import reads the *file* and would mint a row for it.
+    A run never re-genres a track, because a genre cannot be undone after import, so changing one has to be
+    deliberate: the table has changed, and the tracks tagged under the old one carry names the collection no
+    longer has. When nothing resolves the old name comes off, because the import reads the *file*.
     """
     tools = tools or Tools()
     summary = Retagged()
@@ -277,8 +248,8 @@ def retag(config: Config, job: state.Job, *, tools: Tools | None = None, log=pri
             continue
 
         found = identify_one(record, tools, log)
-        # No ungenred event here, deliberately: the design notes counts names across runs, and these were counted
-        # the first time round. Counting them again would inflate a proposal rather than inform one.
+        # No ungenred event here: those names were counted when the run first genred these tracks, and
+        # counting them again would inflate a genre proposal rather than inform one.
         apply_genre(record, found, tools, log)
         try:
             tag.write(path, tags_for(found, genre_name=record.genre), replace_genre=True, log=log)
@@ -315,20 +286,8 @@ class Reconciled:
         return " · ".join(parts)
 
 
-def reconcile(config: Config, job: state.Job, *, log=print) -> Reconciled:
-    """Rebuild the records from the files this run downloaded (the design notes).
-
-    A status is the run's memory of what happened, and memory goes wrong — a pass can reset it, a command can
-    be interrupted, a repair can be too eager. The files cannot go wrong: they are what is on disk. This sets
-    each record to what its own file says.
-
-    The provenance is the run's **`downloaded` events**, because only a record the run fetched can have left a
-    file in a lane. Matching by name across the library instead is exactly what put 168 tracks the user already
-    holds into this run's records on 2026-10-12, each with `replaces` equal to `local_path` — the pair the
-    import points a row at and then deletes. Nothing here is invented either: a record whose file is not on
-    disk is reported, never guessed at.
-    """
-    summary = Reconciled()
+def _downloaded(config: Config, job: state.Job) -> set[int]:
+    """The indices this run fetched, read from its own events."""
     fetched: set[int] = set()
     for line in (config.state_root / job.id / state.EVENTS).read_text(encoding="utf-8").splitlines():
         if not line.strip():
@@ -336,8 +295,11 @@ def reconcile(config: Config, job: state.Job, *, log=print) -> Reconciled:
         event = json.loads(line)
         if event.get("event") == "downloaded" and event.get("idx") is not None:
             fetched.add(event["idx"])
+    return fetched
 
-    # One scan of both lanes. Lossless first: when both hold a stem the lossless copy is the upgrade.
+
+def _in_lanes(config: Config) -> dict[str, Path]:
+    """Both lanes in one scan, by stem. Lossless first: when both hold a stem that copy is the upgrade."""
     on_disk: dict[str, Path] = {}
     for lane in (config.lossless, config.lossy):
         if not lane.is_dir():
@@ -345,6 +307,19 @@ def reconcile(config: Config, job: state.Job, *, log=print) -> Reconciled:
         for path in sorted(lane.iterdir()):
             if path.is_file() and not path.name.startswith("."):
                 on_disk.setdefault(path.stem, path)
+    return on_disk
+
+
+def reconcile(config: Config, job: state.Job, *, log=print) -> Reconciled:
+    """Rebuild the records from the files this run downloaded.
+
+    Only a record whose `downloaded` event is in the run's own events can have left a file in a lane, so
+    matching by name across the whole library instead is what once pulled already-held tracks into a run's
+    records. A record whose file is not on disk is reported, never guessed at.
+    """
+    summary = Reconciled()
+    fetched = _downloaded(config, job)
+    on_disk = _in_lanes(config)
 
     records = job.records()
     doomed: list[int] = []
@@ -357,7 +332,13 @@ def reconcile(config: Config, job: state.Job, *, log=print) -> Reconciled:
             log(f"[{record.idx}] {record.label}: downloaded, but no file of that name in a lane")
             continue
         written = tag.read(path)
-        status = state.TAGGED if written.title else state.NORMALIZED
+        if record.status == state.IMPORTED:
+            # The file in the lane is not the whole truth about a track the import has finished — the
+            # collection's row is. Rebuilt from the file alone, every imported track came back as merely
+            # tagged, and the next import then had to find all of them again.
+            status = state.IMPORTED
+        else:
+            status = state.TAGGED if written.title else state.NORMALIZED
         if record.local_path == str(path) and record.status == status and record.genre == written.genre:
             summary.already.append(record.idx)
             continue
@@ -388,7 +369,6 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
     tools = tools or Tools()
     records = job.records()
     summary = Summary()
-    touched: set[Path] = set()
     placed: list[state.Record] = []
     found: dict[int, identify.Identified] = {}
 
@@ -399,8 +379,8 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
             found[record.idx] = identify_one(record, tools, log)
             choice = apply_genre(record, found[record.idx], tools, log)
             if not choice.found and choice.considered:
-                # Ticket 06: counted so that a name fitting nothing on enough tracks can be proposed as a
-                # genre rather than staying blank for ever.
+                # Counted so that a name fitting nothing on enough tracks can be proposed as a genre rather
+                # than staying blank for ever.
                 job.append_event(state.UNGENERED_EVENT, idx=record.idx,
                                  names=list(choice.considered))
             landed = place(config, record, run=tools.runner, log=log)
@@ -413,26 +393,23 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
             continue
         record.local_path = str(landed)     # the record follows the file
         record.status = state.CONVERTED
-        touched.add(landed.parent)
         placed.append(record)
         summary.placed.append(record.idx)
         job.write_records(records)          # a crash costs the current track and nothing else
 
-    def in_folder(folder: Path) -> list[state.Record]:
-        return [record for record in placed if Path(record.local_path).parent == folder]
-
-    for folder in sorted(touched):
+    for folder in sorted({Path(record.local_path).parent for record in placed}):
+        in_lane = [record for record in placed if Path(record.local_path).parent == folder]
         try:
             normalize(config, folder, run=tools.runner, log=log)
         except ProcessError as error:
-            for record in in_folder(folder):
+            for record in in_lane:
                 record.status = state.RETRY_LATER
                 record.notes = str(error)
             job.append_event("normalize_failed", folder=str(folder), error=str(error))
             log(f"{folder}: {error}")
-            summary.failed.extend(record.idx for record in in_folder(folder))
+            summary.failed.extend(record.idx for record in in_lane)
             continue
-        for record in in_folder(folder):
+        for record in in_lane:
             record.status = state.NORMALIZED
             summary.normalized.append(record.idx)
 
@@ -450,8 +427,8 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
             log(f"[{record.idx}] {record.label}: {error}")
             continue
         if record.genre and "genre" not in written:
-            # An existing genre is never replaced (the design notes), so the record has to follow the file rather
-            # than claim a genre the file does not carry — the import reads the record, not the tag.
+            # An existing genre is never replaced, so the record has to follow the file rather than claim a
+            # genre the file does not carry — the import reads the record, not the tag.
             kept = tag.read(Path(record.local_path)).genre
             log(f"      it already carried a genre, so {kept!r} stays rather than {record.genre!r}")
             record.genre = kept

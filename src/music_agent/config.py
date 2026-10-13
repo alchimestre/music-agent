@@ -1,8 +1,7 @@
 """Configuration: `config.toml` at the repo root, read with the standard library.
 
-Ticket 07: it holds the directories, the loudness targets and tolerances, and the *names* of the
-environment variables carrying the credentials — never the secrets themselves, so this file is safe to
-read and to commit.
+It holds the directories, the loudness targets and tolerances, and the *names* of the environment variables
+carrying the credentials — never the secrets, so this file is safe to commit.
 """
 
 from __future__ import annotations
@@ -11,8 +10,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-# How a caller tells the human where a missing value goes. One string, so every credential says the same
-# thing.
+# One string, so every credential tells the human the same thing.
 ENV_HINT = "set -a; source .env; set +a"
 
 
@@ -47,9 +45,8 @@ class Config:
     max_searches: int
     max_operations: int
     workers: int
-    # A floor on the gap between two searches we ask for, in seconds, and ours rather than the child's:
-    # nothing in the pinned build paces searches, and nothing in it reports one being ignored (the design notes).
-    # 0 turns the pace off.
+    # A floor on the gap between two searches we ask for, in seconds. Ours rather than the child's:
+    # nothing in the pinned build paces searches, and nothing reports one being ignored. 0 turns it off.
     search_interval: float
     slsk_username_env: str
     slsk_password_env: str
@@ -74,8 +71,8 @@ DEFAULTS = Config(
     musicbrainz_contact_env="MUSICBRAINZ_CONTACT",
     acoustid_key_env="ACOUSTID_API_KEY",
     discogs_token_env="DISCOGS_TOKEN",
-    # Ticket 03 was verified against this commit. Pinned rather than floating on a branch: the match
-    # rules read specific fields, and a rebuild that moved them should fail loudly, not quietly.
+    # Verified against this commit. Pinned rather than floating on a branch: the match rules read
+    # specific fields, and a rebuild that moved them should fail loudly, not quietly.
     soulseek_command=(
         "uvx", "--from",
         "git+https://github.com/voidtype/slsk_mcp.git@df06ca17e2931246b1f139abf028a22e808da7a3",
@@ -84,24 +81,22 @@ DEFAULTS = Config(
     slsk_username_env="SLSK_USERNAME",
     slsk_password_env="SLSK_PASSWORD",
     # aioslsk would listen on 60000/60001, which the omp MCP's own slsk server already holds on this
-    # machine — a second binder fails its login outright. 20000 is the port Soulseek uses here, with
-    # the obfuscated listener alongside it.
+    # machine — a second binder fails its login outright. 20000 is the port Soulseek uses here.
     soulseek_listen_port=20000,
     soulseek_obfuscated_port=20001,
-    # the user, 2026-10-12: the user runs twenty transfers at a time himself, and one at a time is nonsense. The
-    # server's own defaults are 3 transfers, 4 searches and *one* operation — that last is the connection
-    # lock, which holds a search for its whole window, so searches cannot overlap at all until it is raised.
+    # Twenty transfers at a time, not one: the server's own defaults are 3 transfers, 4 searches and
+    # *one* operation — that last is the connection lock, which holds a search for its whole window, so
+    # searches cannot overlap at all until it is raised.
     max_downloads=20,
     max_searches=8,
     max_operations=8,
     workers=20,
-    # Ticket 21: a pass on 2026-10-12 fired 330 searches in six minutes — eight at a time — and every
-    # search after the first seconds was answered with nothing, silently. Five seconds is twelve a minute,
-    # a quarter of that rate. The threshold is a guess, which is why it is a knob.
+    # A pass once fired 330 searches in six minutes — eight at a time — and every search after the first
+    # seconds was answered with nothing, silently. Five seconds is twelve a minute, a quarter of that
+    # rate. The threshold is a guess, which is why it is a knob.
     search_interval=5.0,
     # The map keeps both of these canonical, so the CLI drives them instead of reimplementing them. The
-    # normalizer needs only ffmpeg and mutagen, and mutagen is one of our own dependencies, so it runs
-    # under this interpreter.
+    # normalizer needs only ffmpeg and mutagen, and mutagen is one of our own dependencies.
     convert_tool=Path("~/Music/convert_to_aiff.sh").expanduser(),
     normalize_tool=Path("~/projects/loudness_normalizer/loudness_normalizer.py").expanduser(),
 )

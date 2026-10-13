@@ -1,24 +1,15 @@
 """What the collection already holds, and the vocabulary a genre has to come from.
 
-Ticket 02: the collection is a SQLCipher database that pyrekordbox reads with the key it caches. Ticket 09
-needs one question answered before anything is fetched — is this track already held, by normalized artist
-and title with a length inside the same ±1 s window the matcher uses — and the design notes needs the genre
-vocabulary, which exists nowhere else: only 27 of 1627 files carry a genre tag, so the list lives in the
-database and has to be read from it.
-
-Three things about the fields, all found rather than assumed. `Content.FolderPath` holds the **whole file
-path**, despite the name. `Length` is already in seconds, not milliseconds. And the rows do not all point
-at files: of 1567 rows today, 1544 have their file on disk and 23 do not.
-
-The directories are read as well as the database, because a file can be present with no row at all — ticket
-10 counted 83 of those. Reading a length from a header costs about a millisecond, so the library indexes in
-roughly a second and nothing here needs caching.
+The collection is a SQLCipher database that pyrekordbox reads with the key it caches, and the directories
+are read as well because a file can be present with no row at all. Two field traps: `Content.FolderPath`
+holds the whole file path despite its name, and `Length` is already in seconds.
 """
 
 from __future__ import annotations
 
 import unicodedata
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import Config
@@ -42,20 +33,17 @@ class Held:
 
     @property
     def key(self) -> tuple[str, str]:
-        """The identity a match is made on — folded, so accents and case cannot break it (tickets 09, 14)."""
+        """The identity a match is made on — folded, so accents and case cannot break it."""
         return (fold(self.artist), fold(self.title))
 
     @property
     def lossless(self) -> bool:
-        """Which lane this copy is in, from its extension — the rule the matcher uses for candidates.
-
-        Ticket 09: a lossy copy does not make a track held, when a lossless one could replace it.
-        """
+        """Which lane this copy is in, from its extension."""
         return Path(self.path).suffix.lower().lstrip(".") in LOSSLESS_EXTENSIONS
 
 
 def path_key(path: str | Path) -> str:
-    """Ticket 10: NFC and casefolded, because raw equality matches only 1342 of 1627 library paths."""
+    """NFC and casefolded: raw equality matches only 1342 of the 1627 library paths."""
     return unicodedata.normalize("NFC", str(path)).casefold()
 
 
@@ -70,16 +58,15 @@ class Library:
                 self._by_key.setdefault(row.key, []).append(row)
 
     def genres(self) -> list[str]:
-        """The vocabulary a genre has to come from (the design notes)."""
+        """The vocabulary a genre has to come from."""
         return list(self._genres)
 
     def held(self, artist: str, title: str, seconds: int | None) -> Held | None:
         """The row for this track when the collection already holds it, else None.
 
-        Ticket 09: normalized artist and title, and a length within the window the matcher already uses —
-        the same `DURATION_WINDOW`, so "already held" can never be looser than "the right file". Without a
-        length there is nothing to compare, so the answer is None: the track is not *known* to be held, and
-        a search costs less than a wrong skip.
+        Folded artist and title, and a length within the matcher's own `DURATION_WINDOW`, so "already
+        held" can never be looser than "the right file". Without a length there is nothing to compare, so
+        the answer is None: the track is not *known* to be held, and a search costs less than a wrong skip.
         """
         if seconds is None:
             return None
@@ -91,9 +78,9 @@ class Library:
     def rows_for(self, artist: str, title: str) -> list[Held]:
         """Every row under this name, whatever its length.
 
-        The upgrade case needs this and the ordinary case must not use it: a length mismatch usually means
-        a different version, but when the copy in the collection *is* the reference — because MusicBrainz
-        holds no recording for a white-label — the name is the only thing left to recognise it by.
+        Only the upgrade case needs this: a length mismatch usually means a different version, but when the
+        copy in the collection *is* the reference — a white-label MusicBrainz holds no recording for — the
+        name is the only thing left to recognise it by.
         """
         return list(self._by_key.get((fold(artist), fold(title)), []))
 
@@ -114,11 +101,9 @@ class Sound:
 def sound_of(path: Path) -> Sound:
     """A file's length, sample rate and bit rate, read from its header.
 
-    Read rather than measured: the import writes these into the collection, and a header costs about a
-    millisecond where decoding the audio would cost a great deal more.
-
-    `bit_rate` is bits per second, as the header gives it. The collection wants kbps and the import converts;
-    the 1,214 AIFFs say 1411 where this says 1411200.
+    Read rather than measured: a header costs about a millisecond where decoding the audio would cost a
+    great deal more. `bit_rate` is bits per second as the header gives it, and the import — which writes
+    these into the collection — converts it to the kbps the collection wants.
     """
     from mutagen import File as MutagenFile
 
@@ -147,8 +132,8 @@ def seconds_of(path: Path) -> int | None:
 def read_database() -> tuple[list[Held], list[str]]:
     """Every row the collection holds, and its genre vocabulary.
 
-    pyrekordbox is imported here rather than at the top so that the matching rules in this module can be
-    read, and tested, without a database anywhere near them.
+    pyrekordbox is imported here rather than at the top, so the matching rules in this module can be
+    read and tested without a database anywhere near them.
     """
     from pyrekordbox import Rekordbox6Database
 
@@ -196,3 +181,44 @@ def open(config: Config) -> Library:
             "database where pyrekordbox expects it?"
         ) from error
     return Library(rows + read_directories(config), genres)
+
+
+@dataclass(frozen=True)
+class Unpointed:
+    """Files and rows that do not line up — what a run leaves behind.
+
+    None of it is wrong enough to repair unasked, so it is reported and left alone: a re-download puts a
+    second copy in a lane, a refused placement leaves its file in staging, and a row outlives its file.
+    """
+
+    staged: list[Path] = field(default_factory=list)   # in staging, with no record pointing at it
+    lane: list[Path] = field(default_factory=list)     # in a lane, with no row and no record pointing at it
+    gone: list[str] = field(default_factory=list)      # a row points at a file that is not there
+
+    def empty(self) -> bool:
+        return not (self.staged or self.lane or self.gone)
+
+
+def unpointed(config: Config, *, claimed: Iterable[str] = ()) -> Unpointed:
+    """What nothing points at, and what points at nothing.
+
+    `claimed` is the path keys of the run's own records: a staged file a record still owns is not a
+    leftover, however long the run has held it.
+    """
+    owned = {path_key(path) for path in claimed}
+    rows, _genres = read_database()
+    row_paths = {path_key(row.path) for row in rows if row.path}
+
+    leftovers = Unpointed()
+    for held in sorted(read_directories(config), key=lambda entry: entry.path):
+        key = path_key(held.path)
+        if key not in row_paths and key not in owned:
+            leftovers.lane.append(Path(held.path))
+    if config.staging.is_dir():
+        for path in sorted(config.staging.iterdir()):
+            # A cancelled transfer leaves the client's own `.part` file here, which is as much a leftover as
+            # a whole track is, so nothing is filtered by extension.
+            if path.is_file() and not path.name.startswith(".") and path_key(path) not in owned:
+                leftovers.staged.append(path)
+    leftovers.gone.extend(row.path for row in rows if row.path and not Path(row.path).is_file())
+    return leftovers

@@ -17,7 +17,6 @@ from audio_files import aiff
 
 from music_agent import config as config_module
 from music_agent import importing, state, tag
-from music_agent.parsing import fold
 
 
 @pytest.fixture(autouse=True)
@@ -280,7 +279,7 @@ def test_the_backup_copies_the_write_ahead_files(tmp_path):
     database.session = SimpleNamespace(get_bind=lambda: SimpleNamespace(
         url=SimpleNamespace(database=str(live))))
 
-    where = importing.backup(database, log=quiet)
+    where = importing.backup(database)
 
     assert where is not None
     assert where.read_bytes() == b"the collection"
@@ -289,7 +288,7 @@ def test_the_backup_copies_the_write_ahead_files(tmp_path):
 
 
 def test_a_backup_with_nothing_to_copy_says_so_rather_than_failing(tmp_path):
-    assert importing.backup(FakeDatabase(), log=quiet) is None
+    assert importing.backup(FakeDatabase()) is None
 
 
 # ── against the real thing, on a copy ────────────────────────────────────────

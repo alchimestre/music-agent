@@ -10,8 +10,6 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-import pytest
-
 from audio_files import aiff, mp4
 
 from music_agent import config as config_module
@@ -470,6 +468,44 @@ def test_reconcile_reads_a_record_back_off_the_file_this_run_downloaded(tmp_path
     assert job.records()[1].local_path == "", "and not adopted by name"
 
 
+def test_reconcile_leaves_an_imported_track_imported(tmp_path):
+    """The file in the lane is not the whole truth about a track the import has finished: the collection's row
+    is. Rebuilt from the file alone, 49 imported tracks came back as merely tagged."""
+    config = make_config(tmp_path)
+    config.lossless.mkdir(parents=True, exist_ok=True)
+    placed = aiff(config.lossless / "Kiasmos - Blurred.aiff")
+    tag.write(placed, tag.Tags(title="Blurred", artist="Kiasmos", genre="Techno"))
+    record = state.Record(idx=1, artist="Kiasmos", title="Blurred", status=state.IMPORTED,
+                          local_path=str(placed), genre="Techno")
+    job = job_with(config, [record])
+    job.append_event("downloaded", idx=1, path=str(config.staging / "Kiasmos - Blurred.flac"))
+
+    summary = process.reconcile(config, job)
+
+    assert summary.already == [1], "nothing was rebuilt, so nothing was written"
+    assert summary.reconciled == []
+    assert job.records()[0].status == state.IMPORTED
+
+
+def test_reconcile_still_repoints_an_imported_record_whose_path_was_lost(tmp_path):
+    """The other half: the status is kept, the path is repaired."""
+    config = make_config(tmp_path)
+    config.lossless.mkdir(parents=True, exist_ok=True)
+    placed = aiff(config.lossless / "Kiasmos - Blurred.aiff")
+    tag.write(placed, tag.Tags(title="Blurred", artist="Kiasmos"))
+    record = state.Record(idx=1, artist="Kiasmos", title="Blurred", status=state.IMPORTED,
+                          local_path=str(config.staging / "stale.flac"))
+    job = job_with(config, [record])
+    job.append_event("downloaded", idx=1, path=str(config.staging / "Kiasmos - Blurred.flac"))
+
+    summary = process.reconcile(config, job)
+
+    assert summary.reconciled == [1]
+    after = job.records()[0]
+    assert after.local_path == str(placed), "the record follows the file"
+    assert after.status == state.IMPORTED, "and the collection's row is still what it points at"
+
+
 def test_reconcile_names_what_it_cannot_find_rather_than_guessing(tmp_path):
     config = make_config(tmp_path)
     record = state.Record(idx=1, artist="Kiasmos", title="Blurred", status=state.RETRY_LATER)
@@ -496,7 +532,7 @@ def test_a_re_tag_replaces_the_genre_the_file_already_carries(tmp_path):
     tools = process.Tools(hearing=hearing, matches=matches, brainz=brainz, discogs=discogs,
                           vocabulary=["Jazz & Soul"], mappings={"jazz": "Jazz & Soul"})
 
-    summary = process.retag(config, job, tools=tools, log=lambda *_: None)
+    summary = process.retag(job, tools=tools, log=lambda *_: None)
 
     assert tag.read(path).genre == "Jazz & Soul", "written over the name the old table left"
     assert job.records()[0].genre == "Jazz & Soul", "the record follows the file, as it does in a run"
@@ -516,7 +552,7 @@ def test_a_re_tag_that_resolves_to_nothing_takes_the_old_name_off(tmp_path):
     tools = process.Tools(hearing=hearing, matches=matches, brainz=brainz, discogs=discogs,
                           vocabulary=["Jazz & Soul"], mappings={"jazz": "Jazz & Soul"})
 
-    summary = process.retag(config, job, tools=tools, log=lambda *_: None)
+    summary = process.retag(job, tools=tools, log=lambda *_: None)
 
     assert tag.read(path).genre == ""
     assert summary.cleared == [1]

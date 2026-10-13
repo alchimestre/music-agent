@@ -93,6 +93,28 @@ def test_the_resume_target_is_the_newest_unfinished_run(tmp_path):
     assert state.newest_unfinished(config).id != first.id
 
 
+def test_the_newest_run_is_the_last_one_by_id(tmp_path):
+    config = make_config(tmp_path)
+    state.create(config, "first")
+    second = state.create(config, "second")
+
+    assert state.newest(config).id == second.id
+
+
+def test_a_finished_run_is_still_the_newest_run(tmp_path):
+    """A run the import has closed is still the run whose queue, genres and leftovers are worth reading."""
+    config = make_config(tmp_path)
+    job = state.create(config, "run")
+    job.finish()
+
+    assert state.newest_unfinished(config) is None
+    assert state.newest(config).id == job.id
+
+
+def test_no_runs_at_all_is_no_newest_run(tmp_path):
+    assert state.newest(make_config(tmp_path)) is None
+
+
 def test_a_finished_run_is_not_the_resume_target(tmp_path):
     config = make_config(tmp_path)
     job = state.create(config, "only")
@@ -144,3 +166,105 @@ def test_the_names_that_fitted_nothing_are_counted_across_runs(tmp_path):
     second.append_event("searched", idx=1, added=3)
 
     assert state.ungenred_names([first, second]) == {"Goa Trance": 2, "Krautrock": 1}
+
+
+# ── the queue, split by why a track is in it (the design notes) ─────────────────────
+
+
+def a_track_with_only_a_rejection(idx: int = 3) -> state.Record:
+    """An aiff half a minute longer than the reference, so the rule rules it out rather than asking."""
+    return state.Record(idx=idx, artist="Sven Wunder", title="Lotus", duration_s=260,
+                        candidates=[Candidate(user="crate", path=r"C\Sven Wunder - Lotus.aiff",
+                                              duration=290)])
+
+
+def test_a_track_the_rule_can_settle_is_not_in_the_queue(tmp_path):
+    """The pass owes that track, not a person — it never reaches the review queue."""
+    job = state.create(make_config(tmp_path), "run")
+    job.write_records([a_settled_track(idx=1)])
+
+    waiting = state.queue(job)
+    assert waiting.undecided == []
+    assert waiting.decided == []
+
+
+def test_the_queue_separates_the_four_reasons_a_track_is_still_open(tmp_path):
+    job = state.create(make_config(tmp_path), "run")
+    job.write_records([
+        a_settled_track(idx=1),
+        a_track_needing_you(idx=2),
+        a_track_with_only_a_rejection(idx=3),
+        state.Record(idx=4, artist="Bogus", title="Rare"),
+        state.Record(idx=5, artist="Bought", title="Elsewhere"),
+    ])
+    job.append_event("searched", idx=4, added=0, offered=0)     # asked, and the network held nothing
+    records = job.records()
+    records[4].decision = state.DECLINED
+    records[4].status = state.NOT_FOUND
+    job.write_records(records)
+
+    waiting = state.queue(job)
+
+    assert [r.idx for r in waiting.needs_you] == [2]
+    assert [r.idx for r in waiting.refused] == [3]
+    assert [r.idx for r in waiting.nothing_offered] == [4]
+    assert waiting.not_searched == []
+    assert [r.idx for r in waiting.decided] == [5]
+
+
+def test_a_search_that_never_happened_is_not_a_fact_about_the_track(tmp_path):
+    """Ticket 21's whole point: no candidates and no search is not the same as a search that came back
+    empty."""
+    config = make_config(tmp_path)
+    job = state.create(config, "run")
+    job.write_records([state.Record(idx=1, artist="Bogus", title="Rare")])
+
+    assert [r.idx for r in state.queue(job).not_searched] == [1]
+    assert state.queue(job).nothing_offered == []
+
+    job.append_event("searched", idx=1, added=0, offered=0)
+
+    assert state.queue(job).not_searched == []
+    assert [r.idx for r in state.queue(job).nothing_offered] == [1]
+
+
+def test_a_decided_track_is_not_asked_about_again(tmp_path):
+    job = state.create(make_config(tmp_path), "run")
+    job.write_records([a_track_needing_you(idx=2)])
+    records = job.records()
+    records[0].decision = state.SKIPPED
+    job.write_records(records)
+
+    waiting = state.queue(job)
+    assert waiting.needs_you == []
+    assert [r.idx for r in waiting.decided] == [2]
+
+
+def test_the_summary_says_why_nothing_was_usable(tmp_path):
+    config = make_config(tmp_path)
+    job = state.create(config, "run")
+    job.write_records([a_settled_track(idx=1), a_track_needing_you(idx=2),
+                       a_track_with_only_a_rejection(idx=3),
+                       state.Record(idx=4, artist="Bogus", title="Rare")])
+
+    summary = job.summary()
+    assert summary["tracks"] == 4
+    assert summary["in_review"] == 1
+    assert summary["settled"] == 1
+    assert summary["not_searched"] == 1
+    assert summary["nothing_offered"] == 0
+    assert summary["refused"] == 1
+    assert summary["nothing_usable"] == 2
+    assert summary["decided"] == 0
+
+
+def test_the_status_file_carries_the_split(tmp_path):
+    config = make_config(tmp_path)
+    job = state.create(config, "run")
+    job.write_records([a_track_needing_you(idx=2), state.Record(idx=4, artist="Bogus", title="Rare")])
+    job.write_status(config)
+
+    text = job.status_path.read_text(encoding="utf-8")
+    assert "Not searched: 1" in text
+    assert "The network offered nothing: 0" in text
+    assert "Every offer refused: 0" in text

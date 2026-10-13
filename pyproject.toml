@@ -7,7 +7,15 @@ requires-python = ">=3.13"
 # include, which is why the genre path calls ws/2 directly (the design notes). pyrekordbox is pinned to the
 # version the design notes read the schema with. mutagen reads a length straight from a header, in about a
 # millisecond, which is what makes indexing the library directories cheap enough to do every run.
-dependencies = ["musicbrainzngs==0.7.1", "pyrekordbox==0.4.3", "mutagen"]
+# textual and rich are pinned to the versions the screen was built and verified against — the
+# same pair JobRadar runs — because a review screen that renders differently is a screen nobody checked.
+dependencies = [
+    "musicbrainzngs==0.7.1",
+    "pyrekordbox==0.4.3",
+    "mutagen",
+    "textual==8.2.8",
+    "rich==15.0.0",
+]
 
 [project.scripts]
 music-agent = "music_agent.cli:main"

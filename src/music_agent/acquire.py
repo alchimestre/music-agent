@@ -1,26 +1,7 @@
 """The acquisition stage: a tracklist, through the reference, to files in staging.
 
-Ticket 07 puts every deterministic step in the CLI, so the stage is a plain loop over a job's records:
-resolve the reference, search, classify, take the ladder's pick, download it, and watch it until the file
-is on disk or the candidate is hopeless. the user, 2026-10-12: `workers` of those ladders run at once, in
-threads — nearly all of a track's time is spent waiting, and the server's ceiling on transfers, not our
-loop, is what decides how many files move together.
-
-Five things are worth reading the code for.
-
-- **The disk decides, never the status.** The server drops a finished record sixty seconds after
-  completion, so a later poll answers `not_found` about a download that in fact succeeded (the design notes).
-  Every outcome here is settled by looking for the file.
-- **A rotated download is cancelled.** The server transfers `max_downloads` files at once, so a stalled
-  transfer left running does not merely waste bandwidth — it holds a slot the candidate we try next wants.
-- **A peer that declared a queue is not a stall.** It gets a longer budget, and is not rotated on the
-  45-second timer that a stalled connection earns (the design notes).
-- **A transfer in flight is never rotated on that timer either.** Bytes are the signal: only a transfer
-  that has stopped moving bytes for minutes is dead.
-- **Searches are paced, and the pace is ours.** The network answers searches at a rate, nothing below us
-  keeps to it, and nothing below us says when it has stopped answering at all — a throttled search and a
-  rare track are the same empty payload (the design notes). So the pass spaces its own searches out and says what
-  the pace is; the overlap the child allows is a consequence of that rate, never the target.
+Every outcome is settled by looking for the file, never by the status: the server drops a finished record
+sixty seconds after completion, so a later poll answers `not_found` about a download that did succeed.
 """
 
 from __future__ import annotations
@@ -28,7 +9,7 @@ from __future__ import annotations
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 
@@ -40,28 +21,20 @@ from .parsing import search_query
 from .reference import Lookup
 from .rules import Candidate
 
-# Seconds to let peers answer a search, and how many results to ask for. Ticket 03: results are sorted and
-# truncated server-side, so a small cap discards good candidates before we ever see them.
-SEARCH_TIMEOUT = 12         # the child sleeps exactly this long after the query goes out, so it is how long
-                            # a peer has to answer at all. Seven had been taken as the child's own floor, and
-                            # discarded peers answering at second ten; the design notes: with the pace below
-                            # deciding how much searching happens at once, a generous window costs nothing.
-CALL_TIMEOUT = 15.0         # the user, 2026-10-12: a minute waiting on one track is too long
+# The child sleeps exactly this long after a query goes out, so this is how long a peer has to answer at
+# all. The server sorts and truncates results, so a small cap discards good candidates before we see them.
+SEARCH_TIMEOUT = 12
+CALL_TIMEOUT = 15.0
 MAX_RESULTS = 60
 
-# Ticket 22: candidates attempted per track, per pass. Three was the, chosen when a pass was bound
-# by its workers — so one track's bad luck could not be allowed to spend the pass. What a pass costs now is
-# the searching (the pace), not the attempting, so an untried candidate is only a peer that may be
-# gone by a later pass: 38 Ready ones were left that way in a single 2026-10-12 pass. Ten rather than
-# unbounded, because the budgets below still bound a track's total time.
+# Candidates attempted per track, per pass.
 MAX_CANDIDATES = 10
 
-# Ticket 04: a connection that never transferred a byte is rotated after 45 seconds.
+# A connection that never transferred a byte is rotated after this long.
 CONNECT_BUDGET = 45.0
 
-# Not fixed by the map. A peer that said it had a queue is behaving normally rather than failing, so it
-# gets a budget long enough to be worth waiting for; and a transfer that has stopped moving bytes for five
-# minutes is dead whatever the server says about it.
+# A peer that declared a queue is behaving normally rather than failing, so it gets a budget worth waiting
+# for; and a transfer that has stopped moving bytes for five minutes is dead whatever the server says.
 QUEUE_BUDGET = 300.0
 STALL_BUDGET = 300.0
 
@@ -78,8 +51,8 @@ class Move(Enum):
 
     WAIT = "wait"
     ROTATE = "rotate"       # give up on this candidate; another may be better
-    DONE = "done"           # the file is on disk
-    FAILED = "failed"       # this candidate will never produce a file
+    DONE = "done"
+    FAILED = "failed"
 
 
 @dataclass(frozen=True)
@@ -96,15 +69,14 @@ class Transfer:
 
 
 def move(transfer: Transfer, *, on_disk: bool, stuck_for: float, declared_queue: int = 0) -> Move:
-    """What to do next, given how long the transfer has gone without moving a byte.
+    """What to do next, given seconds since `received_bytes` last increased.
 
-    `stuck_for` is seconds since `received_bytes` last increased — before anything transfers, that is
-    simply how long the download has been running.
+    Before anything transfers, that is simply how long the download has been running.
     """
     if on_disk:
         return Move.DONE
     if transfer.status == "finished":
-        # The rename may not have landed yet; the next poll settles it either way.
+        # The `.part` rename may not have landed yet; the next poll settles it either way.
         return Move.WAIT if stuck_for <= FINISHED_GRACE else Move.FAILED
     if transfer.status in _OVER:
         return Move.FAILED
@@ -127,30 +99,47 @@ def transfer_of(payload: dict) -> Transfer:
     )
 
 
+def length_from_size(candidate: Candidate) -> int | None:
+    """A lossy file's length from the bytes it will send and the bitrate the peer reported.
+
+    Bytes are bitrate × seconds / 8, so a peer that reported a bitrate and a size has reported the length
+    even when it left the duration attribute empty — and a file the rule can judge is a file it does not have
+    to ask the user about. Only for lossy files: on a lossless one `bitrate` carries the server's quality
+    score, which is a different quantity and gives a length a few seconds out.
+    """
+    if candidate.lossless or not candidate.bitrate or not candidate.size_bytes:
+        return None
+    return round(candidate.size_bytes * 8 / (candidate.bitrate * 1000))
+
+
 def candidate_of(item: dict) -> Candidate | None:
     """One search result, or None when it names no file we could ask for.
 
-    For a lossless file the server reports its quality score in `bitrate` rather than a kbps rate. That is
-    harmless: the quality floor only reads the field for lossy files, and the ladder reads it as a quality
-    tiebreak, which is what it is.
+    For a lossless file the server reports its quality score in `bitrate` rather than a kbps rate; harmless,
+    because the quality floor only reads that field for lossy files.
     """
     user = str(item.get("username") or "")
     path = str(item.get("filename") or "")
     if not user or not path:
         return None
     duration = item.get("duration_sec")
-    return Candidate(
+    candidate = Candidate(
         user=user,
         path=path,
         duration=int(duration) if duration is not None else None,
         bitrate=item.get("bitrate"),
         queue=int(item.get("queue_size") or 0),
+        # Carried because the review screen shows it: a peer with a queue behind it is a wait to weigh.
+        slots=bool(item.get("has_free_slots", True)),
         size_bytes=item.get("filesize"),
     )
+    if candidate.duration is None:
+        candidate = replace(candidate, duration=length_from_size(candidate))
+    return candidate
 
 
 def identifier(candidate: Candidate) -> str:
-    """The id the server wants back. Ticket 03: it is `{username}:{filename}`, nothing more."""
+    """The id the server wants back: `{username}:{filename}`."""
     return f"{candidate.user}:{candidate.path}"
 
 
@@ -161,10 +150,11 @@ class Summary:
     downloaded: list[int] = field(default_factory=list)
     already_downloaded: list[int] = field(default_factory=list)
     already_held: list[int] = field(default_factory=list)
+    decided: list[int] = field(default_factory=list)      # settled by hand
     in_review: list[int] = field(default_factory=list)
     nothing_usable: list[int] = field(default_factory=list)
     failed: list[int] = field(default_factory=list)
-    unsearched: list[int] = field(default_factory=list)   # the network stopped answering (the design notes)
+    unsearched: list[int] = field(default_factory=list)   # the network stopped answering
 
     def report(self) -> str:
         parts = [
@@ -176,6 +166,8 @@ class Summary:
             parts.append(f"{len(self.already_held)} already in the library")
         if self.already_downloaded:
             parts.append(f"{len(self.already_downloaded)} already downloaded")
+        if self.decided:
+            parts.append(f"{len(self.decided)} settled by hand")
         if self.failed:
             parts.append(f"{len(self.failed)} to retry")
         if self.unsearched:
@@ -183,18 +175,16 @@ class Summary:
         return " · ".join(parts)
 
 
-# Ticket 21, the second half. A search that comes back with nothing is a rare track; this many in a row is a
-# network that has stopped answering. On 2026-10-12 a pass spent 146 searches in a row that way and reported
-# 205 tracks as *nothing usable* — a fact about the network, written down as a fact about the tracks.
+# This many empty searches in a row is a network that has stopped answering, not a run of rare tracks.
 QUIET_AFTER = 50
 
 
 @dataclass
 class QuietNetwork:
-    """Searches in a row that came back empty, and the decision to stop asking (the design notes).
+    """Searches in a row that came back empty, and the decision to stop asking.
 
-    The count is *in a row*: one hit anywhere means the network is answering, so it resets. The event is what
-    the loop watches — a thread that sees it stops starting work rather than spending a search to find out.
+    *In a row*: one hit anywhere means the network is answering, so it resets. The event is what the loop
+    watches — a thread that sees it stops starting work rather than spending a search to find out.
     """
 
     limit: int = QUIET_AFTER
@@ -228,11 +218,9 @@ class QuietNetwork:
 class Pacer:
     """Let searches start no more often than `interval` seconds apart.
 
-    Ticket 21: the network answers searches at a rate, and nothing between this loop and it keeps to that
-    rate — the child fires whatever it is handed, and neither it nor aioslsk reports a search being ignored.
-    So the pace is kept here. It is a gap between two searches rather than a cap on how many run at once,
-    because the open searches are only a consequence: at five seconds a search, a twelve-second window
-    leaves about two open, and the child's own ceiling never binds.
+    Nothing between this loop and the network keeps to the network's rate, and neither the child nor aioslsk
+    reports a search being ignored, so the pace is kept here. A gap between two searches rather than a cap
+    on how many run at once, because the open searches are only a consequence of the rate.
     """
 
     def __init__(self, interval: float, *, clock=time.monotonic, sleep=time.sleep) -> None:
@@ -256,8 +244,8 @@ class Pacer:
 def search(server: StdioServer, record: state.Record, *, later_pass: bool) -> list[Candidate]:
     """Ask the server, and read back what it offered.
 
-    Ticket 04: peer attributes may scope a retry pass and never the first one, because a filter can
-    eliminate the only peer who has the track.
+    Peer attributes may scope a retry pass and never the first one, because a filter can eliminate the only
+    peer who has the track.
     """
     arguments: dict = {
         "query": search_query(record.artist, record.title),
@@ -326,6 +314,90 @@ def give_up(server: StdioServer, candidate: Candidate, log) -> None:
         log(f"      could not cancel {candidate.user}: {error}")
 
 
+def record_taken(
+    job: state.Job,
+    record: state.Record,
+    candidate: Candidate,
+    local_path: str,
+    *,
+    accepted: bool = False,
+    upgrade: Held | None = None,
+) -> None:
+    """Write down a file that arrived: the record follows it, and the log says where it came from.
+
+    The one place a download is recorded, because `reconcile` rebuilds a record from its own `downloaded`
+    event — a second way of recording one would be a second way of losing one. `accepted` is set only by
+    `review`, the only writer of the decision axis.
+    """
+    record.local_path = local_path
+    record.format = candidate.ext
+    record.status = state.DOWNLOADED
+    if accepted:
+        record.decision = state.ACCEPTED
+    job.append_event("downloaded", idx=record.idx, path=local_path, peer=candidate.user,
+                     size=candidate.size_bytes)
+    if upgrade is not None:
+        record.notes = f"upgrades {upgrade.path}"
+        job.append_event("upgrade_downloaded", idx=record.idx, replaces=upgrade.path, path=local_path)
+
+
+def _prepare(
+    job: state.Job,
+    record: state.Record,
+    lookup: Lookup,
+    library: Library | None,
+    log,
+) -> tuple[str | None, Held | None]:
+    """Resolve the reference, then settle what the collection already holds.
+
+    Returns the summary list to file the track under when there is nothing to fetch, and otherwise the lossy
+    copy a successful download would replace.
+    """
+    if not record.candidates:
+        # Resolved once, then written into the record: a resumed run never re-queries, and a track that
+        # resolved nothing stays review-only rather than being re-asked every time.
+        seconds = reference.resolve(record.request, lookup)
+        record.duration_s = seconds
+        job.append_event("reference", idx=record.idx, seconds=seconds)
+        log(f"[{record.idx}] {record.label}: "
+            + (f"reference {seconds}s" if seconds else "no MusicBrainz reference — review only"))
+
+    if library is None:
+        return None, None
+
+    # Nothing is fetched that the collection already holds, unless the copy it holds is lossy and a lossless
+    # one can be had — and that is asked before the search, so a track already held costs no request either.
+    held = library.held(record.artist, record.title, record.duration_s)
+    if held is None:
+        # The length may be the only reason that missed, and for an upgrade there may be no MusicBrainz
+        # length at all. So the name is asked on its own; a lossy copy found that way is the reference.
+        for row in library.rows_for(record.artist, record.title):
+            if not row.lossless and row.seconds is not None:
+                held = row
+                break
+    if held is None:
+        return None, None
+    if held.lossless:
+        record.status = state.FOUND_IN_LIBRARY
+        record.notes = f"already held at {held.path}" if held.path else "already held"
+        job.append_event("already_held", idx=record.idx, path=held.path, genre=held.genre)
+        log(f"[{record.idx}] {record.label}: already in the library"
+            + (f" — {held.path}" if held.path else ""))
+        return "already_held", None
+    # Held, but only as a lossy copy: an upgrade rather than a reason to skip, and the lane decides it, not
+    # whether the lookup happened to match.
+    record.replaces = held.path
+    if record.duration_s is None:
+        record.duration_s = held.seconds
+        job.append_event("reference", idx=record.idx, seconds=held.seconds,
+                         from_="the copy in the collection")
+        log(f"[{record.idx}] {record.label}: reference {held.seconds}s, from the copy in the "
+            "collection — MusicBrainz has nothing for this one")
+    else:
+        log(f"[{record.idx}] {record.label}: held as a lossy copy — looking for a lossless one")
+    return None, held
+
+
 def one(
     job: state.Job,
     record: state.Record,
@@ -341,74 +413,37 @@ def one(
     quiet: QuietNetwork | None = None,
 ) -> str:
     """Acquire one track. Returns which of the summary's lists it belongs in."""
+    if record.decided():
+        # GLOSSARY.md: a settled track is not asked about again — that is the whole of what the decision
+        # axis means — so a pass leaves it alone rather than spending a search to re-open the question.
+        log(f"[{record.idx}] {record.label}: {record.decision} by hand — left alone")
+        return "decided"
+
     if record.local_path and Path(record.local_path).is_file():
-        # The file is the truth, not the status. A record this run has already placed — normalized, tagged
-        # or imported — must not be searched for again: until the import runs the collection still points at
-        # the lossy copy being replaced, so the dedupe alone finds it "not held", re-downloads it and resets
-        # the status, which is how 43 finished tracks became unimportable on 2026-10-12.
+        # The file is the truth, not the status: a record this run has already placed must not be searched
+        # for again, because until the import runs the collection still points at the copy it replaces.
         if record.status in {state.DOWNLOADED, state.NORMALIZED, state.TAGGED, state.IMPORTED}:
             return "already_downloaded"
 
-    if not record.candidates:
-        # Ticket 13: resolved once, then written into the record — a resumed run never re-queries, and a
-        # track that resolved nothing is review-only for good rather than re-asked every time.
-        seconds = reference.resolve(record.request, lookup)
-        record.duration_s = seconds
-        job.append_event("reference", idx=record.idx, seconds=seconds)
-        log(f"[{record.idx}] {record.label}: "
-            + (f"reference {seconds}s" if seconds else "no MusicBrainz reference — review only"))
-
-    # Ticket 09: nothing is fetched that the collection already holds — unless the copy it holds is lossy
-    # and a lossless one can be had. That is what an upgrade is, and it is asked before the search so a
-    # track already held costs no request either.
-    upgrade: Held | None = None
-    if library is not None:
-        held = library.held(record.artist, record.title, record.duration_s)
-        if held is None:
-            # The length may be the only reason that missed, and for an upgrade there may be no
-            # MusicBrainz length at all. So the name is asked on its own, and a lossy copy found that way
-            # is the reference: the same track by definition, with a length measurable here and now.
-            for row in library.rows_for(record.artist, record.title):
-                if not row.lossless and row.seconds is not None:
-                    held = row
-                    break
-        if held is not None and held.lossless:
-            record.status = state.FOUND_IN_LIBRARY
-            record.notes = f"already held at {held.path}" if held.path else "already held"
-            job.append_event("already_held", idx=record.idx, path=held.path, genre=held.genre)
-            log(f"[{record.idx}] {record.label}: already in the library"
-                + (f" — {held.path}" if held.path else ""))
-            return "already_held"
-        if held is not None:
-            # Held, but only as a lossy copy: that is an upgrade rather than a reason to skip (the design notes),
-            # and the lane is what decides it — not whether the lookup happened to match.
-            upgrade = held
-            record.replaces = held.path
-            if record.duration_s is None:
-                record.duration_s = held.seconds
-                job.append_event("reference", idx=record.idx, seconds=held.seconds,
-                                 from_="the copy in the collection")
-                log(f"[{record.idx}] {record.label}: reference {held.seconds}s, from the copy in the "
-                    "collection — MusicBrainz has nothing for this one")
-            else:
-                log(f"[{record.idx}] {record.label}: held as a lossy copy — looking for a lossless one")
+    outcome, upgrade = _prepare(job, record, lookup, library, log)
+    if outcome is not None:
+        return outcome
 
     if pacer is not None:
-        pacer.wait()                            # the design notes: the network's rate, never the loop's
+        pacer.wait()
     found = search(server, record, later_pass=later_pass)
     if quiet is not None:
-        # Ticket 21: the raw count, not what merged — a second pass over the same record adds nothing new
-        # and would otherwise look like a network answering with silence.
+        # The raw count, not what merged: a second pass over the same record adds nothing new and would
+        # otherwise look like a network answering with silence.
         quiet.observe(len(found))
     added = merge(record, found)
     job.append_event("searched", idx=record.idx, added=added, offered=len(record.candidates))
 
     if record.settled() is None:
         record.status = state.PENDING
-        outcome = "in_review" if record.usable() else "nothing_usable"
         log(f"[{record.idx}] {record.label}: {len(record.offered())} offered, "
             "nothing to take on its own")
-        return outcome
+        return "in_review" if record.usable() else "nothing_usable"
 
     tried = set(record.tried)
     queue = sorted(
@@ -417,8 +452,8 @@ def one(
         key=rules.rank,
     )
     if upgrade is not None:
-        # Ticket 09: a lossless copy is strictly better than the lossy one held; a lossy copy is not better
-        # than what the user already has, so only the better lane is worth fetching.
+        # A lossless copy is strictly better than the lossy one held; a lossy copy is not better than what
+        # the user already has, so only the better lane is worth fetching.
         queue = [candidate for candidate in queue if candidate.lossless]
         if not queue:
             record.status = state.PENDING
@@ -431,19 +466,12 @@ def one(
         decision, local_path = await_transfer(server, candidate, log=log, sleep=sleep, clock=clock)
 
         if decision is Move.DONE:
-            record.local_path = local_path
-            record.format = candidate.ext
-            record.status = state.DOWNLOADED
-            job.append_event("downloaded", idx=record.idx, path=local_path,
-                             peer=candidate.user, size=candidate.size_bytes)
+            record_taken(job, record, candidate, local_path, upgrade=upgrade)
             if upgrade is not None:
-                record.notes = f"upgrades {upgrade.path}"
-                job.append_event("upgrade_downloaded", idx=record.idx, replaces=upgrade.path,
-                                 path=local_path)
                 log(f"[{record.idx}] {record.label}: a lossless copy from {candidate.user} → {local_path}"
                     f"  (replacing the lossy one at import)")
-                return "downloaded"
-            log(f"[{record.idx}] {record.label}: from {candidate.user} → {local_path}")
+            else:
+                log(f"[{record.idx}] {record.label}: from {candidate.user} → {local_path}")
             return "downloaded"
 
         if decision is Move.ROTATE:
@@ -464,8 +492,7 @@ def one_at_a_time(lookup: Lookup) -> Lookup:
     """The lookup, wrapped so it is asked once at a time.
 
     MusicBrainz's rate limiter is a module global inside `musicbrainzngs` and their policy asks for one
-    request a second, so lookups queue here rather than racing each other inside a library that is not
-    written for it.
+    request a second, so lookups queue here rather than race inside a library not written for it.
     """
     lock = threading.Lock()
 
@@ -491,20 +518,15 @@ def run(
 ) -> Summary:
     """The whole pass: every record the job holds, `workers` of them at a time, writing as it goes.
 
-    the user, 2026-10-12: one track at a time is nonsense. A track spends nearly all of its time waiting —
-    on MusicBrainz, on a search window, on a peer's queue — so the waiting overlaps instead of queueing,
-    and the server's own ceiling on transfers is what decides how many files actually move at once.
-
-    Ticket 21: the searching does not overlap freely, though. What is parallel here is the transfers and
-    the waiting on them; searches go out at `config.search_interval`, because that rate is the network's
-    and not this loop's.
+    The transfers and the waiting on them overlap; the searching does not, and goes out at
+    `config.search_interval`, because that rate is the network's and not this loop's.
     """
     records = job.records()
     summary = Summary()
     quiet = QuietNetwork()
 
-    # Ticket 21: the network's rate on searching, and ours to keep. Zero is the loop's own speed, which is
-    # worth having only for a tracklist too small for the rate to matter.
+    # The network's rate on searching, and ours to keep. Zero is the loop's own speed, worth having only for
+    # a tracklist too small for the rate to matter.
     pacer = (Pacer(config.search_interval, clock=clock, sleep=sleep)
              if config.search_interval > 0 else None)
 
@@ -517,8 +539,8 @@ def run(
 
     def work(record: state.Record) -> None:
         if quiet.stopped.is_set():
-            # Ticket 21: the network has stopped answering, so the pass stops asking. The record is left
-            # exactly as it was — nothing is written about a search that never happened.
+            # The network has stopped answering, so the pass stops asking; the record is left exactly as it
+            # was, and nothing is written about a search that never happened.
             summary.unsearched.append(record.idx)
             return
         later_pass = retry or bool(record.candidates)
@@ -553,6 +575,6 @@ def run(
         getattr(summary, name).sort()
 
     job.write_status(config)
-    # Deliberately not finished: the pipeline ends at the import, so `acquire` and `process` leave the run
-    # open and the next command picks the same one up without being told which (the design notes).
+    # Deliberately not finished: the pipeline ends at the import, so this and `process` leave the run open
+    # and the next command picks the same one up without being told which.
     return summary

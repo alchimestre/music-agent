@@ -150,3 +150,49 @@ def test_the_directories_and_the_database_are_one_shelf(tmp_path):
 
     shelf = library.Library(library.read_directories(config), [])
     assert shelf.held("Kiasmos", "Blurred", 3) is not None
+
+
+# ── what nothing points at (the map's leftovers) ─────────────────────────────
+
+
+def make_config_with_staging(tmp_path: Path) -> config_module.Config:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'[paths]\nlossless = "{tmp_path / "Loseless Tracks"}"\n'
+        f'lossy = "{tmp_path / "Losy Tracks"}"\n'
+        f'staging = "{tmp_path / "Downloads"}"\n'
+        'state = "state"\n',
+        encoding="utf-8",
+    )
+    return config_module.load(config_path)
+
+
+def test_unpointed_separates_the_three_ways_a_run_leaves_something_behind(tmp_path, monkeypatch):
+    config = make_config_with_staging(tmp_path)
+    config.lossless.mkdir(parents=True)
+    config.staging.mkdir(parents=True)
+    write_wav(config.lossless / "Kiasmos - Blurred.wav", seconds=3.0)
+    write_wav(config.lossless / "Nobody - Nothing.wav", seconds=4.0)
+    (config.staging / "01 - Left Behind.aiff.part").write_bytes(b"a cancelled transfer")
+    (config.staging / "Kiasmos - Blurred.wav").write_bytes(b"the run's own staged file")
+    gone = held("Gone", "Missing", 200, path=str(config.lossless / "Gone - Missing.wav"))
+    monkeypatch.setattr(library, "read_database",
+                        lambda: ([held("Kiasmos", "Blurred", 3, path=str(config.lossless / "Kiasmos - Blurred.wav")), gone], []))
+
+    leftovers = library.unpointed(config, claimed=[str(config.staging / "Kiasmos - Blurred.wav")])
+
+    assert [path.name for path in leftovers.staged] == ["01 - Left Behind.aiff.part"]
+    assert [path.name for path in leftovers.lane] == ["Nobody - Nothing.wav"]
+    assert leftovers.gone == [gone.path]
+    assert leftovers.empty() is False
+
+
+def test_nothing_left_behind_is_reported_as_such(tmp_path, monkeypatch):
+    config = make_config_with_staging(tmp_path)
+    config.lossless.mkdir(parents=True)
+    write_wav(config.lossless / "Kiasmos - Blurred.wav", seconds=3.0)
+    monkeypatch.setattr(library, "read_database",
+                        lambda: ([held("Kiasmos", "Blurred", 3,
+                                       path=str(config.lossless / "Kiasmos - Blurred.wav"))], []))
+
+    assert library.unpointed(config).empty() is True

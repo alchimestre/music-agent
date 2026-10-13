@@ -83,15 +83,18 @@ def test_a_clip_under_a_minute_is_a_preview_not_a_wrong_mix():
     assert "preview" in verdict.reason
 
 
-def test_a_lossy_file_below_the_floor_needs_a_human_rather_than_being_discarded():
-    """Ticket 08: never taken unattended, but it is not discarded either — it goes to review, so the
-    only copy of a rare track can still be accepted deliberately rather than by accident."""
+def test_a_lossy_file_below_the_floor_is_ruled_out_rather_than_offered():
+    """the user read the queue the design notes sent these to and answered on 2026-10-12: a file the user would never take
+    has no business in a list the user has to read. Below the floor is ruled out, which is what the prototype did
+    before the design notes changed it to asking."""
     low = candidate("Artist - Title (Original Mix).mp3", duration=300, bitrate=128)
-    assert classify(low, REQUEST).label is Label.NEEDS_YOU
+    assert classify(low, REQUEST).label is Label.REJECTED
 
     track = Track(REQUEST, [low])
-    assert in_review(track) is True
+    assert visible(track) == [], "nothing below the floor is shown"
+    assert in_review(track) is False
     assert pick(track) is None
+    assert nothing_usable(track) is True, "the track is reported as having nothing usable, not as empty"
 
 
 def test_the_floor_itself_is_acceptable():
@@ -196,10 +199,21 @@ def test_a_candidate_crediting_more_artists_still_matches():
 
 def test_a_named_mix_must_be_the_one_asked_for():
     extended = Request(artist="Artist", title="Title", mix="Extended Mix", ref_duration=300)
+    # The 2026-10-12 decision: a version that is not the one asked for is gone, not offered with a reason.
     assert verdict_for("Artist - Title (Original Mix).flac", extended,
-                       duration=300) is Label.NEEDS_YOU
+                       duration=300) is Label.REJECTED
     assert verdict_for("Artist - Title (Extended Mix).flac", extended,
                        duration=300) is Label.READY
+
+
+def test_a_wrong_version_is_never_shown():
+    """What the user asked for, exactly: alternate mixes do not appear in the list the user has to read."""
+    extended = Request(artist="Artist", title="Title", mix="Extended Mix", ref_duration=300)
+    track = Track(extended, [
+        candidate("Artist - Title (Original Mix).flac", duration=300),
+        candidate("Artist - Title (Extended Mix).flac", duration=300),
+    ])
+    assert [v.candidate.mix for v in visible(track)] == ["Extended Mix"]
 
 
 @pytest.mark.parametrize("name", [
@@ -208,6 +222,93 @@ def test_a_named_mix_must_be_the_one_asked_for():
 ])
 def test_a_bare_request_accepts_the_original_however_it_is_written(name):
     assert verdict_for(name, REQUEST, duration=300) is Label.READY
+
+
+@pytest.mark.parametrize("name", [
+    "Artist - Title (original_mix).flac",   # the same version, in the peer's spelling
+    "Artist - Title (ORIGINAL MIX).flac",
+    "Artist - Title (Original Version).flac",
+    "Artist - Title.flac",                  # and with no suffix at all
+])
+def test_the_original_is_the_original_however_the_file_spells_it(name):
+    """2026-10-12: a request for `(Original Mix)` against a file called `(original_mix)` was reported as
+    *a different mix*, and the two are one version."""
+    original = Request(artist="Artist", title="Title", mix="Original Mix", ref_duration=300)
+    assert verdict_for(name, original, duration=300) is Label.READY
+
+
+def test_a_longer_edit_is_taken_for_a_request_that_names_no_version():
+    """Ticket 05's second clause, as the user chose it on 2026-10-12: an unsuffixed request accepts any
+    version that is not somebody else's remix, and the ±1 s window is what keeps that honest."""
+    assert verdict_for("Artist - Title (Extended Mix).flac", REQUEST, duration=300) is Label.READY
+
+
+def test_original_mix_is_the_bare_request_so_it_takes_the_same_thing():
+    """Ticket 05's first clause makes `(Original Mix)` and no suffix one request, so what one takes the
+    other takes — including a longer edit. Asking for `(Original Mix)` is not asking for an edit to be
+    refused."""
+    named = Request(artist="Artist", title="Title", mix="Original Mix", ref_duration=300)
+    assert verdict_for("Artist - Title (Extended Mix).flac", named, duration=300) is Label.READY
+
+
+@pytest.mark.parametrize("mix", [
+    "Victor Ruiz Remix", "kate_stein_remix", "Remix", "Bootleg", "Younger Rebinds Remix 2",
+])
+def test_somebody_elses_remix_is_ruled_out_for_a_request_that_names_no_version(mix):
+    """The one thing a bare request refuses, however close the length is — and it is refused silently, since
+    a candidate the user would never take is not worth a line in the queue."""
+    assert verdict_for(f"Artist - Title ({mix}).flac", REQUEST, duration=300) is Label.REJECTED
+
+
+def test_a_named_version_that_was_not_asked_for_is_ruled_out():
+    remix = Request(artist="Artist", title="Title", mix="Kate Stein Remix", ref_duration=300)
+    assert verdict_for("Artist - Title (Ajna Samm Edit).flac", remix,
+                       duration=300) is Label.REJECTED
+
+
+def test_the_reason_names_the_version_taken_rather_than_the_mix():
+    """A bare request that takes an edit must not say the mixes are the same."""
+    verdict = classify(candidate("Artist - Title (Extended Mix).flac", duration=300), REQUEST)
+    assert verdict.reason == "Extended Mix, same length as the reference"
+
+
+def test_punctuation_is_never_the_difference_between_two_versions():
+    remix = Request(artist="Artist", title="Title", mix="Kate Stein Remix", ref_duration=300)
+    assert verdict_for("Artist - Title (kate_stein_remix).flac", remix, duration=300) is Label.READY
+
+
+# -- an upgrade is optional -------------------------------------------------
+
+def an_upgrade(**kwargs) -> Request:
+    base = dict(artist="Artist", title="Title", ref_duration=300, replaces="/Music/Losy/Artist - Title.mp3")
+    return Request(**{**base, **kwargs})
+
+
+def test_a_lossy_offer_is_never_an_upgrade():
+    """A lossy file is not better than the lossy copy held, so it is ruled out rather than offered. The pass
+    always refused it; the queue showed it anyway, which is what the user read on 2026-10-12."""
+    lossy = candidate("Artist - Title (Original Mix).mp3", duration=300, bitrate=320)
+    assert classify(lossy, an_upgrade()).label is Label.REJECTED
+    assert visible(Track(an_upgrade(), [lossy])) == []
+
+
+def test_an_upgrade_nobody_can_check_is_ruled_out_too():
+    """The copy the user holds already plays, so an unverifiable file buys nothing worth a question."""
+    unknown = candidate("Artist - Title (Original Mix).flac", duration=None)
+    assert classify(unknown, an_upgrade()).label is Label.REJECTED
+
+
+def test_a_lossless_upgrade_that_matches_is_still_taken():
+    """The point of the whole upgrade path, which the two rules above must not swallow."""
+    better = candidate("Artist - Title (Original Mix).flac", duration=300)
+    assert classify(better, an_upgrade()).label is Label.READY
+
+
+def test_a_track_that_is_not_held_still_asks_about_an_uncheckable_file():
+    """The queue's remaining question: a file that may be the only copy, on a track nothing else can settle."""
+    unknown = candidate("Artist - Title (Original Mix).flac", duration=None)
+    assert classify(unknown, REQUEST).label is Label.NEEDS_YOU
+    assert in_review(Track(REQUEST, [unknown])) is True
 
 
 def test_two_mixes_of_one_title_are_two_different_tracks():

@@ -11,10 +11,13 @@ a state, and a label is never something the track has already become.
 - **Ready** — agrees with the reference and would be taken without asking. A track with any Ready
   candidate is settled by the system, choosing between several by a fixed ladder, so it never reaches
   review.
-- **Needs you** — plausible, but something prevents taking it unattended: the length cannot be
-  verified, or the mix is not the one asked for.
-- **Rejected** — ruled out: the length is outside the window, the quality is below the floor, or the
-  file is a preview. **A rejected candidate is never shown** — the screen has no place for it.
+- **Needs you** — the length cannot be verified against the reference: either the peer reported none, or
+  the track has no reference length at all. Nothing else sends a candidate here, and only for a track the
+  collection does not already hold: see **Upgrade**.
+- **Rejected** — ruled out: the file is not a format we take, it is a preview, its length is outside the
+  window, its quality is below the floor, it is not the version or the track that was asked for, or — on an
+  upgrade — it is lossy or unverifiable. **A rejected candidate is never shown** — it has no place in a list
+  a person has to read.
 
 ## Decision
 
@@ -22,16 +25,36 @@ What the user has decided about a *track*. Independent of any candidate label, a
 records something already done.
 
 - **undecided** (`·`) — nothing decided yet.
-- **accepted** (`✓`) — settled.
+- **accepted** (`✓`) — settled: the candidate the user picked was fetched, and the record is an ordinary
+  downloaded one from then on.
 - **skipped** (`–`) — passed over for now.
 - **not found** (`✗`) — no usable copy exists.
+
+`music-agent review` is the only thing that writes this axis — its flags and its screen alike — and every
+pass reads it: a track the user has decided is left alone rather than searched again, because that is what
+deciding it means.
 
 ## Review queue
 
 The list of tracks that need a decision. A track belongs here only when the system could not settle it
 alone — that is, when **no candidate is Ready**. When several are Ready the system picks one by its own
-ladder and logs the choice rather than asking, so a tie never appears here. A track whose every
-candidate is rejected does not appear either; it is reported as having nothing usable.
+ladder and logs the choice rather than asking, so a tie never appears here.
+
+A track the system cannot offer a candidate for at all is not in the queue either, and the three ways that
+happens are kept apart rather than counted together, because they are three different facts about three
+different things:
+
+- **not searched** — no pass has reached the track, so nothing is known about it.
+- **the network offered nothing** — a search answered and held no files.
+- **nothing usable** — files were offered and every one was ruled out.
+
+So the queue asks exactly one question: **is a file acceptable when its length cannot be checked?** Everything
+else the rule settles on its own — a file below the floor, a different version, a different artist, a length
+outside the window are all ruled out and never shown. A length is the only evidence that cannot be read off
+the candidate, which is why it is the only thing a person is asked about.
+
+And it asks it only about a track the collection does not already hold. An **upgrade** is optional, so nothing
+about one is ever put to the user: see that entry.
 
 ## Reference
 
@@ -43,6 +66,17 @@ file outside that window is a different file rather than a near miss.
 
 The version of a track named in parentheses — Original, Extended, or a remixer's name. Two mixes of one
 title are two different tracks, not two copies of one track.
+
+One version written two ways is still one version. The comparison folds case and punctuation, so
+`(original_mix)`, `(Original Mix)` and `(ORIGINAL MIX)` are the same, and a bare title is the same version
+as `(Original Mix)` and `(Original Version)` — but only those: every other suffix, including a specific
+editor's `(Ajna Samm Edit)` against a request that says only `(Edit)`, is its own version and goes to review.
+
+What a version *is* and what a request *takes* are two questions, and the second is the wider one. A request
+that names a version takes only that version. A request that names none — or names the original — takes any
+version that is not somebody else's remix, and the ±1 s length window is what keeps that honest. So a file
+called `(Extended Mix)` whose length matches the reference is taken for a bare request, while `(Victor Ruiz
+Remix)` is not taken for it however well the length matches.
 
 ## Pass
 
@@ -56,3 +90,19 @@ A pass also stops early when the **network goes quiet**, and the distinction it 
 search that comes back with nothing means a rare track, but fifty in a row means the network has stopped
 answering. The pass reports the tracks it never reached as **not searched** and leaves them as they were,
 rather than searching them into the same silence and calling the result a fact about the tracks.
+
+## Upgrade
+
+A track the collection already holds **as a lossy copy**, with a run looking for a lossless one. It makes the
+request *optional*: the track already plays, so an offer is only interesting if it improves on the copy held
+and can be checked against it. A lossy offer is never an upgrade — a second lossy copy is no better than the
+first — and an offer whose length cannot be verified buys nothing worth a question, because the alternative is
+a copy that already works. Both are ruled out rather than shown. An upgrade is `Record.replaces`.
+
+## Leftover
+
+A file or a row that nothing points at. Three kinds, all reported by `music-agent status --files` and none of
+them repaired automatically: a file in staging no record of the run claims (a placement the lane refused, a
+cancelled transfer's `.part`), a file in a lane no row and no record claims (a re-download left beside the
+copy the collection kept), and a row whose file has gone. Which copy of a stem a row means to keep is not
+something the pipeline can tell, so it says what is there and leaves the choice.

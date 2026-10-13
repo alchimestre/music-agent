@@ -53,6 +53,13 @@ def test_a_bare_request_resolves_to_the_original():
     assert reference.resolve(request(), lookup) == 413
 
 
+def test_a_bare_request_does_not_resolve_to_an_extended_mix():
+    """The taking rule accepts a longer edit (the design notes); the *reference* must stay the original, or the
+    window it sets would reject the files that are the original."""
+    lookup = Fake([recording("Wsjr", ms=413_000), recording("Wsjr (Extended Mix)", ms=620_000)])
+    assert reference.resolve(request(), lookup) == 413
+
+
 def test_a_named_version_resolves_to_that_version():
     lookup = Fake([recording("Wsjr", ms=413_000), recording("Wsjr (Orphx remix)", ms=453_000)])
     assert reference.resolve(request(mix="Orphx remix"), lookup) == 453
