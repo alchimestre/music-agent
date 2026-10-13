@@ -126,8 +126,11 @@ def setup(tmp_path: Path, *, results: list[dict], download: str | None = None, t
     of its own into a clock the test moves by hand. Ticket 21's pace has its own test, which sets one.
     """
     config_path = tmp_path / "config.toml"
-    config_path.write_text(f'[paths]\nstaging = "{tmp_path / "staging"}"\nstate = "state"\n'
-                           "[soulseek]\nsearch_interval = 0.0\n",
+    config_path.write_text(f'[paths]\nstaging = "{tmp_path / "staging"}"\n'
+                           f'lossless = "{tmp_path / "Loseless Tracks"}"\n'
+                           f'lossy = "{tmp_path / "Losy Tracks"}"\n'
+                           'state = "state"\n'
+                           '[soulseek]\nsearch_interval = 0.0\n',
                            encoding="utf-8")
     (tmp_path / "staging").mkdir()
     config = config_module.load(config_path)
@@ -530,8 +533,10 @@ def test_a_track_the_library_holds_at_another_length_is_still_fetched(tmp_path):
 
 def test_a_server_that_refuses_is_left_to_retry_rather_than_crashing(tmp_path):
     config_path = tmp_path / "config.toml"
-    config_path.write_text(f'[paths]\nstaging = "{tmp_path / "staging"}"\nstate = "state"\n',
-                           encoding="utf-8")
+    config_path.write_text(f'[paths]\nstaging = "{tmp_path / "staging"}"\n'
+                           f'lossless = "{tmp_path / "Loseless Tracks"}"\n'
+                           f'lossy = "{tmp_path / "Losy Tracks"}"\n'
+                           'state = "state"\n', encoding="utf-8")
     config = config_module.load(config_path)
     job = state.create(config, "test")
     job.write_records([state.Record(idx=1, artist="Kiasmos", title="Blurred")])

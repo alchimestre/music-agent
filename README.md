@@ -33,7 +33,8 @@ set -a; source .env; set +a
 Commands in the order a run uses them. Each one works on the same run, so they are typed in sequence.
 
 ```
-music-agent acquire --tracks <file>             # search and download into staging
+music-agent playlist <URL> --out <file>         # a public Spotify playlist, written as a tracklist
+music-agent acquire --tracks <file|URL>         # search and download into staging
 music-agent status --queue                      # what the run has not settled, and why
 music-agent review                              # the queue as text, for the caller to put to the user
 music-agent process                             # identify, genre, convert, normalize, tag
@@ -44,6 +45,10 @@ music-agent import                              # into rekordbox, which must be 
 ```
 
 `acquire` and `process` take hours on a long tracklist. `review`, `status` and `import` take seconds.
+
+**Traktor's collection is not this project's business.** It has no database and no API — its collection is one
+XML file — and it is reconciled by `~/projects/traktor-nml`, which reads this project's job state as data to
+learn which file replaced which. `traktor-nml apply` after an acquisition, with Traktor closed.
 
 ## The queue
 
