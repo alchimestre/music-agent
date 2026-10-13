@@ -100,6 +100,15 @@ and can be checked against it. A lossy offer is never an upgrade — a second lo
 first — and an offer whose length cannot be verified buys nothing worth a question, because the alternative is
 a copy that already works. Both are ruled out rather than shown. An upgrade is `Record.replaces`.
 
+## Repoint
+
+Pointing an entry that describes a file a run replaced at the file it made instead, rather than removing the
+entry and adding a new one. The track keeps everything that belongs to the *track* — cues, play count, last
+played, playlists, artwork — and gives up whatever was measured from the audio that is gone: in rekordbox the
+file-derived columns (`importing.file_columns`), in Traktor the tempo, loudness, key, auto grid and fingerprint
+(`~/projects/traktor-nml`). Removal would have cost the playlist memberships (the design notes), and a stale number
+left behind is what the user caught in the app (the design notes).
+
 ## Leftover
 
 A file or a row that nothing points at. Three kinds, all reported by `music-agent status --files` and none of
