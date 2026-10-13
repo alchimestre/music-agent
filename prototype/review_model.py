@@ -1,11 +1,12 @@
-"""The rule the review screen is a view over: fixture data, plus the classification.
+"""The rule the review queue is a view over: fixture data, plus the classification.
 
 Kept apart from the renderers so the rule has exactly one home. The prototype therefore shows what
 the rule actually does rather than a hand-written impression of it, and this module is the piece the
 CLI ports. Verdicts are computed, never authored.
 
-The renderers that sat beside it are gone — the screen shipped as `src/music_agent/review_tui.py` — so
-what is left here is the fixture, and its reader is `tests/test_rules.py`: it checks the ported rule in
+The renderers that sat beside it are gone — the screen shipped as `src/music_agent/review_tui.py`, and
+that was retired on 2026-10-13 (the design notes) — so what is left here is the fixture, and its reader is
+`tests/test_rules.py`: it checks the ported rule in
 `rules.py` against this one, track by track, so a drift between the two shows up as a failure.
 
 Terminology follows GLOSSARY.md: a candidate carries a *label* (what would happen to it), a track

@@ -129,7 +129,8 @@ def candidate_of(item: dict) -> Candidate | None:
         duration=int(duration) if duration is not None else None,
         bitrate=item.get("bitrate"),
         queue=int(item.get("queue_size") or 0),
-        # Carried because the review screen shows it: a peer with a queue behind it is a wait to weigh.
+        # Carried through from the search result rather than dropped: a peer that answered with no free slot
+        # is a wait, not a failure, and the fact belongs to the candidate rather than to the moment.
         slots=bool(item.get("has_free_slots", True)),
         size_bytes=item.get("filesize"),
     )
