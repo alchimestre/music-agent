@@ -1,29 +1,13 @@
 """The import stage: what was tagged, into the rekordbox collection.
 
-Ticket 07: this is its own command because pyrekordbox refuses to commit while rekordbox is running — the
-commit raises outright — so acquisition and processing run with rekordbox open and the import runs once it
-is closed. Ticket 02: the write goes through pyrekordbox rather than the MCP, which buys one batch commit
-and one backup per run instead of the MCP's per-track backup.
-
-Four things read out of pyrekordbox rather than assumed, all of them found by trying:
-
-- `add_content` takes the file **path** positionally and the row's own columns as keywords. The relations
-  need rows or ids rather than names: `Artist="Someone"` dies inside SQLAlchemy with `'str' object has no
-  attribute '_sa_instance_state'`.
-- Its `add_*` helpers **refuse a name that already exists**, so every relation is looked up before it is
-  minted — otherwise the first House track would fail on the collection's own House row.
-- A path already in the collection raises `ValueError`: a duplicate to report, not a failure to retry.
-- The database's own file is on the session's bind, which is how the backup knows what to copy.
-
-What is written is the list the design notes names and nothing else — title, artist, album, label, genre, year,
-length, sample rate, bit rate — and **never BPM or key**, which rekordbox's own analysis fills. Checked on
-a copy of the collection: both read back empty on a row this project added.
+Its own command, because pyrekordbox refuses to commit while rekordbox is running. The write goes through
+pyrekordbox rather than the MCP, which buys one batch commit and one backup per run.
 """
 
 from __future__ import annotations
 
 import shutil
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -75,12 +59,11 @@ def database_path(db) -> Path | None:
     return Path(found) if found else None
 
 
-def backup(db, log) -> Path | None:
+def backup(db) -> Path | None:
     """Copy the database **and its write-ahead files**.
 
-    A database copied without `-wal` can describe a state that never existed: at the time of writing the
-    write-ahead file held a megabyte of the collection's most recent changes. A backup is only worth taking
-    if it is the collection.
+    A copy without `-wal` can describe a state that never existed: the write-ahead file holds a megabyte of
+    the collection's most recent changes.
     """
     source = database_path(db)
     if source is None or not source.is_file():
@@ -95,13 +78,10 @@ def backup(db, log) -> Path | None:
 
 
 def file_columns(path: Path) -> dict:
-    """A row's file-derived columns, read from the file itself, in rekordbox's own units.
+    """A row's file-derived columns, in rekordbox's own units: `BitRate` is kbps and `FileSize` bytes.
 
-    Measured against the user's library rather than guessed: `BitRate` is **kbps** (1,214 of the AIFF rows say
-    1411 where mutagen says 1411200), `FileSize` is bytes as of this write — rekordbox's own value is a
-    snapshot that lags a re-tag — and `FileType` comes from pyrekordbox's enum (12 = AIFF). The suffix maps
-    straight onto the enum's member names, which is safe here because `process.place` renames an `.aif` as it
-    lands: the enum has no `AIF` member, and neither does the collection.
+    Measured against the library rather than guessed. The suffix maps onto pyrekordbox's `FileType` member
+    names, which is safe here because `process.place` renames an `.aif` as it lands — the enum has no `AIF`.
     """
     from pyrekordbox.db6.tables import FileType
 
@@ -122,7 +102,11 @@ def file_columns(path: Path) -> dict:
 
 
 def find_or_create(rows, create, name: str):
-    """The row for a name, minted only when the collection does not already have it."""
+    """The row for a name, minted only when the collection does not already have it.
+
+    pyrekordbox's `add_*` helpers refuse a name that already exists, so every relation is looked up before it
+    is minted — otherwise the first House track would fail on the collection's own House row.
+    """
     wanted = name.strip().casefold()
     if wanted:
         for row in rows:
@@ -131,12 +115,12 @@ def find_or_create(rows, create, name: str):
     return create(name.strip())
 
 
-def add(db, record: state.Record, log) -> object:
+def add(db, record: state.Record) -> object:
     """One tagged track into the collection, and the row it became.
 
-    The row is built from the file's **own tags**, not from the job: the design notes made the tags the cache, so
-    the album, the label and the year are read back from the file rather than carried around in a record
-    that deliberately does not hold them.
+    The row is built from the file's **own tags** rather than the record, and carries title, artist, album,
+    label, genre, year, length, sample rate and bit rate — never BPM or key, which rekordbox's own analysis
+    fills.
     """
     path = Path(record.local_path)
     if not path.is_file():
@@ -149,6 +133,7 @@ def add(db, record: state.Record, log) -> object:
     genre = written.genre or record.genre
     year = written.year.strip()
 
+    # A relation takes a row or an id, never a name: a bare name string dies inside SQLAlchemy.
     relations = {}
     if artist:
         relations["ArtistID"] = find_or_create(db.get_artist(), db.add_artist, artist).ID
@@ -171,26 +156,21 @@ def add(db, record: state.Record, log) -> object:
 
 
 def repoint(db, record: state.Record, log) -> bool:
-    """Point the row that already holds this track at the new file (tickets 09 and 16).
+    """Point the row that already holds this track at the new file.
 
-    A plain write of the path, deliberately **not** `update_content_path`: that helper also reads and moves
-    the track's ANLZ analysis, locating it from the audio file's own drive, so it fails for a master
-    collection whose analysis lives under `~/Library/Pioneer/rekordbox/share`. This keeps the row's ID and
-    its UUID, and the UUID is what the analysis is filed under — so the beat grid and the cues stay with
-    the track without a file being moved.
-
-    The path is not the only thing that describes the old file. `FileNameL`, `FileSize`, `BitRate`,
-    `BitDepth`, `Length`, `SampleRate` and `FileType` were all written when the lossy copy was added, and
-    rekordbox reads *those* for what it shows — the user found every upgraded track still displaying the
-    m4a's bitrate and size on 2026-10-12. So they are rewritten from the file the row now points at.
+    A plain write of the path, deliberately **not** `update_content_path`: that helper also moves the track's
+    ANLZ analysis, which fails when that lives under `~/Library/Pioneer/rekordbox/share`. The plain write
+    keeps the row's ID and UUID — the UUID is what the analysis is filed under, so the beat grid and the cues
+    stay with the track. The file-derived columns are rewritten too, because rekordbox reads *those* for the
+    bitrate and the size it displays.
     """
     row = next((one for one in db.get_content() if one.FolderPath == record.replaces), None)
     if row is None:
         return False
     path = Path(record.local_path)
     if not path.is_file():
-        # Never point a row at a file that is not there: that is how a collection acquires rows whose
-        # files have gone, and this project reports those rather than making them.
+        # Never point a row at a file that is not there: this project reports missing files, it does not
+        # make them.
         raise ImportFailed(f"the file is gone: {record.local_path}")
     row.FolderPath = str(path)
     for column, value in file_columns(path).items():
@@ -213,17 +193,16 @@ def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=pr
         return summary
 
     if backup_first:
-        where = backup(db, log=log)
+        where = backup(db)
         if where is not None:
             log(f"backed the collection up to {where.name}")
 
     replaced: list[Path] = []
     for record in tagged:
         if record.replaces and Path(record.replaces) == Path(record.local_path):
-            # Nothing should produce this pair — a record whose row already points at the file this run
-            # produced. It did, once, from a repair that matched records to files by name across the whole
-            # library, and the cost is a live music file: repoint would write that path and the delete below
-            # would then remove it, leaving the row pointing at nothing. Refused rather than trusted.
+            # Nothing should produce a row that already points at the file this run made: repoint would
+            # write the path back and the delete below would then remove the file, leaving the row pointing
+            # at nothing. Refused rather than trusted.
             record.notes = "the row already points at this file"
             summary.failed.append(record.idx)
             job.append_event("refused", idx=record.idx, reason="replaces == local_path")
@@ -234,7 +213,7 @@ def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=pr
             if not repointed:
                 if record.replaces:
                     log(f"[{record.idx}] {record.label}: the row it was to replace is gone — adding it")
-                add(db, record, log)
+                add(db, record)
         except ImportFailed as error:
             record.notes = str(error)
             summary.failed.append(record.idx)
@@ -261,12 +240,12 @@ def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=pr
             job.append_event("imported", idx=record.idx, path=record.local_path)
             log(f"[{record.idx}] {record.label}: imported")
 
-    db.commit(autoinc=True)                 # one commit for the whole run (the design notes)
+    db.commit(autoinc=True)                 # one commit for the whole run
     job.write_records(records)              # after the commit, so a crash cannot lose it
 
     for old in replaced:
-        # the user's decision, 2026-10-12: the file being replaced goes. After the commit and never before,
-        # so nothing can be deleted while the collection still points at it.
+        # The replaced file goes only after the commit, so nothing is deleted while the collection still
+        # points at it.
         try:
             if old.is_file():
                 old.unlink()

@@ -1,21 +1,9 @@
 """Choosing a genre from the library's own vocabulary.
 
-Ticket 06: a curated table maps other people's genres onto the library's 25, read from the collection at
-run time because they exist nowhere else — only 27 of 1627 files carry a genre tag at all. The most
-specific match wins, and when nothing fits the genre is **left blank** and put in front of a human rather
-than invented, because a genre cannot be undone after import.
-
-Ticket 01's order is kept and it was measured rather than assumed: Discogs styles first, MusicBrainz
-genres second, nothing third. The measurement behind that is worth recording, because it is not what one
-would guess. MusicBrainz's own genres turned out to be useless for this repertoire — a sample of the
-collection had `electronic` alone claiming **ten different library genres**, and `techno` claiming five
-including Drum & Bass — while Discogs styles name a single thing (`Jazz-Funk`, `Dub Techno`, `Deep
-House`). So the table is built from styles, and MusicBrainz's genres sit behind them as a weak second
-opinion rather than a peer.
-
-The table lives in `genres.toml` beside the code, so a mapping can be corrected without touching any of
-this. Ticket 18 puts the gaps in the working procedure's hands: where the table misses, a model chooses among the
-library's genres or declines.
+A curated table in `genres.toml` maps other people's genre names onto the library's, which is read from the
+collection at run time because it exists nowhere else — only 27 of 1627 files carry a genre tag. The most
+specific match wins, and when nothing fits the genre is **left blank** for a human rather than invented,
+because a genre cannot be undone after import.
 """
 
 from __future__ import annotations
@@ -27,12 +15,11 @@ from pathlib import Path
 
 from .parsing import fold
 
-# Beside the code rather than beside a particular config file: the mappings are data this project ships,
-# not something an installation sets.
+# Beside the code rather than beside a particular config file: the mappings are data this project ships.
 DEFAULT_TABLE_PATH = Path(__file__).resolve().parents[2] / "genres.toml"
 
-# Ticket 06, as the user settled it: a name that fits nothing is counted, and at five tracks it is put to
-# the user to accept or decline rather than staying blank for ever. The pipeline never mints a genre itself.
+# A name that fits nothing is counted, and at five tracks it is put to the user to accept or decline rather
+# than staying blank for ever. The pipeline never mints a genre itself.
 PROPOSAL_THRESHOLD = 5
 
 
@@ -58,36 +45,30 @@ class Choice:
 
 
 def specificity(style: str) -> tuple[int, int]:
-    """How specific a name is: more words first, then a longer name.
-
-    `Minimal Techno` beats `Techno`, and `Dub Techno` beats both — which is what the design notes means by the
-    most specific genre winning.
-    """
+    """How specific a name is: more words first, then the longer name, so `Minimal Techno` beats `Techno`."""
     return (len(fold(style).split()), len(style))
 
 
-def table(path: Path | None = None) -> dict[str, str]:
-    """The mappings, folded on both sides so nothing has to remember how they were written."""
+def _document(path: Path | None) -> dict:
     source = Path(path) if path is not None else DEFAULT_TABLE_PATH
     if not source.is_file():
         return {}
     with source.open("rb") as handle:
-        data = tomllib.load(handle)
-    return {fold(name): mapped for name, mapped in (data.get("map") or {}).items()}
+        return tomllib.load(handle)
+
+
+def table(path: Path | None = None) -> dict[str, str]:
+    """The mappings, folded on both sides so nothing has to remember how they were written."""
+    return {fold(name): mapped for name, mapped in (_document(path).get("map") or {}).items()}
 
 
 def approved(path: Path | None = None) -> tuple[str, ...]:
     """Genre names the collection is allowed to gain, which the database does not have yet.
 
-    They are what makes a new genre possible at all: `resolve` refuses to hand out a name the collection
-    does not have, so an approved name is the collection being told it may have this one (the design notes).
+    `resolve` refuses to hand out a name the collection does not have, so an approved name is the
+    collection being told it may have this one.
     """
-    source = Path(path) if path is not None else DEFAULT_TABLE_PATH
-    if not source.is_file():
-        return ()
-    with source.open("rb") as handle:
-        data = tomllib.load(handle)
-    return tuple(str(name) for name in (data.get("approved") or ()))
+    return tuple(str(name) for name in (_document(path).get("approved") or ()))
 
 
 def vocabulary(held: Sequence[str], approved_names: Sequence[str] = ()) -> list[str]:
@@ -99,7 +80,7 @@ def vocabulary(held: Sequence[str], approved_names: Sequence[str] = ()) -> list[
 
 def proposals(counted: Mapping[str, int], *, mappings: Mapping[str, str],
               threshold: int = PROPOSAL_THRESHOLD) -> list[Proposal]:
-    """The names worth putting to the user, the best-evidenced first (the design notes).
+    """The names worth putting to the user, the best-evidenced first.
 
     A name that already has a mapping is not a proposal: it resolved, or it pointed somewhere the
     collection does not have, and either way the table is where that gets fixed.
@@ -115,22 +96,18 @@ def resolve(offered: Sequence[str], *, vocabulary: Sequence[str],
             mappings: Mapping[str, str]) -> Choice:
     """The library's genre for what was offered, or a blank one with everything that was considered.
 
-    `offered` is in the caller's order of trust, so Discogs styles come before MusicBrainz genres and the
-    earlier of two equally specific names wins. A mapping that points at a genre the collection does not
-    have is ignored rather than trusted, because the vocabulary is read from the collection at run time
-    and the table may have drifted from it.
+    `offered` is in the caller's order of trust, so the earlier of two equally specific names wins. A
+    mapping that points at a genre the collection does not have is ignored rather than trusted, because
+    the vocabulary is read from the collection at run time.
     """
     allowed = {fold(genre) for genre in vocabulary}
-    best: tuple[tuple[int, int], int, str, str] | None = None
-
+    ranked: list[tuple[tuple[int, int], str, str]] = []
     for order, source in enumerate(offered):
         mapped = mappings.get(fold(source))
-        if not mapped or fold(mapped) not in allowed:
-            continue
-        candidate = (specificity(source), -order, mapped, source)
-        if best is None or candidate[:2] > best[:2]:
-            best = candidate
+        if mapped and fold(mapped) in allowed:
+            ranked.append(((specificity(source), -order), mapped, source))
 
-    if best is None:
+    if not ranked:
         return Choice(considered=tuple(offered))
-    return Choice(genre=best[2], source=best[3], considered=tuple(offered))
+    _, genre, source = max(ranked)
+    return Choice(genre=genre, source=source, considered=tuple(offered))

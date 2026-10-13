@@ -1,24 +1,9 @@
 """The tracklist file: the one reading of the input, owned here.
 
-Ticket 18: a tracklist reaches the CLI as a file it parses — text, CSV, or a list pasted into a file — and
-the working procedure never re-reads it, so there is exactly one reading and no second, divergent one.
-
-One track per line, the house convention (the design notes):
-
-    Kiasmos - Blurred
-    Kiasmos - Blurred (Extended Mix)
-    01. Ntogn - Through the Mines of Khazad-dum
-    # comments and blank lines are skipped
-
-or a CSV whose header names both an artist and a title column, in any other columns' company, which is
-what an export looks like:
-
-    Track Name,Artist Name,Album
-    Blurred,Kiasmos,Blurred
-
-The title keeps its mix suffix in `Request.mix` rather than in `Request.title`, because the query builder
-and the matcher both read those apart (tickets 05 and 14) — a title that kept the mix would match
-nothing, since a candidate's title is compared with its own mix already taken off.
+One track per line as `Artist - Title`, optionally numbered, or a CSV whose header names both an artist and
+a title column in any other columns' company; comments and blank lines are skipped. The title keeps its mix
+suffix in `Request.mix` rather than in `Request.title`, because the query builder and the matcher read those
+apart.
 """
 
 from __future__ import annotations
@@ -32,11 +17,9 @@ from .rules import Request
 
 _COMMENT = "#"
 
-# A numbered list entry, and only that: `01. `, `3) `, `A1 - `. A bare space is deliberately *not*
-# accepted, because `808 State - Pacific` is an artist rather than item 808. The asymmetry is the point:
-# missing a track number costs a lookup that finds nothing, which leaves the track review-only, while
-# stripping an artist that begins with digits asks MusicBrainz about a different artist — and a wrong
-# reference rejects every correct file (the design notes).
+# A numbered list entry, and only that: `01. `, `3) `, `A1 - `. A bare space is deliberately *not* accepted,
+# because `808 State - Pacific` is an artist rather than item 808. Missing a track number costs a lookup that
+# finds nothing; stripping an artist that begins with digits asks about a different artist.
 _LIST_NUMBER = re.compile(r"^\s*(?:[A-Za-z]{1,2})?\d{1,3}\s*([.)\]:]|\s-\s)\s*")
 
 # The column names an export uses. Exact matches, so `Album Artist` is not mistaken for the artist.
@@ -70,8 +53,7 @@ def from_line(line: str) -> Request | None:
         return None
     artist, separator, title = text.partition(" - ")
     if not separator:
-        # No artist: a white-label or an unnamed edit. Nothing to look up, so it stays review-only
-        # (the design notes) rather than being guessed at.
+        # No artist: a white-label or an unnamed edit, which stays review-only rather than guessed at.
         artist, title = "", text
     if not title.strip():
         return None

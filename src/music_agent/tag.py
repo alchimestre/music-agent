@@ -1,20 +1,9 @@
 """Writing tags onto a file, in the frame set that file already reads.
 
-Ticket 07 fixes the fields: title, artist, album, album artist, year, label, catalogue number, genre, and
-the MusicBrainz ids — and never BPM or key, whose source is rekordbox's own analysis.
-
-Ticket 02 decides the frame set rather than taste: rekordbox reads **ID3v2** for AIFF, so an AIFF gets ID3
-frames. The lossy lane keeps the container it already is — MP4 atoms for an m4a, ID3 for an mp3 — because
-that is what those files are.
-
-Two things the library itself taught, from reading real files rather than assuming them:
-
-- The AIFFs already carry `TKEY` and `TBPM` — Traktor's key and tempo, beside a `PRIV:TRAKTOR4` blob — and
-  the design notes says those are never ours to write. So the writer sets the frames it owns and leaves every
-  other one exactly as it found it, which is why losing one is not a risk it takes: it never rewrites the
-  whole tag.
-- An existing genre is **never replaced** (the design notes). A run across the library therefore cannot re-genre
-  a track, which is right: a genre cannot be undone after import, so changing one has to be deliberate.
+rekordbox reads ID3v2 for AIFF, so an AIFF gets ID3 frames; the lossy lane keeps the container it already
+is — MP4 atoms for an m4a, ID3 for an mp3. The writer sets only the frames this project owns and leaves
+every other one exactly as it found it, never rewriting the whole tag, so Traktor's `TKEY`/`TBPM` survive.
+An existing genre is never replaced unless `write` is told to.
 """
 
 from __future__ import annotations
@@ -22,8 +11,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-# The frames this project owns in an ID3 tag, and the freeform ones it adds beside them. They follow
-# MusicBrainz's own tagging guidelines, so anything else reading these files understands them.
+# The frames this project owns in an ID3 tag; the freeform ones follow MusicBrainz's tagging guidelines
+# so that anything else reading these files understands them.
 _ID3_FRAMES = {
     "title": "TIT2", "artist": "TPE1", "album": "TALB", "album_artist": "TPE2",
     "year": "TDRC", "label": "TPUB", "genre": "TCON",
@@ -76,8 +65,7 @@ class Tags:
 def read(path: Path) -> Tags:
     """What the file already says, as far as this project's own fields go.
 
-    The MusicBrainz ids written here are the cache the design notes asked for: a file that already carries them
-    is not identified again, so nothing is asked for something already known.
+    The MusicBrainz ids it returns are the cache: a file that already carries them is not identified again.
     """
     from mutagen import File as MutagenFile
 
@@ -117,10 +105,9 @@ def read(path: Path) -> Tags:
 def write(path: Path, tags: Tags, *, replace_genre: bool = False, log=lambda *_: None) -> list[str]:
     """Set the frames this project owns. Returns the names of the ones that changed something.
 
-    `replace_genre` is the deliberate act the design notes withholds from a run. A run never replaces a genre,
-    because a genre cannot be undone after import; `music-agent retag` passes this, and when the tags carry
-    no genre at all it takes an existing one *off* rather than leaving a name the collection has not got,
-    which is what the import would mint a row for.
+    A run never replaces a genre, because a genre cannot be undone after import, so only `music-agent
+    retag` passes `replace_genre` — which, when the tags carry no genre at all, takes an existing one *off*
+    rather than leaving a name the collection has not got.
     """
     suffix = path.suffix.lower()
     if suffix in {".aiff", ".aif", ".mp3"}:
@@ -134,23 +121,24 @@ def _write_id3(path: Path, tags: Tags, *, replace_genre: bool = False) -> list[s
     from mutagen import File as MutagenFile
     from mutagen.id3 import TALB, TCON, TDRC, TIT2, TPE1, TPE2, TPUB, TXXX, UFID
 
-    frames = {"TIT2": TIT2, "TPE1": TPE1, "TALB": TALB, "TPE2": TPE2,
-              "TDRC": TDRC, "TPUB": TPUB, "TCON": TCON}
+    frames = {"title": TIT2, "artist": TPE1, "album": TALB, "album_artist": TPE2,
+              "year": TDRC, "label": TPUB, "genre": TCON}
     audio = MutagenFile(path)
     if audio is None:
         raise TagError(f"mutagen cannot open {path}")
     if audio.tags is None:
         audio.add_tags()
 
+    filled = tags.filled()
     written = []
-    if replace_genre and "genre" not in tags.filled() and "TCON" in audio.tags:
-        del audio.tags["TCON"]                  # nothing resolves now: take the old name off (the design notes)
+    if replace_genre and "genre" not in filled and "TCON" in audio.tags:
+        del audio.tags["TCON"]                  # nothing resolves now: take the old name off
         written.append("genre")
-    for name, value in tags.filled().items():
+    for name, value in filled.items():
         if name in _ID3_FRAMES:
             if name == "genre" and not replace_genre and "TCON" in audio.tags:
-                continue                        # the design notes: an existing genre is never replaced
-            audio.tags[_ID3_FRAMES[name]] = frames[_ID3_FRAMES[name]](encoding=3, text=[value])
+                continue                        # an existing genre is never replaced
+            audio.tags[_ID3_FRAMES[name]] = frames[name](encoding=3, text=[value])
             written.append(name)
         elif name in _ID3_FREEFORM:
             key = f"TXXX:{_ID3_FREEFORM[name]}"
@@ -170,14 +158,15 @@ def _write_mp4(path: Path, tags: Tags, *, replace_genre: bool = False) -> list[s
     if audio.tags is None:
         audio.add_tags()
 
+    filled = tags.filled()
     written = []
-    if replace_genre and "genre" not in tags.filled() and "\xa9gen" in audio.tags:
-        del audio.tags["\xa9gen"]               # the design notes, as above
+    if replace_genre and "genre" not in filled and "\xa9gen" in audio.tags:
+        del audio.tags["\xa9gen"]               # nothing resolves now: take the old name off
         written.append("genre")
-    for name, value in tags.filled().items():
+    for name, value in filled.items():
         if name in _MP4_ATOMS:
             if name == "genre" and not replace_genre and "\xa9gen" in audio.tags:
-                continue                        # the design notes, as above
+                continue                        # an existing genre is never replaced
             audio.tags[_MP4_ATOMS[name]] = [value]
             written.append(name)
         elif name in _MP4_FREEFORM:
@@ -191,9 +180,8 @@ def _write_mp4(path: Path, tags: Tags, *, replace_genre: bool = False) -> list[s
 def _write_vorbis(path: Path, tags: Tags, *, replace_genre: bool = False, log=lambda *_: None) -> list[str]:
     """Everything else the library holds — an ogg, an opus, a flac that never needed converting.
 
-    The generic interface writes the ordinary fields and not the ids, which is a smaller cache than the
-    other two formats keep. Nothing in the library is in this shape today; it is here so that a file in it
-    is tagged rather than refused.
+    The generic interface writes the ordinary fields and not the ids, a smaller cache than the other two
+    formats keep, so a file in this shape is tagged rather than refused.
     """
     from mutagen import File as MutagenFile
 
@@ -205,15 +193,16 @@ def _write_vorbis(path: Path, tags: Tags, *, replace_genre: bool = False, log=la
 
     keys = {"title": "title", "artist": "artist", "album": "album", "album_artist": "albumartist",
             "year": "date", "genre": "genre", "catalog_number": "catalognumber", "label": "label"}
+    filled = tags.filled()
     written = []
-    if replace_genre and "genre" not in tags.filled() and "genre" in audio.tags:
-        del audio.tags["genre"]                 # the design notes, as above
+    if replace_genre and "genre" not in filled and "genre" in audio.tags:
+        del audio.tags["genre"]                 # nothing resolves now: take the old name off
         written.append("genre")
-    for name, value in tags.filled().items():
+    for name, value in filled.items():
         if name not in keys:
             continue
         if name == "genre" and not replace_genre and "genre" in audio.tags:
-            continue
+            continue                            # an existing genre is never replaced
         audio.tags[keys[name]] = [value]
         written.append(name)
     audio.save()

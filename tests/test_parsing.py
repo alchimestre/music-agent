@@ -14,6 +14,7 @@ from music_agent.parsing import (
     credits,
     extract_mix,
     fold,
+    mix_matches,
     parse_filename,
     primary_artist,
     search_query,
@@ -130,6 +131,34 @@ def test_the_mix_is_the_trailing_parenthesised_part():
     assert extract_mix("Kiasmos - Blurred (Extended Mix).flac") == "Extended Mix"
     assert extract_mix("Kiasmos - Blurred.flac") == ""
     assert extract_mix("A - B (One) (Two).flac") == "Two"
+
+
+# -- one version, however it is written (the design notes) -------------------------
+
+@pytest.mark.parametrize("wanted, have", [
+    ("Original Mix", "original_mix"),
+    ("Original Mix", "ORIGINAL MIX"),
+    ("Original Mix", ""),
+    ("Original Version", "Original Mix"),
+    ("", "original_mix"),
+    ("", "Original Version"),
+    ("Kate Stein Remix", "kate_stein_remix"),
+    ("Victor  Ruiz  Remix", "victor ruiz remix"),
+])
+def test_one_version_spelled_two_ways_is_one_version(wanted, have):
+    assert mix_matches(wanted, have) is True
+
+
+@pytest.mark.parametrize("wanted, have", [
+    ("Original Mix", "Extended Mix"),
+    ("", "Victor Ruiz Remix"),
+    ("Extended Mix", "Extended"),            # a named version must be that version, not part of it
+    ("Extended Mix", ""),
+    ("Original Mix", "Original Mix Remastered"),
+    ("Kate Stein Remix", "Kate Stein Edit"),
+])
+def test_a_different_version_is_a_different_version(wanted, have):
+    assert mix_matches(wanted, have) is False
 
 
 # -- the query -------------------------------------------------------------

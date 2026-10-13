@@ -1,8 +1,7 @@
 """The Soulseek side: starting the acquisition server, and reading what it answers.
 
-Ticket 03: the server is a child process, and when it fails it does so *inside* an ordinary result —
-`{"status": "error", "code": ..., "message": ...}` — rather than raising. Verified against the pinned
-build: a login that could not bind its listening port came back exactly that way.
+The server reports a failure *inside* an ordinary result — `{"status": "error", "code": ..., "message":
+...}` — rather than raising.
 """
 
 from __future__ import annotations
@@ -23,11 +22,11 @@ class ToolError(RuntimeError):
 
 
 def environment(config: Config) -> dict[str, str]:
-    """The child's environment: the credentials under the names the server reads, our own ports, and the
-    ceilings on how much of it runs at once.
+    """The child's environment: the credentials, our own ports, and its ceilings.
 
-    The credentials arrive under whatever name this machine uses them and are *copied* into the two the
-    server looks for, so `config.toml` stays free to name them the local way.
+    Credentials arrive under whatever names this machine uses and are copied into the two the server looks
+    for, so `config.toml` stays free to name them the local way. The ceilings are set here so how much of
+    this runs at once is one decision, rather than a default buried in a pinned build.
     """
     for name in (config.slsk_username_env, config.slsk_password_env):
         if not os.environ.get(name):
@@ -39,8 +38,6 @@ def environment(config: Config) -> dict[str, str]:
     env["SLSK_DOWNLOAD_DIR"] = str(config.staging)
     env["SLSK_LISTEN_PORT"] = str(config.soulseek_listen_port)
     env["SLSK_OBFUSCATED_PORT"] = str(config.soulseek_obfuscated_port)
-    # The child's own ceilings, so how much of this runs at once is one decision made here rather than a
-    # default buried in a pinned build.
     env["SLSK_MAX_CONCURRENT_DL"] = str(config.max_downloads)
     env["SLSK_MAX_CONCURRENT_SEARCH"] = str(config.max_searches)
     env["SLSK_MAX_CONCURRENT_OPS"] = str(config.max_operations)

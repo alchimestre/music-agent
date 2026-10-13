@@ -1,20 +1,14 @@
 """Identification: what a file is, from its sound first and its name last.
 
-Ticket 01: fingerprint with fpcalc, look that up in AcoustID, and read the recording from MusicBrainz —
-which wants a real User-Agent with a contact they can reach, and answers at one request a second.
-Ticket 15: only about a third of AcoustIDs link to a MusicBrainz recording, so a MusicBrainz text search on
-the normalized artist and title follows it, and there is a 0.9 score floor below which a fingerprint result
-is ignored rather than trusted — the one sub-0.9 match that was checked resolved to a *different* track.
-When both fail, artist and title come from the filename, everything else stays empty, and the track is
-imported anyway and queued for review.
-
-Nothing here writes anything. Identification answers what a file is; the tag writer and the genre mapping
-are the two things that use the answer, and the genre vocabulary is the library's rather than MusicBrainz's.
+Fingerprint with fpcalc, look that up in AcoustID, read the recording from MusicBrainz — which wants a
+reachable contact in its User-Agent and answers at one request a second. Only about a third of AcoustIDs
+link to a MusicBrainz recording, so a text search on the normalized artist and title follows, and the
+filename is the last resort: either way the track is imported and queued for review. Nothing here writes.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -22,7 +16,8 @@ from . import reference
 from .config import ENV_HINT, Config, MissingCredential
 from .rules import Request
 
-# Ticket 15: below this a fingerprint match is ignored rather than trusted.
+# A fingerprint match below this is not trusted: the one sub-0.9 match that was checked resolved to a
+# different track.
 SCORE_FLOOR = 0.9
 
 # How many recordings to ask MusicBrainz's text search for.
@@ -49,7 +44,7 @@ class Release:
 
 @dataclass(frozen=True)
 class Candidate:
-    """A recording something offered, and — once MusicBrainz has been asked — the releases it is on."""
+    """A recording something offered, with the releases MusicBrainz says it is on."""
 
     id: str
     title: str
@@ -84,8 +79,7 @@ class Identified:
     recording_id: str = ""
     release_id: str = ""
     release_group_id: str = ""
-    # What the two services call this track. Kept separate rather than merged, because the order they are
-    # trusted in is the caller's business, and `genre` decides it.
+    # Kept separate: the order they are trusted in is decided by `genre`.
     styles: tuple[str, ...] = ()
     genres: tuple[str, ...] = ()
     score: float = 0.0
@@ -123,19 +117,12 @@ class Discogs(Protocol):
 
 
 def from_filename(request: Request) -> Identified:
-    """The last resort: the name is all there is (the design notes)."""
+    """The last resort: the name is all there is."""
     return Identified(title=request.title, artist=request.artist, source="filename")
 
 
 def _distance(candidate: Candidate, seconds: int | None) -> tuple[int, float]:
-    """How far a recording is from the file's length — and a recording whose length is unknown never
-    wins.
-
-    This is not a detail. AcoustID lists recordings it has no length for, and treating "no length" as
-    "no distance" made a different song on the same album beat the right one by a mile: on the file that
-    caught it, `Heartz of Men` (no length at all) outranked `Hit ’Em Up` at 313 s against the file's
-    312.6 s.
-    """
+    """How far a recording is from the file's length; an unknown length never wins, sorting as `(1, 0.0)`."""
     if seconds is None or candidate.duration is None:
         return (1, 0.0)
     return (0, abs(candidate.duration - seconds))
@@ -144,10 +131,8 @@ def _distance(candidate: Candidate, seconds: int | None) -> tuple[int, float]:
 def best(matches: list[Match], seconds: int | None = None) -> Candidate | None:
     """The recording to believe, or None.
 
-    The score decides first — it is the service's own confidence — and the length settles what the score
-    cannot: two recordings of one song, an edit and an album cut, are the same confidence and different
-    tracks. The floor decides whether anything is believed at all, and a missing length is never better
-    than a known one.
+    The score decides first, the length settles what the score cannot — an edit and an album cut are the
+    same confidence and different tracks — and the floor decides whether anything is believed at all.
     """
     offered = [(match.score, candidate) for match in matches if match.score >= SCORE_FLOOR
                for candidate in match.recordings]
@@ -158,13 +143,11 @@ def best(matches: list[Match], seconds: int | None = None) -> Candidate | None:
 
 
 def choose(releases: list[Release], group: str = "") -> Release:
-    """The release to take the label, catalogue number and year from (the design notes).
+    """The release to take the label, catalogue number and year from.
 
-    Every release in the list contains the recording — that is how they were found — so which one is a
-    real question, and the file that prompted it answered it: taking the first gave the *single* `How Do U
-    Want It` for a track whose album is `Death Row: Greatest Hits`, so the album and its artist came out
-    as the single's. AcoustID says which release group it matched, so a release in that group wins, and
-    the first is the fallback when none of them is in it.
+    A release in the group AcoustID matched wins; then the first carrying a label and a date; then the
+    first. Every release in the list contains the recording, so taking the first outright once produced a
+    single's album and artist for a track whose album was a compilation.
     """
     for release in releases:
         if group and release.release_group_id == group:
@@ -176,11 +159,8 @@ def choose(releases: list[Release], group: str = "") -> Release:
 
 
 def album_artist(release: Release, candidate: Candidate) -> str:
-    """Ticket 17: the release group's own credit, and `Various Artists` when MusicBrainz says so.
-
-    The group rather than the release's own credit, because a release can be a single whose credit is
-    somebody else entirely — the very file that caught this had `2Pac & K‐Ci & JoJo` on it.
-    """
+    """The release group's own credit — a single's credit can name somebody else entirely — and
+    `Various Artists` when MusicBrainz says so."""
     if release.compilation or candidate.compilation:
         return "Various Artists"
     return " & ".join(candidate.album_artists) or release.artist
@@ -219,16 +199,14 @@ def identify(
 
 def _in_full(candidate: Candidate, brainz: Brainz, *, discogs: Discogs | None = None,
              source: str) -> Identified:
-    """Ask MusicBrainz about the recording that was found, and about one release of it.
+    """Ask MusicBrainz about the found recording, and the two services about its genres.
 
-    One release, not every release it appears on: each costs a request at one a second, MusicBrainz orders
-    them by relevance, and a field a release simply does not carry is left empty rather than invented.
-
-    The two genre sources are gathered here as well, since this is the first point at which a trustworthy
-    artist and title exist to ask Discogs about.
+    One release, not every release it appears on: each costs a request at one a second, and a field a
+    release does not carry is left empty rather than invented. This is the first point at which a
+    trustworthy artist and title exist to ask Discogs about.
     """
     detail = brainz.recording(candidate.id) or candidate
-    release = choose([brainz.release(one.id) for one in detail.releases[:3]] or [],
+    release = choose([brainz.release(one.id) for one in detail.releases[:3]],
                      group=candidate.release_group)
     artist = " & ".join(detail.artists or candidate.artists)
     title = detail.title or candidate.title
@@ -249,11 +227,11 @@ def _in_full(candidate: Candidate, brainz: Brainz, *, discogs: Discogs | None = 
     )
 
 
-# ── the live versions of the three seams ─────────────────────────────────────
+# ── the live versions of the seams ───────────────────────────────────────────
 
 
 class Fingerprints:
-    """fpcalc, chromaprint's own tool (the design notes)."""
+    """fpcalc, chromaprint's own tool."""
 
     def listen(self, path: Path) -> tuple[str, int]:
         import json
@@ -287,9 +265,8 @@ class AcoustIDMatches:
 class DiscogsStyles:
     """Discogs, keyed by the token their API wants for the rate limit it grants.
 
-    The *search* answers with `style` as well as `genre`, so one request per track is enough — and the
-    style is the useful one, being the specific name (`Jazz-Funk`) where the genre is a coarse bucket
-    (`Jazz / Funk / Soul / Folk, World, & Country`).
+    Its search answers with `style` beside `genre`, so one request per track is enough — and the style is
+    the useful one, being the specific name (`Jazz-Funk`) where the genre is a coarse bucket.
     """
 
     def __init__(self, token: str, user_agent: str = "music-agent/0.1") -> None:
@@ -301,7 +278,7 @@ class DiscogsStyles:
         return cls(required(config.discogs_token_env))
 
     def styles(self, artist: str, title: str) -> tuple[str, ...]:
-        import json as _json
+        import json
         import urllib.parse
         import urllib.request
 
@@ -311,7 +288,7 @@ class DiscogsStyles:
                                          headers={"User-Agent": self._agent})
         try:
             with urllib.request.urlopen(request, timeout=25) as handle:
-                body = _json.load(handle)
+                body = json.load(handle)
         except Exception:                       # a genre is not worth failing an identification over
             return ()
         results = body.get("results") or []
@@ -319,8 +296,8 @@ class DiscogsStyles:
 
 
 def _match_of(result: dict) -> Match:
-    """One AcoustID result. The release group is where the album, its artists and the compilation flag
-    already are, so nothing needs asking for them."""
+    """One AcoustID result. Its release group carries the album, its artists and the compilation flag, so
+    nothing needs asking for them."""
     recordings = []
     for recording in result.get("recordings", []):
         group = (recording.get("releasegroups") or [{}])[0]
@@ -355,19 +332,19 @@ class MusicBrainz:
     def recording(self, recording_id: str) -> Candidate | None:
         """The recording in full, with the releases it appears on.
 
-        `releases` is the include that carries them. Asking a *recording* for `release-groups` is not a
-        valid include at all, which is why a release is fetched separately when its group is wanted.
+        `release-groups` is not a valid include on a recording, which is why the group is fetched by a
+        separate release call.
         """
         got = self._mb.get_recording_by_id(recording_id, includes=["artists", "releases"])
         recording = got.get("recording") or {}
         candidate = self._as_candidate(recording)
         if candidate is None:
             return None
-        return _with(candidate, releases=tuple(self._as_release(release)
-                                                for release in recording.get("release-list", [])))
+        return replace(candidate, releases=tuple(self._as_release(release)
+                                                 for release in recording.get("release-list", [])))
 
     def search(self, request: Request) -> list[Match]:
-        """Ticket 15's rescue: the same query the reference is resolved with, scored by MusicBrainz."""
+        """The same query the reference is resolved with, scored by MusicBrainz."""
         found = self._mb.search_recordings(query=reference.query_for(request), limit=SEARCH_LIMIT)
         listed = found.get("recording-list", [])
         recordings = tuple(candidate for candidate in
@@ -384,20 +361,18 @@ class MusicBrainz:
         return self._as_release(got.get("release") or {})
 
     def genres(self, release_group_id: str) -> tuple[str, ...]:
-        """A release group's genres, over a raw ws/2 call.
-
-        Not through musicbrainzngs: its 0.7.1 has no `genres` include at all — only `tags`, which came back
-        empty on every file it was tried against — while the API itself answers (the design notes).
-        """
-        import json as _json
+        """A release group's genres, over a raw ws/2 call: musicbrainzngs 0.7.1 has no `genres` include at
+        all, only `tags`, which came back empty on every file it was tried against."""
+        import json
         import urllib.request
 
         request = urllib.request.Request(
             f"https://musicbrainz.org/ws/2/release-group/{release_group_id}?inc=genres&fmt=json",
-            headers={"User-Agent": f"music-agent/0.1 ( {self._contact} )"},   # their policy wants the
-        )                                                                    # contact in the agent
+            # Their policy wants the contact in the User-Agent.
+            headers={"User-Agent": f"music-agent/0.1 ( {self._contact} )"},
+        )
         with urllib.request.urlopen(request, timeout=25) as handle:
-            body = _json.load(handle)
+            body = json.load(handle)
         return tuple(genre["name"] for genre in body.get("genres", []) if genre.get("name"))
 
     def _as_candidate(self, recording: dict) -> Candidate | None:
@@ -426,16 +401,6 @@ class MusicBrainz:
             compilation="Compilation" in (group.get("secondary-types") or []),
             release_group_id=group.get("id", ""),
         )
-
-
-def _with(candidate: Candidate, *, releases: tuple[Release, ...]) -> Candidate:
-    """`Candidate` is frozen, so the releases ride along in a copy rather than being bolted on."""
-    return Candidate(
-        id=candidate.id, title=candidate.title, artists=candidate.artists,
-        duration=candidate.duration, album=candidate.album,
-        album_artists=candidate.album_artists, compilation=candidate.compilation,
-        release_group=candidate.release_group, releases=releases,
-    )
 
 
 def required(name: str) -> str:

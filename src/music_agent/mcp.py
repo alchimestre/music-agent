@@ -1,25 +1,7 @@
 """Spawning an MCP server and speaking to it over stdio.
 
-The acquisition surface is a server rather than a library, pinned to a commit in `config.toml` so a
-rebuild cannot quietly move the fields the match rules were written against (the design notes). This module is
-the only place that knows the wire protocol: newline-delimited JSON-RPC 2.0 on the child's stdin and
-stdout, with the server's logging on stderr.
-
-Three things bite callers, so all three are handled here rather than in each stage:
-
-- A tool that fails may return its complaint *inside* an otherwise ordinary result, or it may flag the
-  call with `isError`. `call` raises for the flag; a stage must still read the payload for the other.
-- The server may push notifications, which are dropped, and may ask the client questions. An unanswered
-  question would leave the exchange hanging, so any request from the server gets an empty result.
-- A server that dies mid-call must be reported at once rather than waited for, which is why the reader
-  thread signals end-of-input to every call still waiting.
-- **Calls answer each other out of order.** The acquisition works on several tracks at once, so several
-  requests are in flight together and their answers come back in whatever order the server finishes them.
-  Each answer is routed to the call that asked for it by its id; a single shared queue would let one call
-  read another's answer and leave the other waiting for an answer already spent.
-- The command we run is a *wrapper*: `uvx` starts the server as a process of its own. Closing the input
-  and terminating the wrapper takes that server down with it — measured both when idle and with a call
-  still in flight — so nothing here signals a process group.
+Newline-delimited JSON-RPC 2.0 on the child's stdin and stdout, with the server's logging on stderr. Calls
+answer each other out of order, so each answer is routed to the call that asked for it by its id.
 """
 
 from __future__ import annotations
@@ -33,12 +15,11 @@ from collections import deque
 from collections.abc import Callable, Sequence
 from typing import Any
 
-# What we announce ourselves as. A server that does not support this revision answers with one it does,
-# and we take it: nothing here needs a feature from a later one.
+# What we announce ourselves as. A server that does not support this revision answers with one it does.
 PROTOCOL_VERSION = "2024-11-05"
 
 _STARTUP_TIMEOUT = 60.0     # uvx may have to build the server the first time it runs
-_CALL_TIMEOUT = 15.0        # the user, 2026-10-12: a minute on one track is too long; 15 s is ample
+_CALL_TIMEOUT = 15.0
 _GRACE = 0.5                # a server that exits when its input closes does so at once
 _KILL_GRACE = 2.0
 _STDERR_TAIL = 20           # lines kept to explain a failure
@@ -218,7 +199,11 @@ class StdioServer:
         return [tool["name"] for tool in self.request("tools/list").get("tools", [])]
 
     def call(self, tool: str, arguments: dict | None = None, timeout: float = _CALL_TIMEOUT) -> Any:
-        """Call a tool and return its payload, raising if the server flagged the call as failed."""
+        """Call a tool and return its payload, raising if the server flagged the call as failed.
+
+        A tool may also report a failure *inside* an otherwise ordinary result, so the caller still has to
+        read the payload for that.
+        """
         result = self.request(
             "tools/call", {"name": tool, "arguments": arguments or {}}, timeout=timeout
         )
@@ -229,7 +214,11 @@ class StdioServer:
     # ── lifetime ─────────────────────────────────────────────────────────────
 
     def close(self) -> None:
-        """Close the input, then insist. Safe to call twice."""
+        """Close the input, then insist. Safe to call twice.
+
+        The command we run is a wrapper (`uvx`): closing its input and terminating it takes the server down
+        with it, so nothing here signals a process group.
+        """
         if self._closed:
             return
         self._closed = True

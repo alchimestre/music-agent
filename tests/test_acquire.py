@@ -65,6 +65,19 @@ NO_LENGTH = [
         "queue_size": 0,
     }
 ]
+# A peer that answered while it had no free slot: the review screen shows that (the card), because
+# a peer with a queue behind it is a wait rather than a failure.
+NO_SLOTS = [
+    {
+        "id": "busy:Music\\Kiasmos - Blurred.aiff",
+        "username": "busy",
+        "filename": "Music\\Kiasmos - Blurred.aiff",
+        "extension": "aiff",
+        "duration_sec": None,
+        "queue_size": 3,
+        "has_free_slots": False,
+    }
+]
 
 
 class Clock:
@@ -184,6 +197,41 @@ def test_the_decision_to_wait_rotate_or_give_up(status, connection, on_disk, stu
     assert acquire.move(transfer, on_disk=on_disk, stuck_for=stuck, declared_queue=queue) is expected
 
 
+# ── the candidate a search result becomes ────────────────────────────────────
+
+
+def test_a_lossy_result_with_no_length_gets_one_from_its_size():
+    """A peer that reports a bitrate and a size has reported the length: bytes = bitrate × seconds / 8. Without
+    that, a file the rule could have judged was offered for review instead (2026-10-12)."""
+    item = {"username": "peer", "filename": r"M\Kiasmos - Blurred.mp3", "filesize": 12_000_000,
+            "bitrate": 320, "queue_size": 0}
+
+    assert acquire.candidate_of(item).duration == 300
+
+
+def test_a_lossless_result_is_not_given_a_length_from_its_size():
+    """`bitrate` on a lossless file is the server's quality score, not the rate it was encoded at: the
+    arithmetic would be a couple of seconds out, and the one-second window would act on it."""
+    item = {"username": "peer", "filename": r"M\Kiasmos - Blurred.flac", "filesize": 37_773_404,
+            "bitrate": 887, "queue_size": 0}
+
+    assert acquire.candidate_of(item).duration is None
+
+
+def test_a_reported_length_is_left_alone():
+    item = {"username": "peer", "filename": r"M\Kiasmos - Blurred.mp3", "duration_sec": 448.9,
+            "filesize": 12_000_000, "bitrate": 320, "queue_size": 0}
+
+    assert acquire.candidate_of(item).duration == 448
+
+
+def test_a_size_with_no_bitrate_still_gives_no_length():
+    item = {"username": "peer", "filename": r"M\Kiasmos - Blurred.mp3", "filesize": 12_000_000,
+            "bitrate": None, "queue_size": 0}
+
+    assert acquire.candidate_of(item).duration is None
+
+
 # ── the flow ─────────────────────────────────────────────────────────────────
 
 
@@ -218,6 +266,36 @@ def test_the_file_on_disk_wins_over_a_server_that_says_not_found(tmp_path):
 
     assert summary.downloaded == [1], quiet.lines
     assert job.records()[0].status == state.DOWNLOADED
+
+
+def test_a_track_settled_by_hand_is_not_searched_again(tmp_path):
+    """Ticket 12: the decision axis is what a pass reads, so an answered question is not reopened."""
+    config, job, server, calls = setup(tmp_path, results=GOOD)
+    records = job.records()
+    records[0].decision = state.SKIPPED
+    job.write_records(records)
+
+    with server:
+        summary, quiet = pass_once(config, job, server, Reference(), calls)
+
+    assert summary.decided == [1], quiet.lines
+    assert summary.in_review == [] and summary.nothing_usable == []
+    assert "search" not in tools_called(calls)
+    assert job.records()[0].status == state.PENDING, "left exactly as it was"
+
+
+def test_a_peer_that_reported_no_free_slot_is_remembered(tmp_path):
+    """It is what the review screen's card shows, so it has to survive the search result rather than being
+    dropped on the way into the record."""
+    config, job, server, calls = setup(tmp_path, results=NO_SLOTS)
+
+    with server:
+        summary, quiet = pass_once(config, job, server, Reference(), calls)
+
+    assert summary.in_review == [1], quiet.lines
+    candidate = job.records()[0].candidates[0]
+    assert candidate.slots is False
+    assert candidate.queue == 3
 
 
 def test_a_track_with_nothing_ready_waits_for_a_human(tmp_path):
@@ -406,13 +484,16 @@ def test_the_copy_in_the_collection_is_the_reference_when_musicbrainz_has_none(t
 
 
 def test_a_lossy_candidate_is_not_an_upgrade(tmp_path):
-    """A lossy copy is not better than the lossy copy the user already has."""
+    """A lossy copy is not better than the lossy copy the user already has, so it is not an upgrade — and since
+    2026-10-12 it is not a question either. It used to land in review, which is where the user read a queue of
+    mp3s with no bitrate offered to replace mp3s the user already had."""
     config, job, server, calls = setup(tmp_path, results=LOSSY_ONLY)
 
     with server:
         summary, quiet = pass_once(config, job, server, Reference(), calls, shelf=held_lossy(tmp_path))
 
-    assert summary.in_review == [1], quiet.lines
+    assert summary.nothing_usable == [1], quiet.lines
+    assert summary.in_review == [], "never asked about: the copy the user has already plays"
     assert "download" not in tools_called(calls)
 
 

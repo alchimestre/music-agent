@@ -1,13 +1,9 @@
 """The reference length: the one number that decides whether a candidate is the right file.
 
-Ticket 13: the length comes from MusicBrainz, and a result is accepted only on folded artist and title
-equality under the version rules. A bare request resolves to the original, a named version must
-appear in the recording's title, and anything ambiguous yields *no* reference — because a wrong reference
-does not degrade the match, it rejects every correct file. MusicBrainz holds `Wsjr` at 413 s and
-`Wsjr (Orphx remix)` at 453 s, and a ±1 s window turns picking the wrong one into a total failure.
-
-The answer is cached in the job's own `tracks.jsonl` and nowhere else, so resuming a run never re-queries
-and nothing goes stale between runs.
+A wrong reference does not degrade the match, it rejects every correct file, so anything ambiguous yields
+*no* reference: MusicBrainz holds `Wsjr` at 413 s and `Wsjr (Orphx remix)` at 453 s, and a ±1 s window
+turns picking the wrong one into a total failure. The answer is cached in the job's own `tracks.jsonl`,
+so resuming never re-queries.
 """
 
 from __future__ import annotations
@@ -52,11 +48,11 @@ def escape(text: str) -> str:
 
 
 def query_for(request: Request) -> str:
-    """Ticket 13's query — both fields, and nothing else.
+    """Both fields, and nothing else.
 
-    The *bare* title goes in, not the requested version: MusicBrainz carries the version in the
-    recording title, so the bare title returns the versions for `resolve` to choose between, while asking
-    for a version MusicBrainz spells differently returns nothing at all.
+    The *bare* title goes in, not the requested version: MusicBrainz carries the version in the recording
+    title, so the bare title returns the versions to choose between, while a version it spells differently
+    returns nothing at all.
     """
     return f'recording:"{escape(bare_title(request.title))}" AND artist:"{escape(request.artist)}"'
 
@@ -65,7 +61,7 @@ def resolve(request: Request, lookup: Lookup) -> int | None:
     """The reference length in whole seconds, or None when nothing can be pinned down.
 
     None is a real answer, not a failure: it means review-only, which is always better than a reference
-    that may be the wrong edit (the design notes).
+    that may be the wrong edit.
     """
     title = bare_title(request.title)
     if not request.artist.strip() or not title:
@@ -89,11 +85,11 @@ def resolve(request: Request, lookup: Lookup) -> int | None:
         # Several versions of the original, seconds apart, are several different edits. Taking one would
         # reject the files that are the other.
         return None
-    return max(lengths)              # the design notes prefers the longer edit among acceptable versions
+    return max(lengths)              # the longer edit among acceptable versions is preferred
 
 
 class MusicBrainz:
-    """The live lookup, serialized to one request a second as their policy asks (the design notes)."""
+    """The live lookup, serialized to one request a second as their policy asks."""
 
     def __init__(self, contact: str, limit: int = LIMIT) -> None:
         import musicbrainzngs
