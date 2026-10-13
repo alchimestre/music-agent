@@ -65,8 +65,8 @@ NO_LENGTH = [
         "queue_size": 0,
     }
 ]
-# A peer that answered while it had no free slot: the review screen shows that (the card), because
-# a peer with a queue behind it is a wait rather than a failure.
+# A peer that answered while it had no free slot: the offer is kept, because a peer with a queue behind it
+# is a wait rather than a failure.
 NO_SLOTS = [
     {
         "id": "busy:Music\\Kiasmos - Blurred.aiff",
@@ -285,7 +285,7 @@ def test_a_track_settled_by_hand_is_not_searched_again(tmp_path):
 
 
 def test_a_peer_that_reported_no_free_slot_is_remembered(tmp_path):
-    """It is what the review screen's card shows, so it has to survive the search result rather than being
+    """The answer belongs to the candidate, so it has to survive the search result rather than being
     dropped on the way into the record."""
     config, job, server, calls = setup(tmp_path, results=NO_SLOTS)
 
