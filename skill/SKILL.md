@@ -36,7 +36,7 @@ music-agent status --files                      # what nothing points at, and wh
 music-agent import                              # into rekordbox, which has to be closed first
 music-agent dedupe                              # one row per track, dry run; --apply merges (see 10)
 music-agent backfill                            # a row for every file, dry run; --apply adds (see 10)
-music-agent sweep                               # staging's own leftovers, dry run; --apply clears (see 10)
+music-agent sweep                               # staging's own leftovers, dry run; --apply clears (see 11)
 ```
 
 The vocabulary — run, track, candidate, Ready, Needs you, reference, proposal, and the decision axis
@@ -317,6 +317,22 @@ of it: run the Traktor tool's purge (see 9).
 
 **Done when** a second `dedupe` and a second `backfill` both find nothing, and `music-agent status --files`
 says nothing was left behind.
+
+## 11. Staging's own leftovers
+
+```
+music-agent sweep              # what it would clear
+music-agent sweep --apply      # and this clears it
+```
+
+A pass that is interrupted, or refused a placement, leaves a shell behind: an interrupted transfer's `.part`,
+which is incomplete by definition, and a converted file no record points at any more. Neither is anything a
+later pass will pick up, and both read as work in progress to whoever opens the folder.
+
+Nothing a record names is in the list — that file is a track a pass still owes — and no lane is touched. The
+collection is not read or written.
+
+**Done when** a second `sweep` finds nothing.
 
 ## Longer runs
 
