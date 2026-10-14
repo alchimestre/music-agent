@@ -24,6 +24,7 @@ from .rules import hms
 from . import slsk
 from . import spotify
 from . import state
+from . import sweep
 from . import tracklist
 
 
@@ -101,6 +102,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="give a row to every file in a lane the collection has none for (dry run unless --apply)")
     backfill.add_argument("--apply", action="store_true",
                           help="write it; without this nothing is added")
+    sweep = commands.add_parser(
+        "sweep", parents=[common],
+        help="clear staging of what no pass will pick up (dry run unless --apply)")
+    sweep.add_argument("--apply", action="store_true",
+                       help="remove them; without this nothing is deleted")
     return parser
 
 
@@ -595,6 +601,25 @@ def _status(config: config_module.Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def _sweep(config: config_module.Config, args: argparse.Namespace) -> int:
+    """Staging's own leftovers: an interrupted transfer, and a file no record points at.
+
+    Not a run's step and not scoped to one — whatever a pass leaves behind, this is what says so and clears
+    it. Nothing it removes is a file a record names, and the collection is not touched.
+    """
+    leftovers = sweep.find(config)
+    print(f"staging: {config.staging}")
+    print(leftovers.report())
+    if not leftovers.all:
+        return 0
+    if not args.apply:
+        print(f"\nmusic-agent sweep --apply   # remove those {len(leftovers.all)}")
+        return 0
+    print()
+    print(f"{sweep.clear(leftovers)} removed")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     config = config_module.load(getattr(args, "config", None))
@@ -616,6 +641,8 @@ def main(argv: list[str] | None = None) -> int:
         return _dedupe(config, args)
     if args.command == "backfill":
         return _backfill(config, args)
+    if args.command == "sweep":
+        return _sweep(config, args)
     return 2                                        # unreachable: the subparser requires a command
 
 

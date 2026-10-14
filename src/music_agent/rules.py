@@ -42,8 +42,9 @@ LOSSLESS_EXTENSIONS = frozenset({"flac", "wav", "aiff", "aif"})
 
 # Everything else we take, as-is. `.aif` is listed because it is the same format as `.aiff` and peers use
 # both — `place` renames it on the way into the lane, so `.aiff` is the only name the collection ever sees.
-# Anything not in either set is refused outright — artwork, cue sheets, logs, checksums.
-AUDIO_EXTENSIONS = LOSSLESS_EXTENSIONS | frozenset({"m4a", "mp3", "ogg", "opus"})
+# Lossy means MP3 or AAC-in-m4a and nothing else, because those are the only two a rekordbox row can point
+# at: a `.ogg` or an `.opus` is refused here rather than fetched and refused again at the import.
+AUDIO_EXTENSIONS = LOSSLESS_EXTENSIONS | frozenset({"m4a", "mp3"})
 
 
 class Label(Enum):

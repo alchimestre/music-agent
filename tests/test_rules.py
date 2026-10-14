@@ -165,8 +165,17 @@ def test_the_extension_alone_decides_the_lane():
     """Nothing is probed, so an ALAC-in-m4a is taken as lossy like any other."""
     for name in ("a.flac", "a.wav", "a.aiff", "a.aif"):
         assert Candidate(user="p", path=rf"M\{name}").lossless is True
-    for name in ("a.m4a", "a.mp3", "a.ogg", "a.opus"):
-        assert Candidate(user="p", path=rf"M\{name}").lossless is False
+    for name in ("a.m4a", "a.mp3"):
+        candidate = Candidate(user="p", path=rf"M\{name}")
+        assert candidate.lossless is False
+        assert candidate.is_audio is True
+
+
+def test_the_other_lossy_codecs_are_refused_before_anything_is_fetched():
+    """MP3 and AAC-in-m4a are the only two a rekordbox row can point at, so the rest never leave the
+    search: a peer's `.ogg` or `.opus` is no use however good it sounds."""
+    for name in ("a.ogg", "a.opus", "a.wma"):
+        assert Candidate(user="p", path=rf"M\{name}").is_audio is False
 
 
 # -- what the name says ----------------------------------------

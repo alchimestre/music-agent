@@ -146,6 +146,19 @@ def test_a_tagged_track_becomes_a_row(tmp_path):
     assert job.records()[0].status == state.IMPORTED
 
 
+def test_a_file_the_collection_has_no_row_for_is_reported_rather_than_crashing(tmp_path):
+    """pyrekordbox looks an extension up in its own table and catches the wrong exception doing it, so one
+    unsupported file escaped as AttributeError and took the whole import down — nothing committed yet."""
+    from audio_files import opus
+
+    record = state.Record(idx=1, artist="Kiasmos", title="Blurred", format="opus",
+                          local_path=str(opus(tmp_path / "Kiasmos - Blurred.opus")),
+                          status=state.TAGGED)
+
+    with pytest.raises(importing.ImportFailed, match=r"cannot point at \.opus"):
+        importing.add(FakeDatabase(), record)
+
+
 def test_bpm_and_key_are_never_written(tmp_path):
     """rekordbox's own analysis is the source of both."""
     config = make_config(tmp_path)

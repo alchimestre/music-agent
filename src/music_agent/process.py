@@ -25,6 +25,14 @@ class ProcessError(RuntimeError):
     """A file could not be taken from staging to the collection."""
 
 
+class NameTaken(ProcessError):
+    """The lane already holds a file of that name, so this copy cannot be placed there."""
+
+    def __init__(self, target: Path) -> None:
+        super().__init__(f"a file of that name is already there: {target}")
+        self.target = target
+
+
 class Runner(Protocol):
     """How a canonical tool is invoked. Injected, so the tests can read the command line."""
 
@@ -73,12 +81,15 @@ class Summary:
     normalized: list[int] = field(default_factory=list)
     tagged: list[int] = field(default_factory=list)
     ungenred: list[int] = field(default_factory=list)
+    already: list[int] = field(default_factory=list)
     failed: list[int] = field(default_factory=list)
 
     def report(self) -> str:
         parts = [f"{len(self.placed)} placed", f"{len(self.tagged)} tagged"]
         if self.ungenred:
             parts.append(f"{len(self.ungenred)} without a genre")
+        if self.already:
+            parts.append(f"{len(self.already)} the collection already had")
         if self.failed:
             parts.append(f"{len(self.failed)} failed")
         return " · ".join(parts)
@@ -170,6 +181,21 @@ def convert(config: Config, source: Path, *, run: Runner, log) -> Path:
         return produced
 
 
+def park(config: Config, record: state.Record) -> Path:
+    """Move a copy the collection already has out of staging, under the name it would have had.
+
+    `dedupe` does the same for a lane file that is redundant, and a copy in the duplicates folder can be
+    looked at, which is what makes moving it better than deleting it.
+    """
+    source = Path(record.local_path)
+    config.duplicates.mkdir(parents=True, exist_ok=True)
+    target = config.duplicates / source.name
+    if target.exists():
+        target = config.duplicates / f"{source.stem} ({record.idx}){source.suffix}"
+    shutil.move(str(source), target)
+    return target
+
+
 def place(config: Config, record: state.Record, *, run: Runner, log) -> Path:
     """Get one file into the lane it belongs in, under the name the collection uses."""
     source = Path(record.local_path)
@@ -183,6 +209,7 @@ def place(config: Config, record: state.Record, *, run: Runner, log) -> Path:
 
     if lossless and suffix not in {".aiff", ".aif"}:
         source = convert(config, source, run=run, log=log)
+        record.local_path = str(source)     # the converted file is the one that will be placed, or parked
 
     # One extension for one format: pyrekordbox's `add_content` upper-cases the suffix and has no `AIF`
     # member, so a `.aif` copy is renamed as it is placed, never converted — the audio is already what the
@@ -190,8 +217,8 @@ def place(config: Config, record: state.Record, *, run: Runner, log) -> Path:
     target = folder / filename_for(record, ".aiff" if source.suffix.lower() == ".aif" else source.suffix)
     if target.exists():
         # Never overwrite: a name already taken is something the dedupe did not catch, and a quiet
-        # replacement would destroy a file rather than report a conflict.
-        raise ProcessError(f"a file of that name is already there: {target}")
+        # replacement would destroy a file rather than report a conflict. The caller parks this copy.
+        raise NameTaken(target)
     shutil.move(str(source), target)
     log(f"[{record.idx}] {record.label}: → {target}")
     return target
@@ -389,6 +416,20 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
                 job.append_event(state.UNGENERED_EVENT, idx=record.idx,
                                  names=list(choice.considered))
             landed = place(config, record, run=tools.runner, log=log)
+        except NameTaken as error:
+            # The lane holds that name, and `held` never skips a track whose length was never resolved, so
+            # this is a duplicate the collection already has. It goes where redundant copies go, the record
+            # settles, and the pass leaves nothing dangling in staging.
+            parked = park(config, record)
+            record.local_path = str(parked)
+            record.status = state.FOUND_IN_LIBRARY
+            record.notes = f"{error} — this copy is at {parked}"
+            summary.already.append(record.idx)
+            job.append_event("already_held", idx=record.idx, held=str(error.target), parked=str(parked))
+            log(f"[{record.idx}] {record.label}: the collection already holds that name — "
+                f"this copy is at {parked}")
+            job.write_records(records)
+            continue
         except ProcessError as error:
             record.status = state.RETRY_LATER
             record.notes = str(error)
