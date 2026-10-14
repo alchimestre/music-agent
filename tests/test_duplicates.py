@@ -201,7 +201,7 @@ def test_a_merge_on_a_copy_of_the_real_collection(tmp_path):
 
     def quiet(*args, **kwargs):
         return None
-    duplicates.apply(config, summary, db=database, log=quiet)
+    duplicates.merge(config, summary, db=database, log=quiet)
 
     assert session.execute(text("select count(*) from djmdContent where ID = :i"),
                            {"i": duplicate_id}).scalar() == 0

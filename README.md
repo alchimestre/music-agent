@@ -42,6 +42,7 @@ music-agent reconcile                           # rebuild the records from the f
 music-agent status --files                      # files nothing points at, and rows whose file is gone
 music-agent import                              # into rekordbox, which must be closed first
 music-agent dedupe                              # one row per track; dry run, --apply merges
+music-agent backfill                            # a row for every file that has none; dry run, --apply adds
 ```
 
 `acquire` and `process` take hours on a long tracklist. `review`, `status` and `import` take seconds.
@@ -50,12 +51,20 @@ music-agent dedupe                              # one row per track; dry run, --
 XML file — and it is reconciled by `~/projects/traktor-nml`, which reads this project's job state as data to
 learn which file replaced which. `traktor-nml apply` after an acquisition, with Traktor closed.
 
-**One row per track: `music-agent dedupe`.** A hand import can leave a second row beside a track the
-collection already held — usually the lossy copy the pipeline later upgraded — and this merges them. The row
-holding the better copy survives (lossless beats lossy; then the one the library has used; then the measured
-one; then the older), everything the other still held moves onto it (playlist lines, plays, My Tags, cues),
-and the redundant file leaves the lanes for `paths.duplicates` rather than being deleted. It is a dry run until
-`--apply`, and what it leaves behind in Traktor is a dead entry: `traktor-nml purge` takes those out.
+**One row per track, and a row for every file: `dedupe` and `backfill`.** The collection should hold exactly
+what the lanes do, and `import` — scoped to one run's records — is not what keeps it that way; these two are.
+
+`music-agent dedupe` merges two rows that are one track. A hand import leaves them, usually beside the lossy
+copy the pipeline later upgraded. The row holding the better copy survives (lossless beats lossy; then the one
+the library has used; then the measured one; then the older), everything the other still held moves onto it
+(playlist lines, plays, My Tags, cues), and the redundant file leaves the lanes for `paths.duplicates` rather
+than being deleted — what it leaves behind in Traktor is a dead entry, and `traktor-nml purge` takes that out.
+
+`music-agent backfill` is the other direction: a file in a lane the collection has no row for gets one, minted
+from what the file itself says (its tags, falling back to its name), and a file whose *track* the collection
+already holds under another file is refused with the row it is held by named — that is a duplicate, so `dedupe`
+settles it instead. Neither verb identifies or re-tags anything: a file whose tags are unreadable keeps
+them. Both are dry runs until `--apply`.
 
 ## The queue
 

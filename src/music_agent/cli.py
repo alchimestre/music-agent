@@ -92,6 +92,11 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="write it; without this nothing is merged")
     dedupe.add_argument("--leave-files", action="store_true",
                         help="merge the rows but leave the redundant files where they are")
+    backfill = commands.add_parser(
+        "backfill", parents=[common],
+        help="give a row to every file in a lane the collection has none for (dry run unless --apply)")
+    backfill.add_argument("--apply", action="store_true",
+                          help="write it; without this nothing is added")
     return parser
 
 
@@ -158,6 +163,41 @@ def _dedupe(config: config_module.Config, args: argparse.Namespace) -> int:
     if summary.files:
         print(f"the files that left the lanes are in {config.duplicates}")
         print("traktor-nml purge takes out the Traktor entries they left behind")
+    return 0
+
+
+def _backfill(config: config_module.Config, args: argparse.Namespace) -> int:
+    """A row for every file in a lane the collection has none for — a dry run until `--apply` is given.
+
+    The other direction from `dedupe`: `import` is scoped to a run's records, so a file placed in a lane outside
+    a run never gets a row, and the collection quietly holds less than the library does.
+    """
+    from pyrekordbox import Rekordbox6Database
+
+    from . import backfill
+
+    try:
+        database = Rekordbox6Database()
+    except Exception as error:                      # pyrekordbox raises its own types and its own messages
+        print(f"cannot read the rekordbox collection ({error}) — is rekordbox installed?", file=sys.stderr)
+        return 1
+
+    try:
+        summary = backfill.run(config, db=database, apply=args.apply)
+    except backfill.NotClosed as error:
+        print(error, file=sys.stderr)
+        return 1
+
+    if not summary.candidates:
+        print("no gap: every file in the lanes is in the collection")
+        return 0
+    for line in summary.lines():
+        print(f"  {line}")
+    print()
+    if not args.apply:
+        print(f"{summary.report()} — nothing added yet: music-agent backfill --apply adds them")
+        return 0
+    print(f"{len(summary.minted)} added")
     return 0
 
 
@@ -522,6 +562,8 @@ def main(argv: list[str] | None = None) -> int:
         return _import(config, args)
     if args.command == "dedupe":
         return _dedupe(config, args)
+    if args.command == "backfill":
+        return _backfill(config, args)
     return 2                                        # unreachable: the subparser requires a command
 
 

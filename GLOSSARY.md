@@ -108,6 +108,13 @@ import leaves them, usually beside the lossy copy the pipeline had already upgra
 merges them — the row holding the better copy survives, what the other held moves onto it, and the redundant
 file leaves the lanes rather than being deleted.
 
+## Backfill
+
+A row minted for a file in a lane that the collection has no row for — the other direction from a duplicate.
+`import` is scoped to one run's records, so a file that arrives outside a run never gets one; `music-agent
+backfill` fills that gap from what the file itself says (its tags, then its name) and refuses a file whose
+track the collection already holds under another file, because that one is a duplicate and `dedupe` settles it.
+
 ## Repoint
 
 Pointing an entry that describes a file a run replaced at the file it made instead, rather than removing the
