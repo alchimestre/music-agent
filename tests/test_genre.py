@@ -41,7 +41,7 @@ def test_case_and_punctuation_do_not_matter():
 
 
 def test_the_most_specific_name_wins():
-    """Ticket 06: `Minimal Techno` is not `Techno`, and `Dub Techno` is not either."""
+    """`Minimal Techno` is not `Techno`, and `Dub Techno` is not either."""
     assert resolve("Techno", "Minimal Techno").genre == "Minimal / Deep Tech"
     assert resolve("Minimal Techno", "Dub Techno").genre == "Minimal / Deep Tech"
     assert resolve("Techno").genre == "Techno"
@@ -112,7 +112,7 @@ def test_a_table_that_is_not_there_is_empty_rather_than_an_error(tmp_path: Path)
     assert genre.table(tmp_path / "absent.toml") == {}
 
 
-# ── growing the vocabulary, which the user decided is allowed ---------------------------------
+# ── growing the vocabulary, which is allowed ---------------------------------
 
 
 def test_approved_names_come_from_the_file(tmp_path):
@@ -145,7 +145,7 @@ def test_proposals_need_enough_tracks_and_come_best_evidenced_first():
 
 def test_four_tracks_is_not_yet_a_proposal():
     assert genre.proposals({"Krautrock": 4}, mappings={}) == []
-    assert genre.proposals({"Goa Trance": 5}, mappings={}) != [], "five is the bar the user set"
+    assert genre.proposals({"Goa Trance": 5}, mappings={}) != [], "five is the bar"
 
 
 def test_a_name_that_already_has_a_mapping_is_never_a_proposal():

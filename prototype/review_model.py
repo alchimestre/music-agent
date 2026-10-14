@@ -5,7 +5,7 @@ the rule actually does rather than a hand-written impression of it, and this mod
 CLI ports. Verdicts are computed, never authored.
 
 The renderers that sat beside it are gone — the screen shipped as `src/music_agent/review_tui.py`, and
-that was retired on 2026-10-13 (the design notes) — so what is left here is the fixture, and its reader is
+that has since been removed — so what is left here is the fixture, and its reader is
 `tests/test_rules.py`: it checks the ported rule in
 `rules.py` against this one, track by track, so a drift between the two shows up as a failure.
 

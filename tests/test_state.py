@@ -158,7 +158,7 @@ def test_a_state_root_that_does_not_exist_yet_has_no_runs(tmp_path):
 
 
 def test_the_names_that_fitted_nothing_are_counted_across_runs(tmp_path):
-    """Ticket 06: a single tracklist is the wrong window for "enough tracks"."""
+    """A single tracklist is the wrong window for "enough tracks"."""
     config = make_config(tmp_path)
     first = state.create(config, "one")
     first.append_event(state.UNGENERED_EVENT, idx=1, names=["Goa Trance", "Krautrock"])
@@ -169,7 +169,7 @@ def test_the_names_that_fitted_nothing_are_counted_across_runs(tmp_path):
     assert state.ungenred_names([first, second]) == {"Goa Trance": 2, "Krautrock": 1}
 
 
-# ── the queue, split by why a track is in it (the design notes) ─────────────────────
+# ── the queue, split by why a track is in it ─────────────────────
 
 
 def a_track_with_only_a_rejection(idx: int = 3) -> state.Record:
@@ -214,7 +214,7 @@ def test_the_queue_separates_the_four_reasons_a_track_is_still_open(tmp_path):
 
 
 def test_a_search_that_never_happened_is_not_a_fact_about_the_track(tmp_path):
-    """Ticket 21's whole point: no candidates and no search is not the same as a search that came back
+    """The whole point: no candidates and no search is not the same as a search that came back
     empty."""
     config = make_config(tmp_path)
     job = state.create(config, "run")

@@ -1,7 +1,8 @@
 """Configuration: `config.toml` at the repo root, read with the standard library.
 
-It holds the directories, the loudness targets and tolerances, and the *names* of the environment variables
-carrying the credentials — never the secrets, so this file is safe to commit.
+`config.example.toml` is the template that ships — copy it to `config.toml` and edit. It holds the directories,
+the loudness targets and tolerances, the search pace, the programs the pipeline drives, and the *names* of the
+environment variables carrying the credentials — never the secrets, so it is safe to commit.
 """
 
 from __future__ import annotations
@@ -19,7 +20,12 @@ class MissingCredential(RuntimeError):
 
 
 # src/music_agent/config.py -> src/music_agent -> src -> the repo root
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.toml"
+HERE = Path(__file__).resolve().parents[2]
+# The file this machine reads. A fresh clone has none, and the defaults are a working configuration.
+DEFAULT_CONFIG_PATH = HERE / "config.toml"
+# The template that ships. Its values are the defaults, so copying it changes nothing — which is what the tests
+# check, rather than checking this machine's own file.
+EXAMPLE_CONFIG_PATH = HERE / "config.example.toml"
 
 
 @dataclass(frozen=True)
@@ -31,7 +37,7 @@ class Config:
     lossy: Path
     state_root: Path
     # Where `dedupe` puts a redundant copy instead of deleting it — a lane file with no row is the gap the
-    # other direction, and a file the user can still look at is easier to trust than one that is gone.
+    # other direction, and a file that can still be looked at is easier to trust than one that is gone.
     duplicates: Path
     target_lufs: float
     true_peak_db: float
@@ -64,11 +70,11 @@ def _resolve(value: str, base: Path) -> Path:
 
 
 DEFAULTS = Config(
-    staging=Path("~/Music/Downloads").expanduser(),
-    lossless=Path("~/Music/Loseless Tracks").expanduser(),
-    lossy=Path("~/Music/Losy Tracks").expanduser(),
+    staging=Path("~/Music/music-agent/staging").expanduser(),
+    lossless=Path("~/Music/music-agent/lossless").expanduser(),
+    lossy=Path("~/Music/music-agent/lossy").expanduser(),
     state_root=Path(".state/jobs"),
-    duplicates=Path("~/Music/Duplicates").expanduser(),
+    duplicates=Path("~/Music/music-agent/duplicates").expanduser(),
     target_lufs=-14.0,
     true_peak_db=-1.0,
     tolerance_lu=0.5,
@@ -84,8 +90,8 @@ DEFAULTS = Config(
     ),
     slsk_username_env="SLSK_USERNAME",
     slsk_password_env="SLSK_PASSWORD",
-    # aioslsk would listen on 60000/60001, which the omp MCP's own slsk server already holds on this
-    # machine — a second binder fails its login outright. 20000 is the port Soulseek uses here.
+    # aioslsk would listen on 60000/60001, which another Soulseek client on this machine already holds —
+    # a second binder fails its login outright. 20000 is the port this project listens on.
     soulseek_listen_port=20000,
     soulseek_obfuscated_port=20001,
     # Twenty transfers at a time, not one: the server's own defaults are 3 transfers, 4 searches and
@@ -99,10 +105,10 @@ DEFAULTS = Config(
     # seconds was answered with nothing, silently. Five seconds is twelve a minute, a quarter of that
     # rate. The threshold is a guess, which is why it is a knob.
     search_interval=5.0,
-    # The map keeps both of these canonical, so the CLI drives them instead of reimplementing them. The
-    # normalizer needs only ffmpeg and mutagen, and mutagen is one of our own dependencies.
-    convert_tool=Path("~/Music/convert_to_aiff.sh").expanduser(),
-    normalize_tool=Path("~/projects/loudness_normalizer/loudness_normalizer.py").expanduser(),
+    # Both are the canonical implementation of their step, so the CLI drives them instead of reimplementing
+    # them. The normalizer needs only ffmpeg and mutagen, and mutagen is one of our own dependencies.
+    convert_tool=Path("convert_to_aiff.sh"),
+    normalize_tool=Path("loudness_normalizer.py"),
 )
 
 

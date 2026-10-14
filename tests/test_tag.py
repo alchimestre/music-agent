@@ -28,7 +28,7 @@ def aiff(path: Path, frames: int = 800) -> Path:
 
 
 def traktor_tagged(path: Path) -> Path:
-    """The shape your library's files are in: a title, an artist, and Traktor's key, tempo and blob."""
+    """The shape the library's files are in: a title, an artist, and Traktor's key, tempo and blob."""
     from mutagen.aiff import AIFF
     from mutagen.id3 import PRIV, TBPM, TIT2, TKEY, TPE1
 
@@ -102,7 +102,7 @@ def test_an_empty_field_is_left_alone(tmp_path):
 
 
 def test_bpm_and_key_are_never_written(tmp_path):
-    """Ticket 07: rekordbox's own analysis is the source of both."""
+    """rekordbox's own analysis is the source of both."""
     from mutagen.aiff import AIFF
 
     path = aiff(tmp_path / "bare.aiff")
@@ -116,7 +116,7 @@ def test_bpm_and_key_are_never_written(tmp_path):
 
 
 def test_the_frames_it_does_not_own_survive(tmp_path):
-    """The risk worth a test: your AIFFs carry Traktor's key, tempo and blob, and a writer that replaced
+    """The risk worth a test: the AIFFs carry Traktor's key, tempo and blob, and a writer that replaced
     the tag wholesale would take them with it.
 
     Mutagen files a private frame under a key that carries its data as well as its owner, so the check
@@ -137,7 +137,7 @@ def test_the_frames_it_does_not_own_survive(tmp_path):
 
 
 def test_an_existing_genre_is_never_replaced(tmp_path):
-    """Ticket 10: a genre cannot be undone after import, so changing one has to be deliberate."""
+    """A genre cannot be undone after import, so changing one has to be deliberate."""
     from mutagen.aiff import AIFF
     from mutagen.id3 import TCON
 
@@ -176,7 +176,7 @@ def test_a_file_with_no_tags_reads_as_empty(tmp_path):
 
 
 def test_the_ids_are_the_cache_that_stops_a_second_identification(tmp_path):
-    """Ticket 07: the MBIDs written into the files are the cache, so a re-run needs no re-identification."""
+    """The MBIDs written into the files are the cache, so a re-run needs no re-identification."""
     path = aiff(tmp_path / "Blurred.aiff")
     tag.write(path, everything())
     back = tag.read(path)
@@ -192,7 +192,7 @@ def test_a_format_no_tagger_knows_is_refused(tmp_path):
 
 
 def test_a_deliberate_replacement_is_what_retag_asks_for(tmp_path):
-    """Ticket 24: a run never replaces a genre, so the act of changing one has to be asked for by name."""
+    """A run never replaces a genre, so the act of changing one has to be asked for by name."""
     from mutagen.aiff import AIFF
 
     path = aiff(tmp_path / "Blurred.aiff")

@@ -123,7 +123,7 @@ def setup(tmp_path: Path, *, results: list[dict], download: str | None = None, t
     """A config, a job holding `tracks` tracks, and a stand-in server wired to the scenario.
 
     Pacing is off here: these tests are about the loop and the download policy, and a pace would put sleeps
-    of its own into a clock the test moves by hand. Ticket 21's pace has its own test, which sets one.
+    of its own into a clock the test moves by hand. The pace has its own test, which sets one.
     """
     config_path = tmp_path / "config.toml"
     config_path.write_text(f'[paths]\nstaging = "{tmp_path / "staging"}"\n'
@@ -173,7 +173,7 @@ def pass_once(config, job, server, lookup, calls: Path, shelf=None) -> tuple[acq
 @pytest.mark.parametrize(
     "status,connection,on_disk,stuck,queue,expected",
     [
-        # The disk decides, whatever the server believes: the finished record is dropped after
+        # The disk decides, whatever the server believes: a finished record is dropped after
         # sixty seconds, so a later poll says not_found about a download that worked.
         ("not_found", "", True, 1.0, 0, acquire.Move.DONE),
         ("queued", "waiting_for_peer", True, 999.0, 0, acquire.Move.DONE),
@@ -258,7 +258,7 @@ def test_a_download_that_lands_is_recorded_and_the_run_left_open(tmp_path):
 
 
 def test_the_file_on_disk_wins_over_a_server_that_says_not_found(tmp_path):
-    """Ticket 03's trap: the record of a finished download is dropped after a minute, so `not_found` can
+    """The trap: the record of a finished download is dropped after a minute, so `not_found` can
     describe a download that succeeded."""
     landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
     config, job, server, calls = setup(tmp_path, results=GOOD, download=f"not_found::0:{landed}")
@@ -272,7 +272,7 @@ def test_the_file_on_disk_wins_over_a_server_that_says_not_found(tmp_path):
 
 
 def test_a_track_settled_by_hand_is_not_searched_again(tmp_path):
-    """Ticket 12: the decision axis is what a pass reads, so an answered question is not reopened."""
+    """The decision axis is what a pass reads, so an answered question is not reopened."""
     config, job, server, calls = setup(tmp_path, results=GOOD)
     records = job.records()
     records[0].decision = state.SKIPPED
@@ -372,7 +372,7 @@ def test_the_reference_is_resolved_once_and_only_once(tmp_path):
         pass_once(config, job, server, lookup, calls)
         pass_once(config, job, server, lookup, calls)
 
-    assert len(lookup.asked) == 1, "a resumed run must not ask MusicBrainz again (the design notes)"
+    assert len(lookup.asked) == 1, "a resumed run must not ask MusicBrainz again"
     assert job.records()[0].duration_s == 449
 
 
@@ -392,7 +392,7 @@ def test_a_track_already_downloaded_is_not_fetched_again(tmp_path):
 
 
 def test_a_track_this_run_already_placed_and_tagged_is_not_searched_again(tmp_path):
-    """Ticket 09, one status further on. Until the import runs the collection still points at the lossy copy
+    """One status further on. Until the import runs the collection still points at the lossy copy
     being replaced, so the dedupe alone finds a finished track "not held" and re-downloads it, resetting the
     status — which is how a retry pass left 43 placed and tagged records unimportable on 2026-10-12."""
     config, job, server, calls = setup(tmp_path, results=GOOD)
@@ -413,7 +413,7 @@ def test_a_track_this_run_already_placed_and_tagged_is_not_searched_again(tmp_pa
 
 
 def test_a_later_pass_asks_only_for_peers_with_free_slots(tmp_path):
-    """Ticket 04: peer attributes may scope a retry pass, and never the first one."""
+    """Peer attributes may scope a retry pass, and never the first one."""
     config, job, server, calls = setup(tmp_path, results=[])
     record = job.records()[0]
 
@@ -456,7 +456,7 @@ def held_lossy(tmp_path):
 
 
 def test_a_lossy_copy_held_is_an_upgrade_not_a_skip(tmp_path):
-    """Ticket 09: a lossy copy does not make a track held, when a lossless one can be had."""
+    """A lossy copy does not make a track held, when a lossless one can be had."""
     landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
     config, job, server, calls = setup(tmp_path, results=GOOD,
                                        download=f"downloading:transferring:90000:{landed}")
@@ -472,8 +472,8 @@ def test_a_lossy_copy_held_is_an_upgrade_not_a_skip(tmp_path):
 
 
 def test_the_copy_in_the_collection_is_the_reference_when_musicbrainz_has_none(tmp_path):
-    """Ticket 13 governs a bare tracklist; this is not one. Four of five of the user's lossy tracks have no
-    MusicBrainz recording at all, and the copy in hand is the same track by definition."""
+    """This is not a bare tracklist, so the reference is not looked up: four of five lossy tracks in the
+    collection have no MusicBrainz recording at all, and the copy in hand is the same track by definition."""
     landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
     config, job, server, calls = setup(tmp_path, results=GOOD,
                                        download=f"downloading:transferring:90000:{landed}")
@@ -487,23 +487,22 @@ def test_the_copy_in_the_collection_is_the_reference_when_musicbrainz_has_none(t
 
 
 def test_a_lossy_candidate_is_not_an_upgrade(tmp_path):
-    """A lossy copy is not better than the lossy copy the user already has, so it is not an upgrade — and since
-    2026-10-12 it is not a question either. It used to land in review, which is where the user read a queue of
-    mp3s with no bitrate offered to replace mp3s the user already had."""
+    """A lossy copy is not better than the lossy copy already held, so it is not an upgrade — and since
+    2026-10-12 it is not a question either. It used to land in review, where a queue of mp3s with no
+    bitrate was offered to replace mp3s already held."""
     config, job, server, calls = setup(tmp_path, results=LOSSY_ONLY)
 
     with server:
         summary, quiet = pass_once(config, job, server, Reference(), calls, shelf=held_lossy(tmp_path))
 
     assert summary.nothing_usable == [1], quiet.lines
-    assert summary.in_review == [], "never asked about: the copy the user has already plays"
+    assert summary.in_review == [], "never asked about: the copy already held plays"
     assert "download" not in tools_called(calls)
 
 
 def test_a_track_the_library_already_holds_is_not_even_searched(tmp_path):
-    """Ticket 09: nothing is fetched that the collection holds. It is asked before the search, so an
-    already-held track costs no request at all — which is exactly what the first smoke run showed it
-    was missing."""
+    """Nothing is fetched that the collection holds. It is asked before the search, so an already-held
+    track costs no request at all — which is exactly what the first smoke run showed it was missing."""
     config, job, server, calls = setup(tmp_path, results=GOOD)
     shelf = library.Library(
         [library.Held("Kiasmos", "Blurred", 449, path="/Library/Kiasmos - Blurred.aiff")], []
@@ -555,7 +554,7 @@ def test_a_server_that_refuses_is_left_to_retry_rather_than_crashing(tmp_path):
 
 
 def test_the_pass_works_on_several_tracks_at_once(tmp_path):
-    """the user: one at a time is nonsense. Two tracks have to be waiting on their own downloads at the
+    """One at a time is nonsense. Two tracks have to be waiting on their own downloads at the
     same moment, which a pass that works through them in turn can never do — it would sit in its first
     poll until the barrier gave up."""
     import threading
@@ -602,7 +601,7 @@ def test_the_pass_works_on_several_tracks_at_once(tmp_path):
     assert len(job.records()) == 2
 
 
-# ── a network that stops answering (the design notes, second half, 2026-10-12) ──────────────────────────
+# ── a network that stops answering (2026-10-12) ──────────────────────────
 
 
 def test_a_run_of_empty_searches_is_a_network_that_has_gone_quiet():
@@ -645,7 +644,7 @@ def test_a_network_that_stops_answering_stops_the_pass(tmp_path):
 
 
 def test_searches_are_spaced_out_rather_than_fired_as_fast_as_the_loop_can(tmp_path):
-    """Ticket 21. A pass asked for 330 searches in six minutes and everything after the first seconds came
+    """A pass asked for 330 searches in six minutes and everything after the first seconds came
     back empty — no error, no warning, and nothing in the child or in aioslsk that keeps to a rate or
     reports one being refused. So the gap between two searches is the pass's own to keep.
 

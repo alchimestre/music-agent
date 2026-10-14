@@ -31,7 +31,7 @@ def test_a_numbered_list_entry_is_read():
 def test_a_bare_number_is_left_alone_because_it_can_be_an_artist():
     """`808 State` is an artist. The asymmetry is deliberate: missing a track number costs a lookup that
     finds nothing and leaves the track review-only, while stripping digits off an artist asks
-    MusicBrainz about a different artist — and a wrong reference rejects every correct file (the design notes)."""
+    MusicBrainz about a different artist — and a wrong reference rejects every correct file."""
     assert tracklist.parse("808 State - Pacific")[0].artist == "808 State"
     assert tracklist.parse("12 Kiasmos - Blurred")[0].artist == "12 Kiasmos"
 

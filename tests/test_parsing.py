@@ -1,7 +1,7 @@
-"""Names, tested at the seam the design notes drew: the fold, credits, code tails, queries and filenames.
+"""Names, tested at their own seam: the fold, credits, code tails, queries and filenames.
 
-The examples are the ones the design notes measured against the library — 117 `&` credits, 60 `feat.`, 41
-label codes, 298 files with diacritics — not invented ones.
+The examples are the ones measured against the library — 117 `&` credits, 60 `feat.`, 41 label
+codes, 298 files with diacritics — not invented ones.
 """
 
 from __future__ import annotations
@@ -142,7 +142,7 @@ def test_a_credit_is_not_a_version():
     assert extract_mix("X - Y (with Someone).flac") == ""
 
 
-# -- one version, however it is written (the design notes) -------------------------
+# -- one version, however it is written -------------------------
 
 @pytest.mark.parametrize("wanted, have", [
     ("Original Mix", "original_mix"),
@@ -182,7 +182,7 @@ def test_the_query_drops_a_mix_and_a_label_code():
 
 
 def test_the_query_carries_no_genre_words():
-    """Ticket 14: extra words return zero results, so none are ever added."""
+    """Extra words return zero results, so none are ever added."""
     assert len(search_query("Kiasmos", "Blurred").split()) == 2
 
 

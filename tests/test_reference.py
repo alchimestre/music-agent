@@ -1,4 +1,4 @@
-"""The reference resolver: the version trap from the design notes, and every way it must refuse to answer."""
+"""The reference resolver: the version trap, and every way it must refuse to answer."""
 
 from __future__ import annotations
 
@@ -47,14 +47,14 @@ def test_a_quote_in_a_title_does_not_break_out_of_the_field():
 
 
 def test_a_bare_request_resolves_to_the_original():
-    """Ticket 13's trap: `Wsjr` is 413 s and `Wsjr (Orphx remix)` is 453 s, so taking whichever the
+    """The version trap: `Wsjr` is 413 s and `Wsjr (Orphx remix)` is 453 s, so taking whichever the
     search returned first would reject every correct file."""
     lookup = Fake([recording("Wsjr", ms=413_000), recording("Wsjr (Orphx remix)", ms=453_000)])
     assert reference.resolve(request(), lookup) == 413
 
 
 def test_a_bare_request_does_not_resolve_to_an_extended_mix():
-    """The taking rule accepts a longer edit (the design notes); the *reference* must stay the original, or the
+    """The taking rule accepts a longer edit; the *reference* must stay the original, or the
     window it sets would reject the files that are the original."""
     lookup = Fake([recording("Wsjr", ms=413_000), recording("Wsjr (Extended Mix)", ms=620_000)])
     assert reference.resolve(request(), lookup) == 413
@@ -98,7 +98,7 @@ def test_originals_seconds_apart_resolve_to_nothing():
 
 
 def test_originals_within_the_window_resolve_to_the_longer():
-    """Ticket 05 prefers the longer edit among versions that are acceptable."""
+    """The resolver prefers the longer edit among versions that are acceptable."""
     lookup = Fake([recording("Wsjr", ms=413_000), recording("Wsjr (Original Mix)", ms=413_800)])
     assert reference.resolve(request(), lookup) == 414
 
@@ -109,7 +109,7 @@ def test_accents_are_folded_on_both_sides():
 
 
 def test_the_primary_artist_is_what_has_to_agree():
-    """Ticket 14 matches credits on the primary artist, so a featured credit does not block the lookup."""
+    """Credits are matched on the primary artist, so a featured credit does not block the lookup."""
     lookup = Fake([recording("Wsjr", artist="Kiasmos")])
     assert reference.resolve(request(artist="Kiasmos & Someone"), lookup) == 413
 

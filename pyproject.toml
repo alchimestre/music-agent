@@ -1,12 +1,14 @@
 [project]
 name = "music-agent"
 version = "0.1.0"
-description = "Acquire, process and import tracks into rekordbox, following the decisions in the design notes"
+readme = "README.md"
+license = "MIT"
+description = "Acquire, process and import tracks into a rekordbox collection: Soulseek, loudness normalization, tagging from MusicBrainz"
 requires-python = ">=3.13"
-# musicbrainzngs is pinned to the version the design notes was verified against: 0.7.1 returns no `genres`
-# include, which is why the genre path calls ws/2 directly (the design notes). pyrekordbox is pinned to the
-# version the design notes read the schema with. mutagen reads a length straight from a header, in about a
-# millisecond, which is what makes indexing the library directories cheap enough to do every run.
+# musicbrainzngs is pinned: 0.7.1 returns no `genres` include, which is why the genre path calls ws/2
+# directly. pyrekordbox is pinned to the schema version this was written against. mutagen reads a length
+# straight from a header, in about a millisecond, which is what makes indexing the library directories cheap
+# enough to do every run.
 dependencies = [
     "musicbrainzngs==0.7.1",
     "pyrekordbox==0.4.3",
@@ -15,6 +17,9 @@ dependencies = [
 
 [project.scripts]
 music-agent = "music_agent.cli:main"
+
+[project.urls]
+Repository = "https://github.com/alchimestre/music-agent"
 
 [build-system]
 requires = ["hatchling"]

@@ -1,4 +1,4 @@
-"""The CLI contract: what `status` prints, which is what the omp skill reads."""
+"""The CLI contract: what `status` prints, which is what the caller reads."""
 
 from __future__ import annotations
 
@@ -104,7 +104,7 @@ def test_the_queue_lists_what_needs_a_decision(tmp_path, capsys):
 
 
 def test_the_counts_say_why_nothing_was_usable(tmp_path, capsys):
-    """Ticket 21: a quiet network written down as a fact about the tracks was the whole problem."""
+    """A quiet network written down as a fact about the tracks was the whole problem."""
     config_path = make_config(tmp_path)
     job = seed(config_path, [SETTLED, WAITING, EMPTY])
     job.write_records([SETTLED, WAITING, EMPTY])
@@ -171,8 +171,8 @@ def test_a_named_run_can_be_selected(tmp_path, capsys):
     assert job.id in capsys.readouterr().out
 
 
-def test_a_name_on_enough_tracks_is_put_to_vincent(tmp_path, capsys):
-    """The proposal is the to accept or decline, so it has to say what accepting looks like."""
+def test_a_name_on_enough_tracks_is_put_to_the_user(tmp_path, capsys):
+    """The proposal is the user's to accept or decline, so it has to say what accepting looks like."""
     config_path = make_config(tmp_path)
     config = config_module.load(config_path)
     job = state.create(config, "run")
@@ -190,7 +190,7 @@ def test_a_name_on_enough_tracks_is_put_to_vincent(tmp_path, capsys):
     assert '"goa trance" = "Goa Trance"' in out, "the line to paste, not just the name"
 
 
-def test_a_name_on_too_few_tracks_is_not_put_to_him(tmp_path, capsys):
+def test_a_name_on_too_few_tracks_is_not_put_to_the_user(tmp_path, capsys):
     config_path = make_config(tmp_path)
     config = config_module.load(config_path)
     job = state.create(config, "run")
@@ -206,7 +206,7 @@ def test_a_name_on_too_few_tracks_is_not_put_to_him(tmp_path, capsys):
 
 def test_the_genres_to_choose_between_are_printed_with_the_tracks_that_need_one(tmp_path, capsys,
                                                                                monkeypatch):
-    """The genre is the one judgement left to a model, and it has to be made among the collection's own
+    """The genre is the one judgement left to the caller, and it has to be made among the collection's own
     genres — so they are printed beside the tracks waiting for one."""
     config_path = make_config(tmp_path)
     config = config_module.load(config_path)
@@ -238,7 +238,7 @@ def test_the_collection_is_not_opened_when_no_track_needs_a_genre(tmp_path, monk
     assert main(["--config", str(config_path), "status", "--queue"]) == 0
 
 
-# ── the review command (the design notes) ───────────────────────────────────────────
+# ── the review command ───────────────────────────────────────────
 
 
 def test_review_skips_a_track_by_hand(tmp_path, capsys):
@@ -295,7 +295,7 @@ def test_review_of_a_track_that_is_not_in_the_run_is_an_error(tmp_path, capsys):
 
 
 def test_review_with_no_terminal_prints_the_queue(tmp_path, capsys):
-    """The skill reads the queue rather than drawing it: the track, why it is there, and what a number takes."""
+    """The queue is printed rather than drawn: the track, why it is there, and what a number takes."""
     config_path = make_config(tmp_path)
     seed(config_path, [SETTLED, WAITING])
 
@@ -424,8 +424,8 @@ def test_accepting_carries_the_record_on_to_process(tmp_path, capsys, monkeypatc
 
 
 def test_a_playlist_url_starts_the_run_a_file_would_have(tmp_path, monkeypatch):
-    """the user, 2026-10-13: *I'd rather pass a playlist url the same way I pass a file.* So `--tracks` takes
-    both, and what a file's stem gave the run a playlist's own name gives it."""
+    """2026-10-13: a playlist url is passed the same way a file is. So `--tracks` takes both, and what a
+    file's stem gave the run a playlist's own name gives it."""
     config = config_module.load(make_paths_config(tmp_path))
     monkeypatch.setattr(cli_module.spotify, "playlist",
                         lambda source, timeout=None: spotify.Playlist(
