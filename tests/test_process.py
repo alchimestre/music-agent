@@ -25,6 +25,7 @@ staging = "{tmp_path}/staging"
 lossless = "{tmp_path}/Loseless Tracks"
 lossy = "{tmp_path}/Losy Tracks"
 state = "state"
+duplicates = "{tmp_path}/Duplicates"
 
 [loudness]
 target_lufs = -14.0
@@ -187,21 +188,27 @@ def test_a_file_named_aif_is_placed_as_aiff(tmp_path):
         "the record follows the file"
 
 
-def test_a_name_already_taken_is_refused_rather_than_overwritten(tmp_path):
-    """The dedupe should have caught it; if it did not, replacing the file would destroy it."""
+def test_a_name_the_lane_already_holds_parks_the_download_instead_of_dangling_in_staging(tmp_path):
+    """The dedupe should have caught it, and `held` will not skip a track whose length was never resolved, so
+    a duplicate can arrive. The file already there is never overwritten, and the download is not left sitting
+    in staging either: it goes where redundant copies go and the record settles."""
     config = make_config(tmp_path)
     config.lossless.mkdir(parents=True)
     existing = config.lossless / "Kiasmos - Blurred.aiff"
     existing.write_bytes(b"the one already there")
-    record = state.Record(idx=1, artist="Kiasmos", title="Blurred",
-                          local_path=str(aiff(tmp_path / "staging" / "Kiasmos - Blurred.aiff")),
+    source = Path(staged(tmp_path, "Kiasmos - Blurred.aiff"))
+    record = state.Record(idx=1, artist="Kiasmos", title="Blurred", local_path=str(source),
                           status=state.DOWNLOADED, format="aiff")
     job = job_with(config, [record])
 
     summary = process.run(config, job, tools=process.Tools(runner=FakeRunner()), log=lambda *_: None)
 
-    assert summary.failed == [1]
-    assert existing.read_bytes() == b"the one already there"
+    assert summary.already == [1]
+    assert summary.failed == []
+    assert existing.read_bytes() == b"the one already there", "nothing was overwritten"
+    assert not source.exists(), "and nothing is left dangling in staging"
+    assert (config.duplicates / "Kiasmos - Blurred.aiff").read_bytes() == b"audio"
+    assert job.records()[0].status == state.FOUND_IN_LIBRARY
     assert "already there" in job.records()[0].notes
 
 

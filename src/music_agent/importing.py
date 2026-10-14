@@ -23,6 +23,12 @@ class ImportFailed(RuntimeError):
     """A track could not be added to the collection."""
 
 
+# What a rekordbox collection has rows for. pyrekordbox looks this up in its own `FileType` table, but it
+# catches the wrong exception doing it — an extension it does not know escapes as AttributeError — so one
+# unsupported file took a whole import down with it, before anything had been committed.
+COLLECTION_FORMATS = frozenset({".mp3", ".m4a", ".flac", ".wav", ".aiff", ".aif"})
+
+
 @dataclass
 class Summary:
     """What a pass came to, by track."""
@@ -125,6 +131,9 @@ def add(db, record: state.Record) -> object:
     path = Path(record.local_path)
     if not path.is_file():
         raise ImportFailed(f"the file is gone: {path}")
+    if path.suffix.lower() not in COLLECTION_FORMATS:
+        raise ImportFailed(f"the collection cannot point at {path.suffix.lower() or 'an extensionless file'}"
+                           f" — {path}")
 
     written = tag.read(path)
     columns = file_columns(path)

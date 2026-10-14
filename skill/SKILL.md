@@ -36,6 +36,7 @@ music-agent status --files                      # what nothing points at, and wh
 music-agent import                              # into rekordbox, which has to be closed first
 music-agent dedupe                              # one row per track, dry run; --apply merges (see 10)
 music-agent backfill                            # a row for every file, dry run; --apply adds (see 10)
+music-agent sweep                               # staging's own leftovers, dry run; --apply clears (see 10)
 ```
 
 The vocabulary — run, track, candidate, Ready, Needs you, reference, proposal, and the decision axis
@@ -183,6 +184,15 @@ music-agent process
 Identifies every file from its own sound, resolves a genre, converts lossless audio to AIFF, normalizes
 loudness, and writes the tags rekordbox reads. Reported by the collection itself: a file already carrying a
 genre keeps it.
+
+A lossy file keeps its own codec, and only two codecs are taken at all — **MP3 and AAC-in-m4a** — because
+those are the only two a rekordbox row can point at. A peer's `.ogg`, `.opus` or `.wma` is refused at the
+search, so it is never fetched in the first place.
+
+Where the lane already holds the file's name, nothing is overwritten: the download is moved to
+`paths.duplicates` and the record settles as one the collection already holds. That is the one case a
+duplicate reaches this stage, and it comes from a track whose length was never resolved — the check that
+skips what the collection already has cannot answer without one.
 
 **Done when** the run reports its counts and every track it processed is tagged.
 
