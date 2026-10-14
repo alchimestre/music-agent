@@ -31,8 +31,9 @@ max_searches   = 8
 max_operations = 8
 workers        = 20
 
-# Seconds between two searches. A throttled search and a rare track read the same, so the pace is ours.
-search_interval = 5.0
+# Seconds between two searches. A throttled search and a rare track read the same, so the pace is ours: the
+# one rate measured going silent was 0.9 a second.
+search_interval = 2.0
 
 [credentials]
 # Names only — never the secrets.

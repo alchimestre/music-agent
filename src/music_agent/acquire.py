@@ -30,13 +30,16 @@ MAX_RESULTS = 60
 # Candidates attempted per track, per pass.
 MAX_CANDIDATES = 10
 
-# A connection that never transferred a byte is rotated after this long.
-CONNECT_BUDGET = 45.0
+# A connection that never transferred a byte is rotated after this long. A peer either opens the connection
+# quickly or it is not going to.
+CONNECT_BUDGET = 30.0
 
 # A peer that declared a queue is behaving normally rather than failing, so it gets a budget worth waiting
-# for; and a transfer that has stopped moving bytes for five minutes is dead whatever the server says.
-QUEUE_BUDGET = 300.0
-STALL_BUDGET = 300.0
+# for; a transfer that has started and stopped moving bytes is dead whatever the server says. The pass waits
+# out the last candidate of a track while everything else is done, so these are what the tail of a pass is
+# made of: five minutes each across ten candidates is fifty minutes for one track.
+QUEUE_BUDGET = 180.0
+STALL_BUDGET = 120.0
 
 # A finished transfer whose file has not appeared is the `.part` rename, which is quick. Past this, the
 # file is not coming.

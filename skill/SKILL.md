@@ -85,7 +85,7 @@ A pass shows its position while it runs: one line rewritten in place at a termin
 it settles when the output is captured — which is the form a harness reads back. Each line carries the count,
 what the track came to, and its label.
 
-Searching is paced: one search every `search_interval` seconds in `config.toml`, five by default. The network
+Searching is paced: one search every `search_interval` seconds in `config.toml`, two by default. The network
 answers searches at a rate and says nothing when it stops answering at all, so the pace is kept on this side,
 and the child's own log comes out on stderr with an `slsk: ` prefix — including `Search complete: 0 raw
 results` for a search that found nothing, which is the difference between a rare track and a network that has

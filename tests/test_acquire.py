@@ -184,15 +184,15 @@ def pass_once(config, job, server, lookup, calls: Path, shelf=None) -> tuple[acq
         ("cancelled", "", False, 1.0, 0, acquire.Move.FAILED),
         ("session_expired", "", False, 1.0, 0, acquire.Move.FAILED),
         # A transfer in flight is never rotated on the connect timer, however long it has been at zero.
-        ("downloading", "transferring", False, 46.0, 0, acquire.Move.WAIT),
-        ("downloading", "transferring", False, 301.0, 0, acquire.Move.ROTATE),
-        # A connection that never transferred a byte is rotated at 45 seconds.
-        ("queued", "waiting_for_peer", False, 46.0, 0, acquire.Move.ROTATE),
+        ("downloading", "transferring", False, 119.0, 0, acquire.Move.WAIT),
+        ("downloading", "transferring", False, 121.0, 0, acquire.Move.ROTATE),
+        # A connection that never transferred a byte is rotated at 30 seconds.
+        ("queued", "waiting_for_peer", False, 31.0, 0, acquire.Move.ROTATE),
         ("queued", "connecting", False, 30.0, 0, acquire.Move.WAIT),
         # A peer that declared a queue is behaving normally rather than failing, and gets the longer
         # budget.
-        ("queued", "waiting_for_peer", False, 46.0, 5, acquire.Move.WAIT),
-        ("queued", "waiting_for_peer", False, 301.0, 5, acquire.Move.ROTATE),
+        ("queued", "waiting_for_peer", False, 179.0, 5, acquire.Move.WAIT),
+        ("queued", "waiting_for_peer", False, 181.0, 5, acquire.Move.ROTATE),
     ],
 )
 def test_the_decision_to_wait_rotate_or_give_up(status, connection, on_disk, stuck, queue, expected):
