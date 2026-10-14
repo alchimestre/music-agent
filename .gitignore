@@ -11,3 +11,5 @@ agent/
 docs/agents/
 AGENTS.md
 config.toml
+
+# ISOLATION-PROBE-MARKER
