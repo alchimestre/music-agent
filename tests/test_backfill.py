@@ -74,7 +74,7 @@ def test_a_lane_file_with_no_row_is_a_candidate(tmp_path):
 
 
 def test_a_file_with_tags_is_named_by_them(tmp_path):
-    """Ticket 15's order: the tags first, the name only as the fallback."""
+    """The tags first, the name only as the fallback."""
     config = lanes(tmp_path)
     path = aiff(config.lossless / "ripped - by - nobody.aiff")
     tag.write(path, tag.Tags(title="Real Title", artist="Real Artist"))

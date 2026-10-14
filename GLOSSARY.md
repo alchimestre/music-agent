@@ -21,18 +21,18 @@ a state, and a label is never something the track has already become.
 
 ## Decision
 
-What the user has decided about a *track*. Independent of any candidate label, and the only axis that
+What a person has decided about a *track*. Independent of any candidate label, and the only axis that
 records something already done.
 
 - **undecided** (`·`) — nothing decided yet.
-- **accepted** (`✓`) — settled: the candidate the user picked was fetched, and the record is an ordinary
+- **accepted** (`✓`) — settled: the candidate that was picked has been fetched, and the record is an ordinary
   downloaded one from then on.
 - **skipped** (`–`) — passed over for now.
 - **not found** (`✗`) — no usable copy exists.
 
-`music-agent review` is the only thing that writes this axis — its flags are the whole interface, a menu in the
-harness being nothing but a way to arrive at them — and every
-pass reads it: a track the user has decided is left alone rather than searched again, because that is what
+`music-agent review` is the only thing that writes this axis — its flags are the whole interface, a menu being
+nothing but a way to arrive at them — and every
+pass reads it: a track that has been decided is left alone rather than searched again, because that is what
 deciding it means.
 
 ## Review queue
@@ -55,7 +55,7 @@ outside the window are all ruled out and never shown. A length is the only evide
 the candidate, which is why it is the only thing a person is asked about.
 
 And it asks it only about a track the collection does not already hold. An **upgrade** is optional, so nothing
-about one is ever put to the user: see that entry.
+about one is ever put to a person: see that entry.
 
 ## Reference
 
@@ -103,7 +103,7 @@ a copy that already works. Both are ruled out rather than shown. An upgrade is `
 ## Duplicate
 
 Two rows in the collection for one track: the same folded artist, title and mix, with lengths inside the
-pipeline's one-second window (the identity, so two mixes of one title are never one track). A hand
+pipeline's one-second window (the identity `dedupe` uses, so two mixes of one title are never one track). A hand
 import leaves them, usually beside the lossy copy the pipeline had already upgraded. `music-agent dedupe`
 merges them — the row holding the better copy survives, what the other held moves onto it, and the redundant
 file leaves the lanes rather than being deleted.
@@ -121,8 +121,8 @@ Pointing an entry that describes a file a run replaced at the file it made inste
 entry and adding a new one. The track keeps everything that belongs to the *track* — cues, play count, last
 played, playlists, artwork — and gives up whatever was measured from the audio that is gone: in rekordbox the
 file-derived columns (`importing.file_columns`), in Traktor the tempo, loudness, key, auto grid and fingerprint
-(`~/projects/traktor-nml`). Removal would have cost the playlist memberships (the design notes), and a stale number
-left behind is what the user caught in the app (the design notes).
+(`traktor-nml`, its own project). Removal would have cost the playlist memberships that hang off the row — a
+removal hard-deletes them — and a stale number left behind is what the app displays instead of the file.
 
 ## Leftover
 

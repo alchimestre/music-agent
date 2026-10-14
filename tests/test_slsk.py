@@ -141,7 +141,7 @@ def test_a_traceback_keeps_its_exception_and_loses_its_frames():
 
 
 def test_the_line_that_says_the_network_went_quiet_survives_the_filter():
-    """Ticket 21 leans on that one line, so nothing may swallow it — and indentation alone is not a frame."""
+    """The accounting leans on that one line, so nothing may swallow it — and indentation alone is not a frame."""
     said = []
     logs = slsk.ChildLog(log=said.append)
 

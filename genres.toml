@@ -1,16 +1,16 @@
 # What other people call it, on the left; what this collection calls it, on the right.
 #
-# Ticket 06: a curated table, corrected by hand, with the gaps left to the working procedure — a model chooses among
-# the library's genres or declines, and only a decline reaches the user. A mapping whose target is not a
-# genre the collection actually has is ignored rather than trusted, because the vocabulary is read from
-# the database at run time and this file can drift from it.
+# A curated table, corrected by hand, with the gaps left to the caller: a style the table has no mapping for
+# resolves to no genre at all, and that is reported rather than invented. A mapping whose target is not a genre
+# the collection actually has is ignored rather than trusted, because the vocabulary is read from the database
+# at run time and this file can drift from it.
 #
-# Ticket 23: the collection's vocabulary is now a **typology**, and every right-hand side here is one of
-# its fifteen tier-1 families — the only values the rekordbox Genre field may hold, one per track. The
-# finer distinctions moved to My Tag columns (`Subgenre`, `Niche`), which `~/projects/music-tagger`
-# classifies from evidence; this file has nothing to say about those. That project's `taxonomy.json` holds
-# the family list and the mapping of every older genre value into it, and the fifteen names below are the
-# same fifteen — kept in step by hand, deliberately, rather than by one repo importing the other.
+# The collection's vocabulary is a **typology**, and every right-hand side here is one of its fifteen tier-1
+# families — the only values the rekordbox Genre field may hold, one per track. The finer distinctions moved to
+# My Tag columns (`Subgenre`, `Niche`), which belong to the tagger that classifies them; this file has nothing
+# to say about those. That tagger's `taxonomy.json` holds the family list and the mapping of every older genre
+# value into it, and the fifteen names below are the same fifteen — kept in step by hand, deliberately, rather
+# than by one repo importing the other.
 #
 # The most specific name wins, so `minimal` beats `techno` when a release carries both.
 #
@@ -25,7 +25,7 @@
 #   are not, which is why several are deliberately absent.
 #
 # Deliberately absent, with the reason, so nobody re-adds them hopefully. Each list was measured against
-# the finer vocabulary the collection used before the design notes, and is written here in the families those
+# the finer vocabulary the collection used before the typology, and is written here in the families those
 # names became: two of them collapsed far enough to matter, the rest keep their split.
 #
 #   `techno`      split two ways across the collection (Techno, House — the second of those naming what
@@ -39,14 +39,14 @@
 #                 external separates them
 #   `ambient`     appeared against Pop & Chanson and Techno
 #
-# A track whose styles are all in that list gets a blank genre, which is where the working procedure comes in.
+# A track whose styles are all in that list gets a blank genre, which is where a person comes in.
 #
 # Consequence worth knowing: `Acid Core` was a genre in this collection and is now one of the names
 # `Bass & Breaks` absorbs. With `acid` deliberately absent, nothing reaches that family by way of acid —
-# it is reached by `breakcore`, `bass music` and `dubstep`, or by the user correcting a file after import.
+# it is reached by `breakcore`, `bass music` and `dubstep`, or by correcting a file after import.
 
-# Genres the collection is allowed to gain. A name here is one the user has accepted from a proposal — a
-# mapping may point at it, the file will be tagged with it, and the import mints the row (the design notes).
+# Genres the collection is allowed to gain. A name here is one that has been accepted for a track — a
+# mapping may point at it, the file will be tagged with it, and the import mints the row.
 approved = []
 
 [map]

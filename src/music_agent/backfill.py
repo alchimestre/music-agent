@@ -2,15 +2,15 @@
 
 `import` is scoped to one run's records, so a file that arrives in a lane outside a run — placed by hand, or by
 the older conversion workflow — is never given a row, and the collection quietly holds less than the library
-does. Ticket 10 decided the scope (*gap-filling only, dry run by default*); this is the driver:
+does. The scope is *gap-filling only, dry run by default*; this is the driver:
 
 ```
 music-agent backfill            # what it would add, writing nothing
 music-agent backfill --apply    # one backup, one commit
 ```
 
-A row is minted from what the **file itself says** — its tags, falling back to its name (the order,
-which is also what `importing.add` does with the record it is handed) — so nothing is invented and nothing is
+A row is minted from what the **file itself says** — its tags, falling back to its name, which is also the
+order `importing.add` uses with the record it is handed — so nothing is invented and nothing is
 guessed at. Two things are never touched: a file the collection **already holds** that track under (the
 pipeline's own identity, lengths inside the one-second window — minting would make a duplicate, which is
 `dedupe`'s business instead), and a file this project cannot read at all. Nothing here identifies or re-tags:
@@ -79,7 +79,7 @@ class Summary:
 
 
 def identity_of(path: Path) -> tuple[str, str, int | None]:
-    """What a file says it is: its tags, then its name (the order), and the length off its header."""
+    """What a file says it is: its tags, then its name, and the length off its header."""
     written = tag.read(path)
     parsed = parsing.parse_filename(path.name)
     title = written.title or parsed.title or path.stem
@@ -152,7 +152,7 @@ def mint(config: Config, summary: Summary, *, db, log=print) -> Summary:
         summary.minted.append(candidate)
         log(f"added    {candidate.path.name}")
     # the additions go in one commit, and `autoinc` is what makes pyrekordbox sort a minted int id beside the
-    # text ids every row read back carries (the design notes / the import's own comment)
+    # text ids every row read back carries (see the import's own comment)
     db.commit(autoinc=True)
     return summary
 

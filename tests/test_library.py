@@ -44,7 +44,7 @@ def test_a_length_outside_the_window_is_a_different_track(shelf):
 
 
 def test_accents_and_case_do_not_change_the_answer(shelf):
-    """Ticket 10: comparison is folded, because the files and the database disagree about both."""
+    """Comparison is folded, because the files and the database disagree about both."""
     assert shelf.held("Rosalia", "De plata", 269) is not None
     assert shelf.held("rosalía", "de plata", 269) is not None
     assert shelf.held("KIASMOS", "BLURRED", 449) is not None
@@ -76,7 +76,7 @@ def test_rows_without_a_title_are_ignored():
 
 
 def test_paths_are_compared_nfc_and_casefolded():
-    """Ticket 10: raw equality matches only 1342 of 1627 paths."""
+    """Raw equality matches only 1342 of 1627 paths."""
     assert library.path_key("/Music/Losy Tracks/ROSALÍA - De plata.m4a") == \
         library.path_key("/Music/Losy Tracks/Rosalía - De plata.m4a")
 

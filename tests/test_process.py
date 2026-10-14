@@ -128,7 +128,7 @@ def test_a_lossy_file_goes_to_the_lossy_lane_untouched(tmp_path):
 
     process.run(config, job, tools=process.Tools(runner=runner), log=lambda *_: None)
 
-    assert runner.conversions() == [], "lossy is never converted (the design notes)"
+    assert runner.conversions() == [], "lossy is never converted"
     assert (config.lossy / "Kiasmos - Blurred.m4a").is_file()
     assert not (config.lossless / "Kiasmos - Blurred.aiff").exists()
 
@@ -424,7 +424,7 @@ def test_a_track_the_services_know_nothing_about_says_so(tmp_path):
 
 
 def test_a_genre_the_table_knows_is_taken_from_the_services(tmp_path):
-    """MusicBrainz's genres are the weak second opinion behind Discogs styles (the design notes)."""
+    """MusicBrainz's genres are the weak second opinion behind Discogs styles."""
     config = make_config(tmp_path)
     record = state.Record(idx=1, artist="Kiasmos", title="Blurred",
                           local_path=str(aiff(tmp_path / "staging" / "Blurred.aiff")),
@@ -438,8 +438,8 @@ def test_a_genre_the_table_knows_is_taken_from_the_services(tmp_path):
 
 
 def test_a_service_that_fails_leaves_the_name_doing_the_work(tmp_path):
-    """Ticket 15's last resort, reached because a service was unreachable rather than because it was
-    asked and had nothing."""
+    """The last resort, reached because a service was unreachable rather than because it was asked and
+    had nothing."""
     config = make_config(tmp_path)
     record = state.Record(idx=1, artist="Kiasmos", title="Blurred",
                           local_path=str(aiff(tmp_path / "staging" / "Blurred.aiff")),
@@ -459,12 +459,12 @@ def test_a_service_that_fails_leaves_the_name_doing_the_work(tmp_path):
 # ── re-tagging what a changed table left behind ──────────────────────────────
 
 
-# ── rebuilding a record from its file (the design notes) ────────────────────────────
+# ── rebuilding a record from its file ────────────────────────────
 
 
 def test_reconcile_reads_a_record_back_off_the_file_this_run_downloaded(tmp_path):
-    """Ticket 25: a status is memory and the file is the truth. The trap it must not fall into is the one
-    that matched by name across the whole library — a track the user already holds is not this run's."""
+    """A status is memory and the file is the truth. The trap it must not fall into is the one that
+    matched by name across the whole library — a track already held is not this run's."""
     config = make_config(tmp_path)
     config.lossless.mkdir(parents=True, exist_ok=True)
     placed = aiff(config.lossless / "Kiasmos - Blurred.aiff")
@@ -539,7 +539,7 @@ def test_reconcile_names_what_it_cannot_find_rather_than_guessing(tmp_path):
 
 
 def test_a_re_tag_replaces_the_genre_the_file_already_carries(tmp_path):
-    """Ticket 24: the table moved under a tagged file, and a deliberate pass is what reaches the file."""
+    """The table moved under a tagged file, and a deliberate pass is what reaches the file."""
     config = make_config(tmp_path)
     config.lossless.mkdir(parents=True, exist_ok=True)
     path = aiff(config.lossless / "Kiasmos - Blurred.aiff")
@@ -559,7 +559,7 @@ def test_a_re_tag_replaces_the_genre_the_file_already_carries(tmp_path):
 
 
 def test_a_re_tag_that_resolves_to_nothing_takes_the_old_name_off(tmp_path):
-    """Ticket 24: the import reads the file, so a name the collection has not got has to come off."""
+    """The import reads the file, so a name the collection has not got has to come off."""
     config = make_config(tmp_path)
     config.lossless.mkdir(parents=True, exist_ok=True)
     path = aiff(config.lossless / "Ivete Sangalo - Raiz.aiff")
@@ -579,7 +579,7 @@ def test_a_re_tag_that_resolves_to_nothing_takes_the_old_name_off(tmp_path):
 
 
 def test_a_name_that_fitted_nothing_is_recorded_so_it_can_be_counted(tmp_path):
-    """Ticket 06: five tracks carrying a name that fits nothing is what turns it into a proposal."""
+    """Five tracks carrying a name that fits nothing is what turns it into a proposal."""
     config = make_config(tmp_path)
     record = state.Record(idx=1, artist="Kiasmos", title="Blurred",
                           local_path=str(aiff(tmp_path / "staging" / "Blurred.aiff")),

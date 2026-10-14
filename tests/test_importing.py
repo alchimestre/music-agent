@@ -21,7 +21,7 @@ from music_agent import importing, state, tag
 
 @pytest.fixture(autouse=True)
 def rekordbox_is_not_running(monkeypatch):
-    """Whether rekordbox is open is the user's machine, not this code, and it must not fail the suite.
+    """Whether rekordbox is open is a property of the machine, not of this code, and it must not fail the suite.
 
     `importing.run` refuses to commit while the app is up, and pyrekordbox guards its own `commit` the same
     way, so a suite run with rekordbox open goes red for a reason that has nothing to do with the change
@@ -104,8 +104,8 @@ def tagged(tmp_path: Path, index: int = 1, name: str = "Kiasmos - Blurred.aiff",
            album: str = "Blurred", label: str = "Erased Tapes", year: str = "2017") -> state.Record:
     """A processed track: the file carries the tags, and the record carries what the pipeline knew.
 
-    The album, label and year live only in the tags — the design notes made the tags the cache — so the import
-    reads them back from the file, and a test has to put them there.
+    The album, label and year live only in the tags — the tags are the cache — so the import reads them
+    back from the file, and a test has to put them there.
     """
     path = aiff(tmp_path / "staging" / name)
     tag.write(path, tag.Tags(title=title, artist=artist, album=album, label=label, year=year,
@@ -147,7 +147,7 @@ def test_a_tagged_track_becomes_a_row(tmp_path):
 
 
 def test_bpm_and_key_are_never_written(tmp_path):
-    """Ticket 07: rekordbox's own analysis is the source of both."""
+    """rekordbox's own analysis is the source of both."""
     config = make_config(tmp_path)
     job = job_with(config, [tagged(tmp_path)])
     database = FakeDatabase()
@@ -160,7 +160,7 @@ def test_bpm_and_key_are_never_written(tmp_path):
 
 
 def test_one_commit_covers_every_addition_in_a_run(tmp_path):
-    """Ticket 07: one batch commit rather than one per track. Three additions are one commit, not three."""
+    """One batch commit rather than one per track. Three additions are one commit, not three."""
     config = make_config(tmp_path)
     job = job_with(config, [tagged(tmp_path, 1, "One.aiff"), tagged(tmp_path, 2, "Two.aiff"),
                             tagged(tmp_path, 3, "Three.aiff")])
@@ -205,7 +205,7 @@ def test_an_existing_relation_is_reused_and_a_new_one_is_minted(tmp_path):
 
 
 def test_a_track_with_no_genre_is_imported_without_one(tmp_path):
-    """A blank genre is a real state: the working procedure decides it, and an import without one is better than a
+    """A blank genre is a real state: the caller decides it, and an import without one is better than a
     guessed one."""
     config = make_config(tmp_path)
     job = job_with(config, [tagged(tmp_path, genre="")])
@@ -275,7 +275,7 @@ def test_a_file_that_is_gone_is_a_failure_to_retry(tmp_path):
 
 
 def test_a_running_rekordbox_stops_it_before_anything_is_written(tmp_path, monkeypatch):
-    """pyrekordbox refuses to commit while rekordbox runs, so this fails fast instead (the design notes)."""
+    """pyrekordbox refuses to commit while rekordbox runs, so this fails fast instead."""
     config = make_config(tmp_path)
     job = job_with(config, [tagged(tmp_path)])
     database = FakeDatabase()
@@ -292,7 +292,7 @@ def test_a_running_rekordbox_stops_it_before_anything_is_written(tmp_path, monke
 
 
 def test_the_backup_copies_the_write_ahead_files(tmp_path):
-    """A database copied without `-wal` describes a state that never existed (the design notes)."""
+    """A database copied without `-wal` describes a state that never existed."""
     database = FakeDatabase()
     live = tmp_path / "master.db"
     live.write_bytes(b"the collection")
@@ -317,7 +317,7 @@ def test_a_backup_with_nothing_to_copy_says_so_rather_than_failing(tmp_path):
 
 
 def test_a_track_added_to_a_copy_of_the_real_collection(tmp_path):
-    """The write path itself, against the real schema. A copy, so nothing of the user's is touched."""
+    """The write path itself, against the real schema. A copy, so the live collection is untouched."""
     from pyrekordbox import Rekordbox6Database
 
     live = Path("~/Library/Pioneer/rekordbox/master.db").expanduser()
@@ -361,7 +361,7 @@ def test_a_track_added_to_a_copy_of_the_real_collection(tmp_path):
 def a_lossy_file(tmp_path: Path, name: str = "Kiasmos - Blurred.mp3") -> Path:
     where = tmp_path / "Losy Tracks" / name
     where.parent.mkdir(parents=True, exist_ok=True)
-    where.write_bytes(b"the lossy copy the user already had")
+    where.write_bytes(b"the lossy copy already held")
     return where
 
 
@@ -383,8 +383,8 @@ def test_a_record_whose_row_already_points_at_its_file_is_left_alone(tmp_path):
 
 
 def test_a_record_that_replaces_a_row_repoints_it_rather_than_adding(tmp_path):
-    """Tickets 09 and 16: the upgrade keeps the row, so the cues, the playlists and the history it
-    carries survive the swap."""
+    """The upgrade keeps the row, so the cues, the playlists and the history it carries survive the
+    swap."""
     config = make_config(tmp_path)
     old = a_lossy_file(tmp_path)
     record = tagged(tmp_path)
@@ -400,13 +400,13 @@ def test_a_record_that_replaces_a_row_repoints_it_rather_than_adding(tmp_path):
     assert database.content[0].FolderPath == record.local_path
     assert database.content[0].ID == 42, "the row keeps its identity, and its analysis with it"
     assert database.committed == 1
-    assert not old.is_file(), "the user's decision: the file being replaced goes"
+    assert not old.is_file(), "by decision: the file being replaced goes"
     assert job.records()[0].status == state.IMPORTED
 
 
 def test_a_repoint_rewrites_the_columns_that_describe_the_file(tmp_path):
-    """the user found every upgraded track still displaying the old m4a's bitrate and size on 2026-10-12:
-    rekordbox shows the row's own columns, not the file it points at, and `repoint` had only moved the path.
+    """On 2026-10-12 every upgraded track still displayed the old m4a's bitrate and size: rekordbox shows
+    the row's own columns, not the file it points at, and `repoint` had only moved the path.
 
     The values come from the file now, in the units rekordbox's own rows carry — its 1,214 AIFFs say 1411
     where mutagen says 1411200 — and 12 is its code for AIFF.
@@ -424,7 +424,7 @@ def test_a_repoint_rewrites_the_columns_that_describe_the_file(tmp_path):
     row = database.content[0]
     assert row.FileNameL == "Kiasmos - Blurred.aiff", "what the old file was called is no longer true"
     assert row.FileType == 12
-    assert row.BitRate == 1411, "kbps: the unit the own rows use, not the header's bits per second"
+    assert row.BitRate == 1411, "kbps: the unit rekordbox's own rows use, not the header's bits per second"
     assert row.BitDepth == 16
     assert row.SampleRate == 44100
     assert row.FileSize == Path(record.local_path).stat().st_size

@@ -1,7 +1,7 @@
 """The review command's own module: the decisions a person makes, and nothing else.
 
-Ticket 12 keeps two axes apart, so the tests do too — what a candidate *is* is the rules' business, and what
-the user *did* about a track is the only thing written here. The download an acceptance needs is exercised
+Two axes are kept apart, so the tests are too — what a candidate *is* is the rules' business, and what the
+user *did* about a track is the only thing written here. The download an acceptance needs is exercised
 end to end against the stand-in server, with no Soulseek and no waiting.
 """
 
@@ -97,7 +97,7 @@ def test_one_candidate_on_offer_needs_no_number():
 
 
 def test_several_candidates_must_be_chosen_between():
-    """A person picking is the whole point of the command, so it will not guess for the user."""
+    """A person picking is the whole point of the command, so it will not guess."""
     record = a_waiting_track()
     record.candidates.append(Candidate(user="crate", path=r"O\Ntogn - Mines.flac", duration=None))
 

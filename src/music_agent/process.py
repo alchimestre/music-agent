@@ -141,7 +141,7 @@ def apply_genre(record: state.Record, found: identify.Identified, tools: Tools, 
     if choice.genre:
         log(f"      genre {choice.genre!r}, from {choice.source!r}")
     elif offered:
-        log(f"      nothing in the table for {offered} — the working procedure decides this one")
+        log(f"      nothing in the table for {offered} — the caller decides this one")
     else:
         # 2026-10-13: silence here read as a missing answer. The run's log is the only record of what a
         # track's source genres were — the written tag keeps the family and nothing else — so every track

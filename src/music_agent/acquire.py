@@ -456,13 +456,13 @@ def one(
         key=rules.rank,
     )
     if upgrade is not None:
-        # A lossless copy is strictly better than the lossy one held; a lossy copy is not better than what
-        # the user already has, so only the better lane is worth fetching.
+        # A lossless copy is strictly better than the lossy one held; a lossy copy is not better than the
+        # copy already held, so only the better lane is worth fetching.
         queue = [candidate for candidate in queue if candidate.lossless]
         if not queue:
             record.status = state.PENDING
             job.append_event("no_upgrade_offered", idx=record.idx, replaces=upgrade.path)
-            log(f"[{record.idx}] {record.label}: nothing lossless offered — the copy the user has stands")
+            log(f"[{record.idx}] {record.label}: nothing lossless offered — the copy held stands")
             return "in_review"
 
     for candidate in queue[:MAX_CANDIDATES]:
@@ -563,7 +563,7 @@ def run(
         lookup = one_at_a_time(lookup)
         if pacer is not None:
             say(f"one search every {config.search_interval:g}s"
-                " — the network's rate, not this loop's (the design notes)")
+                " — the network's rate, not this loop's")
         with ThreadPoolExecutor(max_workers=max(1, config.workers)) as pool:
             list(pool.map(work, records))
 

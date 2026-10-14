@@ -50,7 +50,7 @@ SEARCHED_EVENT = "searched"
 
 FINISHED_EVENT = "finished"
 
-# A track that was identified, offered names, and matched none of them (the design notes). Counted from the event
+# A track that was identified, offered names, and matched none of them. Counted from the event
 # logs rather than a new store, because "enough tracks" means across runs and not across one tracklist.
 UNGENERED_EVENT = "ungenred"
 
@@ -104,7 +104,7 @@ class Record:
     local_path: str = ""
     format: str = ""
     genre: str = ""
-    # An upgrade: the path of the file in the collection this one is to replace (the design notes). Empty for a
+    # An upgrade: the path of the file in the collection this one is to replace. Empty for a
     # track that is simply new.
     replaces: str = ""
     notes: str = ""
@@ -230,7 +230,7 @@ class Job:
         return _counted(self.records())
 
     def summary(self) -> dict[str, int]:
-        """What the run adds up to, with the queue split by why a track is still in it (the design notes)."""
+        """What the run adds up to, with the queue split by why a track is still in it."""
         return _summary_of(self.records(), _searched_indices(self.events()))
 
     def write_status(self, config: Config) -> None:
@@ -310,7 +310,7 @@ def _queue_of(records: list[Record], searched: set[int]) -> Queue:
 
 
 def _summary_of(records: list[Record], searched: set[int]) -> dict[str, int]:
-    """What a run's records add up to, split by why a live track is still in the queue (the design notes)."""
+    """What a run's records add up to, split by why a live track is still in the queue."""
     waiting = _queue_of(records, searched)
     return {
         "tracks": len(records),
@@ -360,7 +360,7 @@ def newest(config: Config) -> Job | None:
     """The most recent run there is, finished or not.
 
     The import is what finishes a run, and it finishes nothing else: the queue can still hold tracks waiting
-    on a decision, the genre list can still hold tracks waiting on the user, and a lane can still hold
+    on a decision, the genre list can still hold tracks waiting on a person, and a lane can still hold
     leftovers. So a command that works on any of those has to be able to reach a finished run.
     """
     jobs = all_jobs(config)

@@ -25,7 +25,7 @@ from .parsing import (
     parse_filename,
 )
 
-# A candidate's length may differ from the reference by this much and no more (the design notes). Anything
+# A candidate's length may differ from the reference by this much and no more. Anything
 # wider is not a near miss, it is a different file, and it is rejected rather than offered.
 DURATION_WINDOW = 1
 
@@ -36,8 +36,8 @@ QUALITY_FLOOR = 192
 # never explained away as a wrong mix.
 MIN_SECONDS = 60
 
-# Ticket 08 as revised by the user: the extension decides, nothing is probed, and an ALAC-in-m4a is
-# taken as lossy. Lossless is the lane that reaches the AIFF pipeline.
+# The extension decides, nothing is probed, and an ALAC-in-m4a is taken as lossy. Lossless is the lane
+# that reaches the AIFF pipeline.
 LOSSLESS_EXTENSIONS = frozenset({"flac", "wav", "aiff", "aif"})
 
 # Everything else we take, as-is. `.aif` is listed because it is the same format as `.aiff` and peers use
@@ -59,7 +59,7 @@ class Request:
     """What is being asked for.
 
     `ref_duration` is the MusicBrainz recording length in whole seconds, or None when nothing could be
-    resolved — and a None reference can never settle a track (the design notes).
+    resolved — and a None reference can never settle a track.
 
     `replaces` is the lossy copy the collection already holds, when this track is an upgrade. It makes the
     request *optional*: the collection already plays the track, so a file that cannot improve on that copy —
@@ -146,7 +146,7 @@ def hms(seconds: int | None) -> str:
 
 
 def version_matches(candidate: Candidate, request: Request) -> bool:
-    """Ticket 05: what a request is willing to take.
+    """What a request is willing to take.
 
     A named version takes only that version. A bare request takes any version that is not somebody else's
     remix, which is wider than `parsing.mix_matches` — that one is the equivalence reference resolution
@@ -176,8 +176,8 @@ def _judged_by_name(candidate: Candidate, request: Request) -> Verdict | None:
     if not appears_in(request.title, parsed.title):
         return Verdict(candidate, Label.REJECTED, "a different track")
 
-    # Below the floor a lossy file is ruled out rather than offered (2026-10-12: the design notes sent these to
-    # review, and the user read that queue and answered).
+    # Below the floor a lossy file is ruled out rather than offered: 2026-10-12, these went to review
+    # instead, and the queue that was read and answered is why this rule is here.
     if not candidate.lossless and candidate.bitrate is not None and candidate.bitrate < QUALITY_FLOOR:
         return Verdict(candidate, Label.REJECTED, f"{candidate.bitrate} kbps — below the quality floor")
 
@@ -204,7 +204,7 @@ def classify(candidate: Candidate, request: Request) -> Verdict:
         # An upgrade is optional: the collection already plays this track. So an offer that cannot improve on
         # the copy it holds, or that nobody can check against that copy, is ruled out rather than offered.
         # The pass has always refused a lossy upgrade — a lossy file is not better than the lossy one held —
-        # and the queue used to show them anyway, which is what the user read on 2026-10-12.
+        # and the queue used to show them anyway, which is what was read on 2026-10-12.
         if not candidate.lossless:
             return Verdict(candidate, Label.REJECTED,
                            "lossy, and the copy it would replace is lossy too")
@@ -229,7 +229,7 @@ def classify(candidate: Candidate, request: Request) -> Verdict:
     # The length says how big it is; the name says what it is. A run of the right duration is still the wrong
     # track. The artist is looked for across the whole path because peers keep it in the folder — `…\Aphex
     # Twin\Selected Ambient Works 85-92\12 Delphium.m4a` — and the title is looked for in the basename, which
-    # is the one place a title is always written (the design notes).
+    # is the one place a title is always written.
     named = _judged_by_name(candidate, request)
     if named is not None:
         return named

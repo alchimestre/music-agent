@@ -58,25 +58,31 @@ def test_a_malformed_file_is_an_error(tmp_path):
 
 
 def test_the_search_pace_comes_from_the_file(tmp_path):
-    """Ticket 21: a pass keeps to the network's searching rate rather than the loop's speed, so how fast
+    """A pass keeps to the network's searching rate rather than the loop's speed, so how fast
     that is is a decision in the config — and the shipped default is a pace, not the loop's own speed."""
     config = load(write(tmp_path, "[soulseek]\nsearch_interval = 2.5\n"))
     assert config.search_interval == 2.5
     assert DEFAULTS.search_interval > 0, "the default must pace searches rather than trust the network"
 
 
-def test_the_shipped_config_is_valid_and_agrees_with_the_defaults():
-    config = load(config_module.DEFAULT_CONFIG_PATH)
+def test_the_example_config_is_valid_and_agrees_with_the_defaults():
+    """What ships has to be copyable: the template's values *are* the defaults, so copying it changes nothing.
+    The machine's own `config.toml` is gitignored and this test does not read it."""
+    config = load(config_module.EXAMPLE_CONFIG_PATH)
     assert config.staging == DEFAULTS.staging
+    assert config.lossless == DEFAULTS.lossless
+    assert config.lossy == DEFAULTS.lossy
+    assert config.duplicates == DEFAULTS.duplicates
     assert config.target_lufs == DEFAULTS.target_lufs
-    assert config.state_root == config_module.DEFAULT_CONFIG_PATH.parent / ".state/jobs"
+    assert config.search_interval == DEFAULTS.search_interval
+    assert config.state_root == config_module.EXAMPLE_CONFIG_PATH.parent / ".state/jobs"
 
 
-def test_the_shipped_config_pins_the_acquisition_server_and_moves_it_off_the_default_ports():
+def test_the_example_config_pins_the_acquisition_server_and_moves_it_off_the_default_ports():
     """Two regressions worth catching here. Floating the pin on a branch would let a rebuild move the
-    fields the match rules read (the design notes), and the listening ports must not go back to aioslsk's
-    defaults, which the omp MCP's own slsk server already holds on this machine."""
-    config = load(config_module.DEFAULT_CONFIG_PATH)
+    fields the match rules read, and the listening ports must not go back to aioslsk's defaults, which
+    another local slsk server on the machine may already hold."""
+    config = load(config_module.EXAMPLE_CONFIG_PATH)
 
     assert config.soulseek_command[0] == "uvx"
     assert any(part.startswith("git+") and "@" in part for part in config.soulseek_command), \

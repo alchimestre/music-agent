@@ -97,7 +97,7 @@ def test_a_fingerprint_above_the_floor_is_believed():
 
 
 def test_a_fingerprint_below_the_floor_is_ignored():
-    """Ticket 15: the one sub-0.9 match that was checked resolved to a different track."""
+    """The one sub-0.9 match that was checked resolved to a different track."""
     assert identify.best([identify.Match(score=0.89, recordings=(candidate(),))]) is None
 
 
@@ -159,7 +159,7 @@ def test_the_fingerprint_comes_first(tmp_path):
 
 
 def test_a_text_search_rescues_what_the_fingerprint_could_not(tmp_path):
-    """Ticket 15: about two thirds of AcoustIDs link to no MusicBrainz recording at all."""
+    """About two thirds of AcoustIDs link to no MusicBrainz recording at all."""
     found = identify.identify(
         tmp_path / "x.aiff", request(), hearing=listening(),
         matches=nothing_matched(),
@@ -263,7 +263,7 @@ def test_the_release_in_acoustids_group_wins_over_the_first(tmp_path):
 
 
 def test_a_release_without_a_label_leaves_the_field_empty(tmp_path):
-    """Never invented: a release that does not carry it means the tag stays blank (the spirit)."""
+    """Never invented: a release that does not carry it means the tag stays blank."""
     found = identify.identify(tmp_path / "x.aiff", request(), hearing=listening(),
                               matches=matches(0.99, candidate()),
                               brainz=brainz(recording=candidate(),
@@ -272,7 +272,7 @@ def test_a_release_without_a_label_leaves_the_field_empty(tmp_path):
 
 
 def test_a_compilation_takes_various_artists_as_the_album_artist(tmp_path):
-    """Ticket 17: the track keeps its own credited artist; the album artist comes from the release."""
+    """The track keeps its own credited artist; the album artist comes from the release."""
     compilation = candidate(album="Death Row: Greatest Hits",
                             album_artists=("Various Artists",), compilation=True)
     found = identify.identify(tmp_path / "x.aiff", request(), hearing=listening(),

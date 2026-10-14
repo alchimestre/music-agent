@@ -1,7 +1,7 @@
-"""`music-agent` — the command line the working procedure drives.
+"""`music-agent` — the command line for the pipeline.
 
-This process owns every deterministic step and every write, so a run can be replayed with no model in the
-loop. The skill reads what this prints and makes the calls that need judgement.
+This process owns every deterministic step and every write, so a run can be replayed exactly. The caller
+reads what this prints and makes the calls that need judgement.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         prog="music-agent", parents=[common],
-        description="Acquire, process and import tracks, following the design notes")
+        description="Acquire, process and import tracks")
     commands = parser.add_subparsers(dest="command", required=True)
 
     status = commands.add_parser("status", parents=[common],
@@ -252,7 +252,7 @@ def _process(config: config_module.Config, args: argparse.Namespace) -> int:
     summary = process.run(config, job, tools=tools)
     _report(summary, job, len(summary.failed))
     if summary.ungenred:
-        print(f"{len(summary.ungenred)} without a genre from the table — the working procedure decides those")
+        print(f"{len(summary.ungenred)} without a genre from the table — the caller decides those")
     return 0
 
 
@@ -333,7 +333,7 @@ def _acquire(config: config_module.Config, args: argparse.Namespace) -> int:
         if job is None:
             return 1
 
-    # Ticket 21: the child logs what each search came to, one line per track — `Search complete: 0 raw
+    # The child logs what each search came to, one line per track — `Search complete: 0 raw
     # results` was the only thing that knew the network had stopped answering, and it was thrown away.
     # stderr keeps the pass's own report clean on stdout, and the filter keeps the walls out of stderr.
     logs = slsk.ChildLog()
@@ -434,9 +434,9 @@ def _files(config: config_module.Config, job: state.Job) -> int:
 def _review(config: config_module.Config, args: argparse.Namespace) -> int:
     """Settle by hand what the rule would not.
 
-    There is no screen: the queue prints as text and the caller shows it as a menu, so a decision is asked
-    for where the person already is (the design notes). The flags below stay the one writer of the decision axis,
-    which is what keeps a menu, a script and the working procedure from drifting apart.
+    There is no screen: the queue prints as text and the caller renders it as a menu, so a decision is asked
+    for where the person already is. The flags below stay the one writer of the decision axis, which is what
+    keeps a menu, a script and a hand-typed command from drifting apart.
     """
     job = _target(config, args, "review")
     if job is None:
@@ -486,7 +486,7 @@ def _genres(config: config_module.Config, job: state.Job) -> None:
 
     if ungenred:
         print()
-        print(f"{len(ungenred)} waiting on a genre — the table has nothing and the working procedure decides:")
+        print(f"{len(ungenred)} waiting on a genre — the table has nothing and the caller decides:")
         for record in ungenred:
             print(f"  [{record.idx}] {record.label}")
         # The choice has to be among the collection's own genres, so print them — and the database is opened

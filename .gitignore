@@ -3,3 +3,11 @@ __pycache__/
 *.pyc
 .state/
 .env
+
+# The design notes, the agent glue and this machine's configuration: kept on disk, never published.
+.scratch/
+skill/
+agent/
+docs/agents/
+AGENTS.md
+config.toml

@@ -1,6 +1,6 @@
 """A public Spotify playlist, read as the tracklist a run starts from.
 
-Ticket 19 asked what Spotify was worth and answered *a tracklist source — already in scope*, blocked only by
+Spotify is worth having as *a tracklist source — already in scope*, and it was blocked only by
 a developer app whose loopback redirect the dashboard would not take. Nothing here needs an app. The web
 player reads a playlist from its own backend with a token it mints anonymously, and both halves of that are
 reachable from a plain HTTP client: the token endpoint wants a TOTP the player's *bundle* carries, and the
@@ -140,7 +140,7 @@ def entry_line(entry: dict) -> str:
     """One entry as `Artist - Title`, or '' when it is not a track — an episode, a local file, a gap.
 
     Artists are joined the way a credit is written, because that is the shape `parsing.credits` splits and
-    the primary artist is the one a search leads with (the design notes).
+    the primary artist is the one a search leads with.
     """
     track = ((entry.get("itemV2") or {}).get("data")) or {}
     title = song_title(str(track.get("name") or ""))
@@ -160,14 +160,14 @@ def song_title(name: str) -> str:
     Spotify writes which master, version or source an entry came from into the title itself — `Stairway to
     Heaven - Remaster`, `Paranoid - 2012 - Remaster`, `Danger Zone - From "Top Gun" Original Soundtrack`.
     MusicBrainz carries these as bare titles, so a title kept whole resolves no reference at all: the
-    recording `Dreams - 2004 Remaster` does not exist, the query returns nothing, and the rule leaves
-    the track review-only for good. Measured over three editorial playlists — 450 titles — 105 carry such a
-    tail in 52 distinct forms, every one of them a master, a version or a source rather than the song's name;
-    and over ten of them the verbatim title matched **0** MusicBrainz recordings against **208** for the same
-    ten once the tail was off.
+    recording `Dreams - 2004 Remaster` does not exist, the query returns nothing, and with no reference length
+    to settle it the track stays review-only for good. Measured over three editorial playlists — 450 titles —
+    105 carry such a tail in 52 distinct forms, every one of them a master, a version or a source rather than
+    the song's name; and over ten of them the verbatim title matched **0** MusicBrainz recordings against
+    **208** for the same ten once the tail was off.
 
-    So the tail goes, and what is left is the bare request the design notes already defines — any version that is
-    not somebody else's remix, checked against the reference. A tail that is genuinely part of a title
+    So the tail goes, and what is left is the bare request — any version that is not somebody else's remix,
+    checked against the reference. A tail that is genuinely part of a title
     (`White Wedding - Pt. 1` is the one such entry in those playlists) resolves to the song either way.
     """
     return name.split(" - ")[0].strip() or name.strip()

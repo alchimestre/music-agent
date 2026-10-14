@@ -1,7 +1,7 @@
 """One row per track: the duplicates a hand import leaves, merged.
 
 An import mints a row, and when the track was already in the collection under another file — a lossy copy the
-pipeline later upgraded, a track imported twice by hand — there are two rows for one track. Ticket 09 settled
+pipeline later upgraded, a track imported twice by hand — there are two rows for one track. One rule settles
 which of them survives (**the better copy**), and this is that rule with a verb in front of it:
 
 ```
@@ -72,7 +72,7 @@ class Copy:
     @property
     def key(self) -> tuple[str, str, str]:
         """What makes two rows the same track: the pipeline's own identity — folded artist, bare title, and
-        the mix, which is never a substitute for another mix (the design notes)."""
+        the mix, which is never a substitute for another mix."""
         return (parsing.fold(self.artist), parsing.fold(self.title), parsing.fold(self.mix))
 
     def used(self) -> int:
@@ -166,7 +166,7 @@ def age(copy: Copy) -> float:
 def find(listed: list[Copy]) -> list[Merge]:
     """The groups of rows that are one track, each already decided: the best copy keeps, the rest go.
 
-    Ordering is the whole decision, and it is the: **lossless beats lossy**, then the row more of the
+    Ordering is the whole decision: **lossless beats lossy**, then the row more of the
     library leans on (plays, playlist lines, My Tags, cues), then the row rekordbox has measured (a length is
     more than a row without one knows), then the older row, then the lower id — so the answer is the same every
     time a pass is run, whatever order the database hands the rows over in.

@@ -2,8 +2,8 @@
 
 The decision is the interesting part and it is tested on its own — `find` takes copies and returns merges, no
 database anywhere near it. The last test opens a **copy** of the real collection and merges two rows in it,
-which is the only way to know the write path works rather than merely looks right; nothing of the user's is
-touched.
+which is the only way to know the write path works rather than merely looks right; the live collection is
+untouched.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ def copy(identifier: int, name: str, *, seconds: int = 200, artist: str = "Perfe
 
 
 def test_the_lossless_copy_wins_over_the_lossy_one():
-    """Ticket 09's rule, and the reason the verb exists: a hand import leaves a second row beside the copy the
+    """The rule, and the reason the verb exists: a hand import leaves a second row beside the copy the
     pipeline upgraded, and the lossless file is the one to keep."""
     mp3 = copy(1, "Perfect Stranger - Timewarp.mp3", plays=9, playlists=2)
     aiff_copy = copy(2, "Perfect Stranger - Timewarp.aiff")
@@ -67,7 +67,7 @@ def test_and_between_two_equals_the_older_row_wins():
 
 
 def test_two_lengths_a_minute_apart_are_two_tracks():
-    """A name alone has never been enough (the design notes): the same title at a different length is a different
+    """A name alone has never been enough: the same title at a different length is a different
     version, and merging them would throw one away."""
     short = copy(1, "a.aiff", seconds=200)
     long = copy(2, "b.aiff", seconds=260)
@@ -141,7 +141,7 @@ def test_a_merge_names_what_moves():
 
 
 def real_database(tmp_path):
-    """A working copy of the user's collection, or a skip when there is none to copy."""
+    """A working copy of the real collection, or a skip when there is none to copy."""
     from pyrekordbox import Rekordbox6Database
 
     live = Path("~/Library/Pioneer/rekordbox/master.db").expanduser()

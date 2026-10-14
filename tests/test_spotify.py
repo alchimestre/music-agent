@@ -47,7 +47,7 @@ def test_what_is_not_a_playlist_is_refused_by_name():
 
 def test_a_title_keeps_its_master_and_loses_its_tail():
     """MusicBrainz holds these recordings bare, and a title that kept the tail resolved nothing: over ten
-    tailed tracks it matched 0 recordings verbatim and 208 without the tail (the tracklist use)."""
+    tailed tracks it matched 0 recordings verbatim and 208 without the tail."""
     assert spotify.song_title("Dreams - 2004 Remaster") == "Dreams"
     assert spotify.song_title("Paranoid - 2012 - Remaster") == "Paranoid"
     assert spotify.song_title('Danger Zone - From "Top Gun" Original Soundtrack') == "Danger Zone"
@@ -61,7 +61,7 @@ def test_a_title_without_a_tail_is_left_alone():
 
 def test_an_entry_is_its_credited_artists_and_its_title():
     """The credit is joined the way a credit is written, because that is the shape `parsing.credits` splits
-    and the primary artist is the one a search leads with (the design notes)."""
+    and the primary artist is the one a search leads with."""
     two = {"itemV2": {"data": {"name": "Dreams", "artists": {"items": [
         {"profile": {"name": "Fleetwood Mac"}}, {"profile": {"name": "Stevie Nicks"}}]}}}}
     assert spotify.entry_line(two) == "Fleetwood Mac, Stevie Nicks - Dreams"
