@@ -11,7 +11,7 @@
 staging  = "~/Music/music-agent/staging"
 lossless = "~/Music/music-agent/lossless"
 lossy    = "~/Music/music-agent/lossy"
-state    = ".state/jobs"
+state    = "~/Music/music-agent/state"
 
 # `music-agent dedupe` moves a redundant copy of a track here rather than deleting it: the file is out of the
 # lanes, so nothing indexes it, and it can still be looked at before the directory is emptied.

@@ -1,8 +1,10 @@
-"""Configuration: `config.toml` at the repo root, read with the standard library.
+"""Configuration: `config.toml`, read with the standard library.
 
-`config.example.toml` is the template that ships — copy it to `config.toml` and edit. It holds the directories,
-the loudness targets and tolerances, the search pace, the programs the pipeline drives, and the *names* of the
-environment variables carrying the credentials — never the secrets, so it is safe to commit.
+With no path given, the file beside the package is read first — a checkout — then
+`~/.config/music-agent/config.toml`, which is where an installed copy finds one; with neither, the defaults are
+a working configuration. `config.example.toml` is the template that ships — copy it and edit. It holds the
+directories, the loudness targets and tolerances, the search pace, the programs the pipeline drives, and the
+*names* of the environment variables carrying the credentials — never the secrets, so it is safe to commit.
 """
 
 from __future__ import annotations
@@ -26,6 +28,9 @@ DEFAULT_CONFIG_PATH = HERE / "config.toml"
 # The template that ships. Its values are the defaults, so copying it changes nothing — which is what the tests
 # check, rather than checking this machine's own file.
 EXAMPLE_CONFIG_PATH = HERE / "config.example.toml"
+# Where an installed copy looks for its configuration: `uv tool install` puts the package inside a virtualenv,
+# and the file beside it is not a place to edit. Expanded when it is read, not at import.
+USER_CONFIG_PATH = Path("~/.config/music-agent/config.toml")
 
 
 @dataclass(frozen=True)
@@ -73,7 +78,7 @@ DEFAULTS = Config(
     staging=Path("~/Music/music-agent/staging").expanduser(),
     lossless=Path("~/Music/music-agent/lossless").expanduser(),
     lossy=Path("~/Music/music-agent/lossy").expanduser(),
-    state_root=Path(".state/jobs"),
+    state_root=Path("~/Music/music-agent/state").expanduser(),
     duplicates=Path("~/Music/music-agent/duplicates").expanduser(),
     target_lufs=-14.0,
     true_peak_db=-1.0,
@@ -117,8 +122,14 @@ def load(path: Path | None = None) -> Config:
 
     A missing file is not an error — the defaults are a working configuration — but a malformed one is,
     because ignoring it quietly would run the pipeline against the wrong directories.
+
+    With no path given: the file beside the package (a checkout), then the user's own, then the defaults.
     """
-    path = DEFAULT_CONFIG_PATH if path is None else Path(path).expanduser()
+    if path is None:
+        path = next((one for one in (DEFAULT_CONFIG_PATH, USER_CONFIG_PATH.expanduser()) if one.is_file()),
+                    DEFAULT_CONFIG_PATH)
+    else:
+        path = Path(path).expanduser()
     base = path.parent
     if not path.is_file():
         return DEFAULTS

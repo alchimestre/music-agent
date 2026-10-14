@@ -9,8 +9,9 @@ can be read back, resumed, or repeated exactly.
 
 ```sh
 uv sync                        # a virtualenv with the dependencies
-uv run music-agent --help      # from this directory
-uv tool install --editable .   # the command on PATH
+uv run music-agent --help      # from a checkout
+uv tool install --editable .   # the command on PATH, from this checkout
+uv tool install git+https://github.com/alchimestre/music-agent   # the command on PATH, no checkout
 ```
 
 Most commands talk to Soulseek, MusicBrainz or AcoustID, so load the credentials first. `config.toml` holds only
@@ -81,9 +82,10 @@ and a person from drifting apart. `--list` prints the queue and stops.
 
 ## Configuration
 
-`config.toml` beside this file — copy `config.example.toml` to start. It holds the staging and library
-directories, the loudness targets and tolerances, the Soulseek pace, the paths of the converter and normalizer
-this project drives, and the *names* of the environment variables carrying the credentials. Never a secret.
+`config.toml` beside this file — copy `config.example.toml` to start — or `~/.config/music-agent/config.toml`
+for an installed copy; `--config` reads another one. It holds the staging and library directories, the loudness
+targets and tolerances, the Soulseek pace, the paths of the converter and normalizer this project drives, and
+the *names* of the environment variables carrying the credentials. Never a secret.
 
 Status-file generation reads the records and events once per call, then derives counts and queue buckets from
 those snapshots. Nothing is cached between calls; later commands read the current files.

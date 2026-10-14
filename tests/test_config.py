@@ -57,6 +57,27 @@ def test_a_malformed_file_is_an_error(tmp_path):
         load(write(tmp_path, "this is not toml = = ="))
 
 
+def test_the_config_is_found_beside_the_package_then_in_the_user_directory(tmp_path, monkeypatch):
+    """A checkout reads its own `config.toml`; an installed copy has no checkout, so it reads
+    `~/.config/music-agent/config.toml`. The checkout comes first, so a clone behaves as it always has, and
+    with neither the defaults are a working configuration."""
+    beside = tmp_path / "package" / "config.toml"
+    user = tmp_path / "home" / ".config" / "music-agent" / "config.toml"
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", beside)
+    monkeypatch.setattr(config_module, "USER_CONFIG_PATH", user)
+
+    assert load() == DEFAULTS, "with neither file, the defaults"
+
+    user.parent.mkdir(parents=True)
+    user.write_text('[paths]\nstaging = "/from/user"\n', encoding="utf-8")
+    assert load().staging == Path("/from/user")
+
+    beside.parent.mkdir()
+    beside.write_text('[paths]\nstaging = "/from/checkout"\n', encoding="utf-8")
+    assert load().staging == Path("/from/checkout"), "the checkout wins over the user's file"
+    assert load(user).staging == Path("/from/user"), "an explicit path is read as given"
+
+
 def test_the_search_pace_comes_from_the_file(tmp_path):
     """A pass keeps to the network's searching rate rather than the loop's speed, so how fast
     that is is a decision in the config — and the shipped default is a pace, not the loop's own speed."""
@@ -75,7 +96,7 @@ def test_the_example_config_is_valid_and_agrees_with_the_defaults():
     assert config.duplicates == DEFAULTS.duplicates
     assert config.target_lufs == DEFAULTS.target_lufs
     assert config.search_interval == DEFAULTS.search_interval
-    assert config.state_root == config_module.EXAMPLE_CONFIG_PATH.parent / ".state/jobs"
+    assert config.state_root == DEFAULTS.state_root
 
 
 def test_the_example_config_pins_the_acquisition_server_and_moves_it_off_the_default_ports():
