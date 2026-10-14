@@ -122,9 +122,10 @@ DEFAULTS = Config(
     max_operations=8,
     workers=20,
     # A pass once fired 330 searches in six minutes — eight at a time — and every search after the first
-    # seconds was answered with nothing, silently. Five seconds is twelve a minute, a quarter of that
-    # rate. The threshold is a guess, which is why it is a knob.
-    search_interval=5.0,
+    # seconds was answered with nothing, silently; that is 0.9 a second, and it is the ceiling to stay under.
+    # Two seconds is 0.5 a second, and 30 searches started at that pace were all answered. The threshold is a
+    # guess, which is why it is a knob.
+    search_interval=2.0,
     # Both ship with the project: `tools/convert_to_aiff.sh` and the normalizer submodule under `vendor/`.
     convert_tool=HERE / "tools/convert_to_aiff.sh",
     normalize_tool=HERE / "vendor/loudness_normalizer/loudness_normalizer.py",
