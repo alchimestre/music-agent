@@ -1,6 +1,6 @@
 """The matching rule: what a candidate file is, and which one the system takes.
 
-Ported from `prototype/review_model.py`, which exists to show this rule and nothing else. Vocabulary
+Ported from `tests/rules_reference.py`, the reference this rule is checked against track by track. Vocabulary
 follows GLOSSARY.md: a candidate carries a *label* (what would happen to it), a track carries a
 *decision* (what the human did) — the rule knows only about labels.
 

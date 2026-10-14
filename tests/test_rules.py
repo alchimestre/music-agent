@@ -25,7 +25,7 @@ from music_agent.rules import (
     visible,
 )
 
-PROTOTYPE = Path(__file__).resolve().parent.parent / "prototype" / "review_model.py"
+REFERENCE = Path(__file__).resolve().parent / "rules_reference.py"
 
 
 def candidate(name: str = "Artist - Title (Original Mix).flac", **kw) -> Candidate:
@@ -103,7 +103,7 @@ def test_a_clip_under_a_minute_is_a_preview_not_a_wrong_mix():
 
 def test_a_lossy_file_below_the_floor_is_ruled_out_rather_than_offered():
     """Settled on 2026-10-12: a file nobody would take has no business in a list a person has to read.
-    Below the floor is ruled out rather than offered, where the prototype asked about it."""
+    Below the floor is ruled out rather than offered, where the reference asked about it."""
     low = candidate("Artist - Title (Original Mix).mp3", duration=300, bitrate=128)
     assert classify(low, REQUEST).label is Label.REJECTED
 
@@ -410,26 +410,26 @@ def test_a_track_with_nothing_found_is_not_usable_either():
     assert nothing_usable(Track(REQUEST, [])) is True
 
 
-# -- the port reproduces the prototype it came from -------------------------
+# -- the port reproduces the reference it came from -------------------------
 
-def _prototype():
-    spec = importlib.util.spec_from_file_location("prototype_review_model", PROTOTYPE)
+def _reference():
+    spec = importlib.util.spec_from_file_location("rules_reference", REFERENCE)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
 def test_the_grilled_fixture_still_settles_and_queues_the_same_way():
-    """The prototype's fixture is the case that was eyeballed on the screen, and this is the drift
+    """The reference's fixture is the case that was eyeballed on the screen, and this is the drift
     detector for it.
 
     Verdict reasons are deliberately not compared: the port has been corrected against two resolved
-    decisions since the prototype was drawn — a below-floor file goes to review rather than the bin, and
+    decisions since the reference was drawn — a below-floor file goes to review rather than the bin, and
     a filename has to name the requested track — so the labels and reasons differ by design. Which
     tracks are settled, queued, or empty must not.
     """
-    prototype = _prototype()
-    for fixture_track in prototype.FIXTURE:
+    reference = _reference()
+    for fixture_track in reference.FIXTURE:
         request = Request(
             artist=fixture_track["request"]["artist"],
             title=fixture_track["request"]["title"],
@@ -442,15 +442,15 @@ def test_the_grilled_fixture_still_settles_and_queues_the_same_way():
             for c in fixture_track["candidates"]
         ])
 
-        assert taken(ported) == prototype.taken(fixture_track), request.title
-        assert in_review(ported) == prototype.in_review(fixture_track), request.title
-        assert nothing_usable(ported) == (fixture_track in prototype.nothing_usable()), request.title
+        assert taken(ported) == reference.taken(fixture_track), request.title
+        assert in_review(ported) == reference.in_review(fixture_track), request.title
+        assert nothing_usable(ported) == (fixture_track in reference.nothing_usable()), request.title
 
 
 def test_the_fixture_still_settles_and_queues_the_same_three_and_two():
-    """The prototype's summary, as a literal: if the rules drift, this is where it shows."""
-    prototype = _prototype()
-    summary = prototype.summary()
+    """The reference's summary, as a literal: if the rules drift, this is where it shows."""
+    reference = _reference()
+    summary = reference.summary()
     assert summary.startswith("2 in review")
     assert "2 settled automatically" in summary
     assert "1 with nothing usable" in summary
