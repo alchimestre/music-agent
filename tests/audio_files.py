@@ -36,3 +36,16 @@ def mp4(path: Path, seconds: float = 0.2) -> Path:
         capture_output=True, check=True,
     )
     return path
+
+
+def opus(path: Path, seconds: float = 0.2) -> Path:
+    """A real Ogg Opus file. What matters here is the container family: its comments reject a key they do
+    not recognise by raising, where ID3 answers "not here"."""
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg is not here to make an opus file with")
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", f"anoisesrc=color=pink:duration={seconds}",
+         "-c:a", "libopus", "-f", "ogg", str(path)],
+        capture_output=True, check=True,
+    )
+    return path

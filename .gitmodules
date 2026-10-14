@@ -1,0 +1,3 @@
+[submodule "vendor/loudness_normalizer"]
+	path = vendor/loudness_normalizer
+	url = https://github.com/alchimestre/loudness_normalizer.git

@@ -51,15 +51,19 @@ def _build_parser() -> argparse.ArgumentParser:
     review_command = commands.add_parser(
         "review", parents=[common],
         help="settle a track by hand: take a candidate, skip it, or call it not found")
-    review_command.add_argument("--accept", type=int, default=None, metavar="IDX",
-                                help="take a candidate for that track: fetch it and hand it to process")
+    review_command.add_argument("--accept", type=_picks, default=None, metavar="IDX[:N],…",
+                                help="take candidates: fetch them and hand them to process. One track, or "
+                                     "several as IDX:CANDIDATE, comma-separated — the batch fetches "
+                                     "concurrently through one server")
     review_command.add_argument("--candidate", type=int, default=None, metavar="N",
                                 help="which of the candidates on offer to take, as status --queue lists "
-                                     "them (1 by default when only one is offered)")
-    review_command.add_argument("--skip", type=int, default=None, metavar="IDX",
-                                help="pass that track over for now")
-    review_command.add_argument("--not-found", dest="not_found", type=int, default=None, metavar="IDX",
-                                help="no usable copy exists for that track")
+                                     "them (1 by default when only one is offered). Goes with a single "
+                                     "--accept")
+    review_command.add_argument("--skip", type=_indexes, default=None, metavar="IDX,…",
+                                help="pass those tracks over for now; comma-separated for several")
+    review_command.add_argument("--not-found", dest="not_found", type=_indexes, default=None,
+                                metavar="IDX,…",
+                                help="no usable copy exists for those tracks; comma-separated for several")
     review_command.add_argument("--list", action="store_true",
                                 help="print the queue and stop; what a run with no decision flag does")
 
@@ -326,7 +330,8 @@ def _start(config: config_module.Config, args: argparse.Namespace) -> state.Job 
 
 def _acquire(config: config_module.Config, args: argparse.Namespace) -> int:
     if args.tracks is not None:
-        if _start(config, args) is None:
+        job = _start(config, args)
+        if job is None:
             return 1
     else:
         job = _target(config, args, "continue")
@@ -431,6 +436,34 @@ def _files(config: config_module.Config, job: state.Job) -> int:
     return 0
 
 
+def _picks(text: str) -> list[tuple[int, int | None]]:
+    """`IDX` or `IDX:CANDIDATE`, comma-separated — the numbering `status --queue` prints.
+
+    One track is the common case and stays a bare index; a batch is the same flag with more of them, and
+    naming the candidate per track is what makes a batch of them unambiguous.
+    """
+    picks: list[tuple[int, int | None]] = []
+    for piece in text.replace(" ", "").split(","):
+        if not piece:
+            continue
+        idx, colon, number = piece.partition(":")
+        try:
+            picks.append((int(idx), int(number) if colon else None))
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"{piece!r} is not IDX or IDX:CANDIDATE")
+    if not picks:
+        raise argparse.ArgumentTypeError("no track index in that")
+    return picks
+
+
+def _indexes(text: str) -> list[int]:
+    """Track indexes, comma-separated. Nothing is fetched, so a batch of these is just several writes."""
+    try:
+        return [int(piece) for piece in text.replace(" ", "").split(",") if piece]
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a list of track indexes")
+
+
 def _review(config: config_module.Config, args: argparse.Namespace) -> int:
     """Settle by hand what the rule would not.
 
@@ -450,20 +483,39 @@ def _review(config: config_module.Config, args: argparse.Namespace) -> int:
 
     try:
         if args.accept is not None:
+            picks = args.accept
+            if args.candidate is not None:
+                if len(picks) > 1:
+                    print("--candidate names one track's candidate: write IDX:CANDIDATE for each of them",
+                          file=sys.stderr)
+                    return 1
+                picks = [(picks[0][0], args.candidate)]
             logs = slsk.ChildLog()
-            settled = review.accept(
-                job, args.accept, number=args.candidate,
-                server_factory=lambda: mcp.StdioServer(list(config.soulseek_command),
-                                                       env=slsk.environment(config), on_log=logs))
+            server = lambda: mcp.StdioServer(list(config.soulseek_command),      # noqa: E731
+                                             env=slsk.environment(config), on_log=logs)
+            if len(picks) == 1:
+                settled = review.accept(job, picks[0][0], number=picks[0][1], server_factory=server)
+                logs.report()
+                print(settled.report())
+                print(f"music-agent process --job {job.id}   # convert, place and normalize it")
+                return 0
+            batch = review.accept_many(job, picks, workers=config.workers, server_factory=server)
             logs.report()
-            print(settled.report())
-            print(f"music-agent process --job {job.id}   # convert, place and normalize it")
-            return 0
+            for settled in batch.settled:
+                print(settled.report())
+            for line in batch.refused:
+                print(line, file=sys.stderr)
+            print(f"{len(batch.settled)} taken, {len(batch.refused)} refused")
+            if batch.settled:
+                print(f"music-agent process --job {job.id}   # convert, place and normalize these")
+            return 1 if batch.refused else 0
         if args.skip is not None:
-            print(review.skip(job, args.skip).report())
+            for idx in args.skip:
+                print(review.skip(job, idx).report())
             return 0
         if args.not_found is not None:
-            print(review.not_found(job, args.not_found).report())
+            for idx in args.not_found:
+                print(review.not_found(job, idx).report())
             return 0
     except (review.NotInTheQueue, review.NoSuchCandidate, review.NotAccepted) as error:
         print(error, file=sys.stderr)

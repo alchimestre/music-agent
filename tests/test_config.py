@@ -17,8 +17,11 @@ def write(tmp_path: Path, text: str) -> Path:
     return path
 
 
-def test_a_missing_file_is_not_an_error():
-    """The defaults are a working configuration, so the CLI runs before anyone writes a file."""
+def test_a_missing_file_is_not_an_error(monkeypatch):
+    """The defaults are a working configuration, so the CLI runs before anyone writes a file. The two
+    listening ports are read from the environment rather than the file, so they are cleared to compare."""
+    monkeypatch.delenv("SLSK_LISTEN_PORT", raising=False)
+    monkeypatch.delenv("SLSK_OBFUSCATED_PORT", raising=False)
     assert load(Path("/nonexistent/config.toml")) == DEFAULTS
 
 
@@ -99,13 +102,22 @@ def test_the_example_config_is_valid_and_agrees_with_the_defaults():
     assert config.state_root == DEFAULTS.state_root
 
 
-def test_the_example_config_pins_the_acquisition_server_and_moves_it_off_the_default_ports():
-    """Two regressions worth catching here. Floating the pin on a branch would let a rebuild move the
-    fields the match rules read, and the listening ports must not go back to aioslsk's defaults, which
-    another local slsk server on the machine may already hold."""
+def test_the_example_config_pins_the_acquisition_server_to_a_commit():
+    """Floating the pin on a branch would let a rebuild move the fields the match rules read."""
     config = load(config_module.EXAMPLE_CONFIG_PATH)
 
     assert config.soulseek_command[0] == "uvx"
     assert any(part.startswith("git+") and "@" in part for part in config.soulseek_command), \
         "the acquisition server is not pinned to a commit"
-    assert (config.soulseek_listen_port, config.soulseek_obfuscated_port) != (60000, 60001)
+
+
+def test_the_listening_ports_come_from_the_environment_rather_than_the_config_file(monkeypatch):
+    """A port is a fact about the machine's network, so it sits with the credentials in `.env` — and the
+    shipped default must not be aioslsk's own, which a second local slsk client may already hold."""
+    monkeypatch.setenv("SLSK_LISTEN_PORT", "41000")
+    monkeypatch.setenv("SLSK_OBFUSCATED_PORT", "41001")
+
+    config = load(config_module.EXAMPLE_CONFIG_PATH)
+
+    assert (config.soulseek_listen_port, config.soulseek_obfuscated_port) == (41000, 41001)
+    assert (DEFAULTS.soulseek_listen_port, DEFAULTS.soulseek_obfuscated_port) != (60000, 60001)

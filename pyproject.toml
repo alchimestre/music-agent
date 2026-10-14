@@ -13,6 +13,9 @@ dependencies = [
     "musicbrainzngs==0.7.1",
     "pyrekordbox==0.4.3",
     "mutagen",
+    # Identification by sound: pyacoustid fingerprints through the `fpcalc` binary (chromaprint), which is
+    # not a Python package and has to be installed separately.
+    "pyacoustid",
 ]
 
 [project.scripts]

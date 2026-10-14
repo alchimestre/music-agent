@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 
-from . import reference, rules, slsk, state
+from . import progress, reference, rules, slsk, state
 from .config import Config
 from .library import Held, Library
 from .mcp import ServerError, StdioServer
@@ -519,6 +519,7 @@ def run(
     sleep=time.sleep,
     clock=time.monotonic,
     retry: bool = False,
+    stream=None,
 ) -> Summary:
     """The whole pass: every record the job holds, `workers` of them at a time, writing as it goes.
 
@@ -528,26 +529,26 @@ def run(
     records = job.records()
     summary = Summary()
     quiet = QuietNetwork()
+    bar = progress.Bar(len(records), log=log, stream=stream)
 
     # The network's rate on searching, and ours to keep. Zero is the loop's own speed, worth having only for
     # a tracklist too small for the rate to matter.
     pacer = (Pacer(config.search_interval, clock=clock, sleep=sleep)
              if config.search_interval > 0 else None)
 
-    # One track's story stays readable while others are running, so lines are printed under a lock.
-    printing = threading.Lock()
-
+    # One track's story stays readable while others are running, so lines are printed under the bar's lock.
     def say(line: str) -> None:
-        with printing:
-            log(line)
+        bar.say(line)
 
     def work(record: state.Record) -> None:
         if quiet.stopped.is_set():
             # The network has stopped answering, so the pass stops asking; the record is left exactly as it
             # was, and nothing is written about a search that never happened.
             summary.unsearched.append(record.idx)
+            bar.settle(record.idx, record.label, "unsearched")
             return
         later_pass = retry or bool(record.candidates)
+        bar.begin(record.idx, record.label)
         try:
             outcome = one(job, record, server, lookup, library=library, log=say, sleep=sleep,
                           clock=clock, later_pass=later_pass, pacer=pacer, quiet=quiet)
@@ -557,6 +558,7 @@ def run(
             say(f"[{record.idx}] {record.label}: the server refused — {error}")
             job.append_event("refused", idx=record.idx, error=str(error))
         getattr(summary, outcome).append(record.idx)
+        bar.settle(record.idx, record.label, outcome)
         job.write_records(records)          # a crash costs the tracks in flight and nothing else
 
     if records:
@@ -579,6 +581,7 @@ def run(
         getattr(summary, name).sort()
 
     job.write_status(config)
+    bar.close()
     # Deliberately not finished: the pipeline ends at the import, so this and `process` leave the run open
     # and the next command picks the same one up without being told which.
     return summary
