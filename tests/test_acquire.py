@@ -350,9 +350,53 @@ def test_a_connect_stall_rotates_to_the_next_peer_and_cancels_the_first(tmp_path
     assert "cancel_download" in tools_called(calls), "a stalled transfer must not hold a transfer slot"
 
 
+def test_a_transfer_is_asked_about_on_the_passs_own_interval(tmp_path):
+    """The server asks for thirty seconds between polls, and every budget is decided *on a poll*, so obeying
+    that ask makes its own grid the resolution the budgets are kept to: a peer with nothing to queue behind
+    would be held for the whole of it rather than rotated when its budget is up (2026-10-14)."""
+    config, job, server, calls = setup(tmp_path, results=GOOD,
+                                       download="queued:waiting_for_peer:0:")
+    clock = Clock()
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock.tick(seconds + 0.001)     # even a sleep asked for nothing costs a little time
+
+    with server:
+        summary = acquire.run(config, job, server, Reference(), log=lambda line: None,
+                              sleep=sleep, clock=clock)
+
+    assert summary.failed == [1]
+    assert max(slept) <= acquire.POLL_INTERVAL, "no wait longer than one poll"
+    assert max(slept) < 30, "the server's own thirty-second ask is not obeyed"
+    assert sum(slept) == pytest.approx(acquire.CONNECT_BUDGET, abs=0.01), \
+        "the waits add up to the budget, not to a multiple of the poll"
+    assert tools_called(calls).count("download_status") == len(slept)
+
+
+def test_a_finished_transfer_whose_file_never_appears_is_given_its_grace(tmp_path):
+    """`FINISHED_GRACE` is shorter than the ask above, so a pass that obeyed it looked fifteen seconds late the
+    first time and gave up on the rename before the grace had begun."""
+    config, job, server, calls = setup(tmp_path, results=GOOD, download="finished::0:")
+    clock = Clock()
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock.tick(seconds + 0.001)
+
+    with server:
+        summary = acquire.run(config, job, server, Reference(), log=lambda line: None,
+                              sleep=sleep, clock=clock)
+
+    assert summary.failed == [1]
+    assert sum(slept) == pytest.approx(acquire.FINISHED_GRACE, abs=0.01)
+    assert tools_called(calls).count("download_status") == 2, "asked again, then given up on"
+
+
 def test_every_candidate_failing_leaves_the_track_to_retry(tmp_path):
     config, job, server, calls = setup(tmp_path, results=TWO_PEERS, download="failed::0:")
-
     with server:
         summary, quiet = pass_once(config, job, server, Reference(), calls)
 

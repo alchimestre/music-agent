@@ -114,12 +114,15 @@ DEFAULTS = Config(
     # aioslsk's defaults are 60000/60001, which a second Soulseek client may already hold.
     soulseek_listen_port=20000,
     soulseek_obfuscated_port=20001,
-    # Twenty transfers at a time, not one: the server's own defaults are 3 transfers, 4 searches and
-    # *one* operation — that last is the connection lock, which holds a search for its whole window, so
-    # searches cannot overlap at all until it is raised.
+    # Twenty transfers at a time, not one: the server's defaults are 3 transfers, 4 searches and *one*
+    # operation — the socket lock, which a search holds for its whole window and a download start takes
+    # again. So `max_operations` must clear `max_searches` with a start to spare, and `max_searches` must
+    # cover SEARCH_TIMEOUT / search_interval (six at the two-second default), or a faster pace queues up
+    # behind the ceiling instead of going out.
     max_downloads=20,
-    max_searches=8,
-    max_operations=8,
+    max_searches=12,
+    max_operations=24,
+    # Never above `max_downloads`, or a download start blocks on the transfer ceiling.
     workers=20,
     # A pass once fired 330 searches in six minutes — eight at a time — and every search after the first
     # seconds was answered with nothing, silently; that is 0.9 a second, and it is the ceiling to stay under.

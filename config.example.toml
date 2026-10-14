@@ -24,11 +24,13 @@ command = [
 # The listening ports are in `.env`. The download directory is not here either: `paths.staging` is handed to
 # the child as SLSK_DOWNLOAD_DIR.
 
-# Ceilings handed to the child as SLSK_*. `max_operations` is the server's connection lock, which holds a
-# search for its whole window until it is raised.
+# Ceilings handed to the child as SLSK_*. `max_operations` is the socket lock: a search holds it for its whole
+# window and a download start takes it again, so it must clear `max_searches` with a start to spare, and
+# `max_searches` must cover SEARCH_TIMEOUT / search_interval (six at the two-second default).
+# `workers` must not exceed `max_downloads`, or a download start blocks on the transfer ceiling.
 max_downloads  = 20
-max_searches   = 8
-max_operations = 8
+max_searches   = 12
+max_operations = 24
 workers        = 20
 
 # Seconds between two searches. A throttled search and a rare track read the same, so the pace is ours: the
