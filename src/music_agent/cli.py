@@ -155,7 +155,7 @@ def _dedupe(config: config_module.Config, args: argparse.Namespace) -> int:
 
     try:
         summary = duplicates.run(config, db=database, apply=args.apply,
-                                 quarantine_files=not args.leave_files)
+                                 remove_files=not args.leave_files)
     except duplicates.NotClosed as error:
         print(error, file=sys.stderr)
         return 1
@@ -171,8 +171,7 @@ def _dedupe(config: config_module.Config, args: argparse.Namespace) -> int:
         return 0
     print(summary.report())
     if summary.files:
-        print(f"the files that left the lanes are in {config.duplicates}")
-        print("traktor-nml purge takes out the Traktor entries they left behind")
+        print("traktor-nml purge takes out the Traktor entries those files left behind")
     return 0
 
 

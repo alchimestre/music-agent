@@ -6,7 +6,6 @@ staging    = "~/Music/music-agent/staging"
 lossless   = "~/Music/music-agent/lossless"
 lossy      = "~/Music/music-agent/lossy"
 state      = "~/Music/music-agent/state"
-duplicates = "~/Music/music-agent/duplicates"   # dedupe moves a redundant copy here, never deletes it
 
 [loudness]
 target_lufs  = -14.0

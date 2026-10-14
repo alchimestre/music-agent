@@ -96,7 +96,6 @@ def test_the_example_config_is_valid_and_agrees_with_the_defaults():
     assert config.staging == DEFAULTS.staging
     assert config.lossless == DEFAULTS.lossless
     assert config.lossy == DEFAULTS.lossy
-    assert config.duplicates == DEFAULTS.duplicates
     assert config.target_lufs == DEFAULTS.target_lufs
     assert config.search_interval == DEFAULTS.search_interval
     assert config.state_root == DEFAULTS.state_root

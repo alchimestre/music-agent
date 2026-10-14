@@ -25,7 +25,6 @@ staging = "{tmp_path}/staging"
 lossless = "{tmp_path}/Loseless Tracks"
 lossy = "{tmp_path}/Losy Tracks"
 state = "state"
-duplicates = "{tmp_path}/Duplicates"
 
 [loudness]
 target_lufs = -14.0
@@ -188,10 +187,10 @@ def test_a_file_named_aif_is_placed_as_aiff(tmp_path):
         "the record follows the file"
 
 
-def test_a_name_the_lane_already_holds_parks_the_download_instead_of_dangling_in_staging(tmp_path):
+def test_a_name_the_lane_already_holds_deletes_the_download_instead_of_dangling_in_staging(tmp_path):
     """The dedupe should have caught it, and `held` will not skip a track whose length was never resolved, so
     a duplicate can arrive. The file already there is never overwritten, and the download is not left sitting
-    in staging either: it goes where redundant copies go and the record settles."""
+    in staging either: nothing keeps a second copy of anything."""
     config = make_config(tmp_path)
     config.lossless.mkdir(parents=True)
     existing = config.lossless / "Kiasmos - Blurred.aiff"
@@ -206,9 +205,9 @@ def test_a_name_the_lane_already_holds_parks_the_download_instead_of_dangling_in
     assert summary.already == [1]
     assert summary.failed == []
     assert existing.read_bytes() == b"the one already there", "nothing was overwritten"
-    assert not source.exists(), "and nothing is left dangling in staging"
-    assert (config.duplicates / "Kiasmos - Blurred.aiff").read_bytes() == b"audio"
+    assert not source.exists(), "the duplicate is deleted rather than left dangling in staging"
     assert job.records()[0].status == state.FOUND_IN_LIBRARY
+    assert job.records()[0].local_path == ""
     assert "already there" in job.records()[0].notes
 
 

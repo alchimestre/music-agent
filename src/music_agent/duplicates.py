@@ -11,14 +11,14 @@ music-agent dedupe --apply    # one backup, one merge
 
 The row holding the better copy stays; everything the other still held — its playlist lines, its plays, its My
 Tags, its cues — moves onto the survivor rather than being lost, playlist and tag lines being dropped only where
-the survivor already has one in the same playlist or the same tag. The redundant **file** leaves the lanes for
-the quarantine directory in `config.toml` rather than being deleted, because a lane file with no row is the gap
-the other direction. What that leaves behind in Traktor is a dead entry: `traktor-nml purge` takes those out.
+the survivor already has one in the same playlist or the same tag. The redundant **file** is deleted: the row
+that named it is gone, so nothing points at it, and a copy left in a lane is the gap the other direction —
+`backfill` closes that one and `sweep` clears it. What that leaves behind in Traktor is a dead entry:
+`traktor-nml purge` takes those out.
 """
 
 from __future__ import annotations
 
-import shutil
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -116,7 +116,7 @@ class Summary:
     def report(self) -> str:
         parts = [f"{len(self.merges)} duplicate group{'s' if len(self.merges) != 1 else ''}"]
         if self.files:
-            parts.append(f"{len(self.files)} file{'s' if len(self.files) != 1 else ''} quarantined")
+            parts.append(f"{len(self.files)} file{'s' if len(self.files) != 1 else ''} removed")
         return " · ".join(parts)
 
     def lines(self) -> list[str]:
@@ -196,17 +196,6 @@ def plan(config: Config, *, db) -> Summary:
     return Summary(merges=find(copies(db)))
 
 
-def quarantine(config: Config, path: Path) -> Path:
-    """Where a redundant file goes: the directory in the config, made on demand, under its own name."""
-    config.duplicates.mkdir(parents=True, exist_ok=True)
-    target = config.duplicates / path.name
-    counter = 2
-    while target.exists():
-        target = config.duplicates / f"{path.stem} ({counter}){path.suffix}"
-        counter += 1
-    return target
-
-
 def followers(db) -> list[str]:
     """The one-per-row tables that hang off a track in *this* schema, so a row can be taken out cleanly.
 
@@ -242,7 +231,7 @@ def _move(db, keep: int, drop: int, table: str, column: str) -> None:
                             {"k": keep, "i": drop, "v": value})
 
 
-def merge(config: Config, summary: Summary, *, db, quarantine_files: bool = True, log=print) -> Summary:
+def merge(config: Config, summary: Summary, *, db, remove_files: bool = True, log=print) -> Summary:
     """Write the merges: one backup, one commit, and a diff of the collection that is the rows that changed."""
     if importing.is_running():
         raise NotClosed("rekordbox is running, and pyrekordbox will not commit while it is — close it, then "
@@ -267,19 +256,18 @@ def merge(config: Config, summary: Summary, *, db, quarantine_files: bool = True
                 session.execute(text(f"delete from {table} where ContentID = :i"), {"i": drop.content_id})
             session.execute(text("delete from djmdContent where ID = :i"), {"i": drop.content_id})
             log(f"merged {drop.path.name} into {merge.keep.path.name}")
-            if quarantine_files and path_key(drop.path) != path_key(merge.keep.path) \
-                    and drop.path.is_file():
-                target = quarantine(config, drop.path)
-                shutil.move(str(drop.path), str(target))
-                summary.files.append(target)
-                log(f"      it left the lanes for {target}")
+            if remove_files and path_key(drop.path) != path_key(merge.keep.path) and drop.path.is_file():
+                # Nothing keeps a second copy: the row that named it is gone, so the file is debris.
+                drop.path.unlink()
+                summary.files.append(drop.path)
+                log(f"      {drop.path.name} removed from the lanes")
     db.session.commit()
     return summary
 
 
-def run(config: Config, *, db, apply: bool = False, quarantine_files: bool = True, log=print) -> Summary:
+def run(config: Config, *, db, apply: bool = False, remove_files: bool = True, log=print) -> Summary:
     """Read, decide, and write only when asked."""
     summary = plan(config, db=db)
     if not apply or not summary.merges:
         return summary
-    return merge(config, summary, db=db, quarantine_files=quarantine_files, log=log)
+    return merge(config, summary, db=db, remove_files=remove_files, log=log)
