@@ -242,7 +242,7 @@ def _move(db, keep: int, drop: int, table: str, column: str) -> None:
                             {"k": keep, "i": drop, "v": value})
 
 
-def apply(config: Config, summary: Summary, *, db, quarantine_files: bool = True, log=print) -> Summary:
+def merge(config: Config, summary: Summary, *, db, quarantine_files: bool = True, log=print) -> Summary:
     """Write the merges: one backup, one commit, and a diff of the collection that is the rows that changed."""
     if importing.is_running():
         raise NotClosed("rekordbox is running, and pyrekordbox will not commit while it is — close it, then "
@@ -282,4 +282,4 @@ def run(config: Config, *, db, apply: bool = False, quarantine_files: bool = Tru
     summary = plan(config, db=db)
     if not apply or not summary.merges:
         return summary
-    return apply(config, summary, db=db, quarantine_files=quarantine_files, log=log)
+    return merge(config, summary, db=db, quarantine_files=quarantine_files, log=log)
