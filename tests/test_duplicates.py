@@ -108,15 +108,15 @@ def test_the_verb_prints_the_plan_and_writes_nothing_until_apply(tmp_path, monke
 
     seen: list[tuple[bool, bool]] = []
 
-    def fake_run(config, *, db, apply=False, quarantine_files=True, log=print):
-        seen.append((apply, quarantine_files))
+    def fake_run(config, *, db, apply=False, remove_files=True, log=print):
+        seen.append((apply, remove_files))
         return duplicates.Summary(merges=[duplicates.Merge(
             keep=copy(1, "Perfect Stranger - Timewarp.aiff"),
             drops=[copy(2, "Perfect Stranger - Timewarp.mp3", plays=3)])])
 
     monkeypatch.setattr(duplicates, "run", fake_run)
     monkeypatch.setattr("pyrekordbox.Rekordbox6Database", lambda *args, **kwargs: object())
-    config = replace(config_module.DEFAULTS, duplicates=tmp_path / "Duplicates")
+    config = replace(config_module.DEFAULTS)
 
     assert cli._dedupe(config, argparse.Namespace(apply=False, leave_files=False)) == 0
     printed = capsys.readouterr().out
@@ -191,8 +191,7 @@ def test_a_merge_on_a_copy_of_the_real_collection(tmp_path):
     session.commit()
     (tmp_path / "duplicate.mp3").write_bytes(b"the other copy")
 
-    config = replace(config_module.DEFAULTS, duplicates=tmp_path / "Duplicates",
-                     lossless=tmp_path, lossy=tmp_path)
+    config = replace(config_module.DEFAULTS, lossless=tmp_path, lossy=tmp_path)
     summary = duplicates.plan(config, db=database)
     mine = [merge for merge in summary.merges
             if any(drop.content_id == duplicate_id for drop in merge.drops)]
@@ -209,8 +208,7 @@ def test_a_merge_on_a_copy_of_the_real_collection(tmp_path):
         == int(keeper[0]), "the playlist line moved onto the surviving row"
     assert int(session.execute(text("select ContentID from djmdSongMyTag where ID = 900000003")).scalar()) \
         == int(keeper[0]), "and so did the My Tag"
-    assert not (tmp_path / "duplicate.mp3").exists(), "the redundant file left the lanes"
-    assert (tmp_path / "Duplicates" / "duplicate.mp3").is_file()
+    assert not (tmp_path / "duplicate.mp3").exists(), "the redundant file is deleted, not kept"
     again = duplicates.plan(config, db=database)
     assert not [merge for merge in again.merges
                 if any(drop.content_id == duplicate_id for drop in merge.drops)], \

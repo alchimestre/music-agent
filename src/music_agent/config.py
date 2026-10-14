@@ -45,9 +45,6 @@ class Config:
     lossless: Path
     lossy: Path
     state_root: Path
-    # Where `dedupe` puts a redundant copy instead of deleting it — a lane file with no row is the gap the
-    # other direction, and a file that can still be looked at is easier to trust than one that is gone.
-    duplicates: Path
     target_lufs: float
     true_peak_db: float
     tolerance_lu: float
@@ -99,7 +96,6 @@ DEFAULTS = Config(
     lossless=Path("~/Music/music-agent/lossless").expanduser(),
     lossy=Path("~/Music/music-agent/lossy").expanduser(),
     state_root=Path("~/Music/music-agent/state").expanduser(),
-    duplicates=Path("~/Music/music-agent/duplicates").expanduser(),
     target_lufs=-14.0,
     true_peak_db=-1.0,
     tolerance_lu=0.5,
@@ -167,7 +163,6 @@ def load(path: Path | None = None) -> Config:
         lossless=_resolve(paths.get("lossless", str(DEFAULTS.lossless)), base),
         lossy=_resolve(paths.get("lossy", str(DEFAULTS.lossy)), base),
         state_root=_resolve(paths.get("state", str(DEFAULTS.state_root)), base),
-        duplicates=_resolve(paths.get("duplicates", str(DEFAULTS.duplicates)), base),
         target_lufs=float(loudness.get("target_lufs", DEFAULTS.target_lufs)),
         true_peak_db=float(loudness.get("true_peak_db", DEFAULTS.true_peak_db)),
         tolerance_lu=float(loudness.get("tolerance_lu", DEFAULTS.tolerance_lu)),

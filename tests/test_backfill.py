@@ -30,7 +30,7 @@ def lanes(tmp_path: Path) -> config_module.Config:
     (tmp_path / "Loseless Tracks").mkdir(exist_ok=True)
     (tmp_path / "Losy Tracks").mkdir(exist_ok=True)
     return replace(config_module.DEFAULTS, lossless=tmp_path / "Loseless Tracks",
-                   lossy=tmp_path / "Losy Tracks", duplicates=tmp_path / "Duplicates")
+                   lossy=tmp_path / "Losy Tracks")
 
 
 def held(identifier: int, name: str, *, artist: str = "Someone", title: str = "Something",

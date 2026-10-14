@@ -181,19 +181,15 @@ def convert(config: Config, source: Path, *, run: Runner, log) -> Path:
         return produced
 
 
-def park(config: Config, record: state.Record) -> Path:
-    """Move a copy the collection already has out of staging, under the name it would have had.
+def discard(record: state.Record) -> Path:
+    """Delete a copy the collection already has.
 
-    `dedupe` does the same for a lane file that is redundant, and a copy in the duplicates folder can be
-    looked at, which is what makes moving it better than deleting it.
+    The row it would have become does not exist, so nothing points at the file, and one left in staging reads
+    as work in progress to whoever opens the folder.
     """
     source = Path(record.local_path)
-    config.duplicates.mkdir(parents=True, exist_ok=True)
-    target = config.duplicates / source.name
-    if target.exists():
-        target = config.duplicates / f"{source.stem} ({record.idx}){source.suffix}"
-    shutil.move(str(source), target)
-    return target
+    source.unlink()
+    return source
 
 
 def place(config: Config, record: state.Record, *, run: Runner, log) -> Path:
@@ -217,7 +213,7 @@ def place(config: Config, record: state.Record, *, run: Runner, log) -> Path:
     target = folder / filename_for(record, ".aiff" if source.suffix.lower() == ".aif" else source.suffix)
     if target.exists():
         # Never overwrite: a name already taken is something the dedupe did not catch, and a quiet
-        # replacement would destroy a file rather than report a conflict. The caller parks this copy.
+        # replacement would destroy a file rather than report a conflict. The caller deletes this copy.
         raise NameTaken(target)
     shutil.move(str(source), target)
     log(f"[{record.idx}] {record.label}: → {target}")
@@ -418,16 +414,16 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
             landed = place(config, record, run=tools.runner, log=log)
         except NameTaken as error:
             # The lane holds that name, and `held` never skips a track whose length was never resolved, so
-            # this is a duplicate the collection already has. It goes where redundant copies go, the record
-            # settles, and the pass leaves nothing dangling in staging.
-            parked = park(config, record)
-            record.local_path = str(parked)
+            # this is a copy the collection already has. It is deleted, and the record settles: nothing keeps
+            # a second copy of anything.
+            gone = discard(record)
+            record.local_path = ""
             record.status = state.FOUND_IN_LIBRARY
-            record.notes = f"{error} — this copy is at {parked}"
+            record.notes = f"{error} — this copy was removed"
             summary.already.append(record.idx)
-            job.append_event("already_held", idx=record.idx, held=str(error.target), parked=str(parked))
+            job.append_event("already_held", idx=record.idx, held=str(error.target), removed=str(gone))
             log(f"[{record.idx}] {record.label}: the collection already holds that name — "
-                f"this copy is at {parked}")
+                f"{gone.name} removed")
             job.write_records(records)
             continue
         except ProcessError as error:
