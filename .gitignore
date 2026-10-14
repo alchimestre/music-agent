@@ -4,12 +4,10 @@ __pycache__/
 .state/
 .env
 
-# The design notes, the agent glue and this machine's configuration: kept on disk, never published.
+# The design notes, the agent glue and this machine's configuration: kept on disk, never published. `skill/`
+# is deliberately absent from this list — it ships, because the CLI is meant to be driven by a harness.
 .scratch/
-skill/
 agent/
 docs/agents/
 AGENTS.md
 config.toml
-
-# ISOLATION-PROBE-MARKER

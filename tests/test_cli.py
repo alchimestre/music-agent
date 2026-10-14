@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import sys
-from argparse import Namespace
+from argparse import ArgumentTypeError, Namespace
 from pathlib import Path
+
+import pytest
 
 from audio_files import aiff
 
@@ -474,3 +476,46 @@ def test_a_tracklist_that_cannot_be_read_says_so(tmp_path, capsys):
 
     assert cli_module._start(config, Namespace(tracks=str(tmp_path / "nope.txt"), name=None)) is None
     assert f"cannot read {tmp_path / 'nope.txt'}" in capsys.readouterr().err
+
+
+class NoReference:
+    """A lookup that finds nothing, so the pass stays off the network and settles on its search alone."""
+
+    def find(self, query: str, limit: int = 25) -> list:
+        return []
+
+
+def test_a_tracklist_on_the_command_line_runs_the_pass_on_the_run_it_started(tmp_path, capsys, monkeypatch):
+    """The `--tracks` branch started its run and then used a `job` it never kept, so the documented way to
+    hand this command a tracklist raised UnboundLocalError every time. The pass has to run on the run that
+    was just started, and `_start` on its own cannot catch that: it returns the job correctly."""
+    config_path = make_paths_config(tmp_path)
+    tracklist = tmp_path / "Kiasmos - Blurred.txt"
+    tracklist.write_text("Kiasmos - Blurred\n", encoding="utf-8")
+
+    monkeypatch.setattr(cli_module.slsk, "environment", lambda config: {})
+    monkeypatch.setattr(cli_module.reference, "lookup", lambda config, limit=25: NoReference())
+    monkeypatch.setattr(cli_module.mcp, "StdioServer",
+                        lambda command, env=None, on_log=None:
+                        StdioServer([sys.executable, FAKE], env={"FAKE_RESULTS": "[]"}, on_log=on_log))
+
+    assert main(["--config", str(config_path), "acquire", "--tracks", str(tracklist)]) == 0
+
+    out = capsys.readouterr().out
+    assert "1 with nothing usable" in out, "the pass ran, and reported what it came to"
+    job = state.newest(config_module.load(config_path))
+    assert job.id.endswith("-kiasmos-blurred")
+    assert job.records()[0].status == state.PENDING, "the pass reached the track, and found nothing to take"
+
+
+def test_a_batch_of_accepts_carries_a_candidate_per_track():
+    assert cli_module._picks("12") == [(12, None)], "one track keeps its bare index"
+    assert cli_module._picks("4:1, 5:2,9") == [(4, 1), (5, 2), (9, None)]
+    with pytest.raises(ArgumentTypeError, match="not IDX"):
+        cli_module._picks("Ntogn")
+
+
+def test_a_batch_of_skips_is_just_several_indexes():
+    assert cli_module._indexes("2,17, 28") == [2, 17, 28]
+    with pytest.raises(ArgumentTypeError, match="not a list"):
+        cli_module._indexes("2,seventeen")

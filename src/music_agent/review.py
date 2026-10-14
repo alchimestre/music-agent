@@ -7,9 +7,12 @@ not-found write the decision alone. `acquire` reads the same axis, so a decided 
 
 from __future__ import annotations
 
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 from . import acquire, state
 from .rules import Candidate, Verdict
@@ -118,13 +121,88 @@ def accept(
                 f"track {record.idx}: {candidate.user} did not hand the file over ({decision.value})"
             )
 
+    return _take(job, records, record, candidate, path, from_disk=settled_from_disk)
+
+
+def _take(job, records, record, candidate, path: str, *, from_disk: bool) -> Settled:
+    """Write one track's acceptance: the decision, the event, and the record pointing at the file."""
     record.tried.append(acquire.identifier(candidate))
     acquire.record_taken(job, record, candidate, path, accepted=True)
-    job.append_event("accepted", idx=idx, candidate=acquire.identifier(candidate), path=path,
-                     from_="the file already in staging" if settled_from_disk else candidate.user)
+    job.append_event("accepted", idx=record.idx, candidate=acquire.identifier(candidate), path=path,
+                     from_="the file already in staging" if from_disk else candidate.user)
     job.write_records(records)
-    return Settled(idx=idx, label=record.label, decision=state.ACCEPTED, candidate=candidate,
-                   path=path, from_disk=settled_from_disk)
+    return Settled(idx=record.idx, label=record.label, decision=state.ACCEPTED, candidate=candidate,
+                   path=path, from_disk=from_disk)
+
+
+@dataclass(frozen=True)
+class Batch:
+    """Several decisions at once: what came through, and the tracks that did not."""
+
+    settled: tuple[Settled, ...]
+    refused: tuple[str, ...]
+
+
+def accept_many(
+    job: state.Job,
+    picks: Sequence[tuple[int, int | None]],
+    *,
+    workers: int = 8,
+    server_factory=None,
+    log=print,
+    sleep=time.sleep,
+    clock=time.monotonic,
+) -> Batch:
+    """Take several candidates at once, through one server and several transfers.
+
+    A queue worked by hand is a list of picks rather than one, and `accept` on its own opens a server and
+    logs in for each — so a batch of thirty was thirty logins and thirty downloads in file order. Every
+    pick is resolved before anything is opened, so an index that is not on offer is the caller's error
+    rather than a batch that stops half-way through.
+    """
+    records = job.records()
+    settled: list[Settled] = []
+    fetching: list[tuple[state.Record, Candidate]] = []
+    for idx, number in picks:
+        record = _record(records, idx)
+        candidate = choose(record, number).candidate
+        if record.local_path and Path(record.local_path).is_file():
+            log(f"[{record.idx}] {record.label}: the file is already in staging — not fetching it again")
+            settled.append(_take(job, records, record, candidate, record.local_path, from_disk=True))
+        else:
+            fetching.append((record, candidate))
+
+    if not fetching:
+        return Batch(tuple(settled), ())
+
+    if server_factory is None:
+        raise NotAccepted("these picks need their files fetched, and no server was given")
+
+    printing = threading.Lock()
+    refused: list[str] = []
+
+    def say(line: str) -> None:
+        with printing:
+            log(line)
+
+    def fetch(server, record: state.Record, candidate: Candidate) -> Settled | str:
+        decision, path = acquire.await_transfer(server, candidate, log=say, sleep=sleep, clock=clock)
+        if decision is not acquire.Move.DONE:
+            # The record is left as it was, and the candidate is marked tried so a later pass moves on.
+            record.tried.append(acquire.identifier(candidate))
+            job.write_records(records)
+            return f"[{record.idx}] {record.label}: {candidate.user} did not hand the file over ({decision.value})"
+        return _take(job, records, record, candidate, path, from_disk=False)
+
+    with server_factory() as server:
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            running = {pool.submit(fetch, server, record, candidate) for record, candidate in fetching}
+            for future in as_completed(running):
+                outcome = future.result()
+                (refused if isinstance(outcome, str) else settled).append(outcome)
+
+    settled.sort(key=lambda s: s.idx)
+    return Batch(tuple(settled), tuple(refused))
 
 
 def skip(job: state.Job, idx: int) -> Settled:

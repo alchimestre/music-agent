@@ -246,6 +246,76 @@ def test_an_accepted_track_leaves_the_queue(tmp_path):
     assert [record.idx for record in waiting.decided] == [2]
 
 
+def test_a_batch_fetches_through_one_server_and_settles_every_pick(tmp_path):
+    """A queue worked by hand is a list of picks, and `accept` on its own opens a server and logs in for
+    each of them — so the batch is one child and as many transfers as the workers allow."""
+    config, job, _ = setup(tmp_path)
+    landed = [tmp_path / "staging" / f"Ntogn - Mines {n}.aiff" for n in (1, 2, 3)]
+    for path in landed:
+        path.write_bytes(b"the file, there when we look")
+    job.write_records([a_waiting_track(idx) for idx in (1, 2, 3)])
+    server = server_for(tmp_path, "|".join(f"downloading:transferring:90000:{p}" for p in landed))
+
+    opened: list[StdioServer] = []
+
+    def counted():
+        opened.append(server)
+        return server
+
+    with server:
+        batch = review.accept_many(job, [(1, None), (2, None), (3, None)], workers=3,
+                                   server_factory=counted)
+
+    assert len(opened) == 1, "one child for the batch, not one login per track"
+    assert batch.refused == ()
+    assert [settled.idx for settled in batch.settled] == [1, 2, 3]
+    assert {record.local_path for record in job.records()} == {str(path) for path in landed}
+    assert all(record.decision == state.ACCEPTED for record in job.records())
+
+
+def test_one_peer_that_does_not_hand_over_does_not_stop_the_others(tmp_path):
+    config, job, _ = setup(tmp_path)
+    landed = [tmp_path / "staging" / f"Ntogn - Mines {n}.aiff" for n in (1, 2)]
+    for path in landed:
+        path.write_bytes(b"the file, there when we look")
+    job.write_records([a_waiting_track(idx) for idx in (1, 2, 3)])
+    # The scripts are handed out in arrival order, so which track meets the failing peer is not fixed:
+    # what is fixed is that it is one of them, and that the other two still come through.
+    server = server_for(tmp_path, "failed::0:|" + "|".join(
+        f"downloading:transferring:90000:{p}" for p in landed))
+
+    with server:
+        batch = review.accept_many(job, [(1, None), (2, None), (3, None)], workers=3,
+                                   server_factory=factory(server))
+
+    assert len(batch.settled) == 2
+    assert len(batch.refused) == 1 and "did not hand the file over" in batch.refused[0]
+    assert sum(record.decision == state.ACCEPTED for record in job.records()) == 2
+
+
+def test_a_batch_settles_a_file_already_in_staging_without_the_network(tmp_path):
+    config, job, _ = setup(tmp_path)
+    here = tmp_path / "staging" / "Ntogn - Mines.aiff"
+    here.write_bytes(b"already here")
+    records = job.records()
+    records[0].local_path = str(here)
+    job.write_records(records)
+
+    batch = review.accept_many(job, [(2, None)], server_factory=lambda: pytest.fail("no server needed"))
+
+    assert batch.settled[0].from_disk is True
+    assert batch.refused == ()
+
+
+def test_a_batch_with_an_index_that_is_not_on_offer_decides_nothing(tmp_path):
+    """Resolved before anything is opened, so a typo in a batch of thirty is the caller's error rather
+    than twenty-nine downloads and a stack trace."""
+    config, job, _ = setup(tmp_path)
+
+    with pytest.raises(review.NoSuchCandidate, match="is not one of them"):
+        review.accept_many(job, [(2, None), (2, 4)], server_factory=lambda: pytest.fail("nothing opened"))
+
+
 def test_the_queue_is_split_by_why_a_track_is_in_it(tmp_path):
     config, job, _ = setup(tmp_path)
     job.write_records([a_waiting_track(),

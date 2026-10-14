@@ -1,35 +1,20 @@
-# music-agent configuration — copy this to `config.toml` and edit it.
-#
-# It holds the directories, the loudness targets and tolerances, the search pace, the programs this project
-# drives, and the NAMES of the environment variables carrying credentials — never the secrets themselves. The
-# values live in `.env` or the shell environment:
-#
-#     set -a; source .env; set +a
+# Copy to `config.toml` and edit. Credentials and the Soulseek ports live in `.env`.
 
 [paths]
-# Relative paths resolve against this file's directory, so the whole layout moves with the repo.
-staging  = "~/Music/music-agent/staging"
-lossless = "~/Music/music-agent/lossless"
-lossy    = "~/Music/music-agent/lossy"
-state    = "~/Music/music-agent/state"
-
-# `music-agent dedupe` moves a redundant copy of a track here rather than deleting it: the file is out of the
-# lanes, so nothing indexes it, and it can still be looked at before the directory is emptied.
-duplicates = "~/Music/music-agent/duplicates"
+# Relative paths resolve against this file's directory.
+staging    = "~/Music/music-agent/staging"
+lossless   = "~/Music/music-agent/lossless"
+lossy      = "~/Music/music-agent/lossy"
+state      = "~/Music/music-agent/state"
+duplicates = "~/Music/music-agent/duplicates"   # dedupe moves a redundant copy here, never deletes it
 
 [loudness]
-# A file already inside the tolerance is left alone.
 target_lufs  = -14.0
 true_peak_db = -1.0
-tolerance_lu = 0.5
+tolerance_lu = 0.5                              # a file already inside it is left alone
 
 [soulseek]
-# The acquisition surface: the slsk MCP server, spawned as a child and spoken to over stdio. Pinned to a
-# commit, so a rebuild cannot quietly move the fields the match rules are written against. Move the pin
-# deliberately.
-#
-# The download directory is deliberately absent: the CLI passes [paths].staging to the child as
-# SLSK_DOWNLOAD_DIR, so where files land cannot drift from where we look for them.
+# Pinned to a commit: the match rules read specific fields, and a rebuild must not move them.
 command = [
   "uvx",
   "--from",
@@ -37,33 +22,21 @@ command = [
   "slsk-mcp",
 ]
 
-# aioslsk would listen on 60000/60001; another Soulseek client on the machine may already hold both, and a
-# second binder fails its login outright. 20000 is what this project listens on, with the obfuscated listener
-# alongside it.
-listen_port     = 20000
-obfuscated_port = 20001
+# The listening ports are in `.env`. The download directory is not here either: `paths.staging` is handed to
+# the child as SLSK_DOWNLOAD_DIR.
 
-# How much of this runs at once. The first three are the child's own ceilings, handed to it as SLSK_*
-# variables: transfers in flight, searches in flight, and operations in flight. That third one is the server's
-# connection lock, whose default of 1 holds a search for its whole window — so searches cannot overlap at all
-# until it is raised. `workers` is how many tracks the pass works on at a time; keep it at or below
-# `max_downloads`, or a worker waits for a transfer slot inside the very call it is timing.
-#
-# None of these is the constraint on searching, though — the pace below is. They let searches overlap, and
-# overlapping is what a rate limit is measured against: raised far enough, a pass can watch hundreds of
-# searches go out in a couple of minutes and then get nothing back at all.
+# Ceilings handed to the child as SLSK_*. `max_operations` is the server's connection lock, which holds a
+# search for its whole window until it is raised.
 max_downloads  = 20
 max_searches   = 8
 max_operations = 8
 workers        = 20
 
-# A floor on the gap between two searches, in seconds — ours rather than the child's, because nothing in the
-# pinned build paces searches and nothing in it reports one being ignored: a throttled search and a rare track
-# are the same empty payload. Five seconds is twelve a minute. 0 turns the pace off, which is worth doing only
-# for a tracklist that is small and known to the network.
+# Seconds between two searches. A throttled search and a rare track read the same, so the pace is ours.
 search_interval = 5.0
 
 [credentials]
+# Names only — never the secrets.
 musicbrainz_contact = "MUSICBRAINZ_CONTACT"
 acoustid_key        = "ACOUSTID_API_KEY"
 discogs_token       = "DISCOGS_TOKEN"
@@ -71,14 +44,6 @@ soulseek_user       = "SLSK_USERNAME"
 soulseek_password   = "SLSK_PASSWORD"
 
 [tools]
-# The two programs `process` drives rather than reimplements: a converter to AIFF and a loudness normalizer.
-# Both run under this project's interpreter, a relative path resolving against this file and a bare name being
-# looked up on PATH. Without them `process` cannot convert or normalize — the other stages work regardless —
-# so uncomment and point these at whatever is installed:
-#
-# convert   = "convert_to_aiff.sh"
-# normalize = "loudness_normalizer.py"
-#
-# The converter keeps a file's basename and only changes the extension, so what it produces is renamed to the
-# house convention on the way into the collection. The normalizer keeps its own state inside each music
-# directory, which is why it is pointed at a directory rather than a file.
+# Both ship with the project; set either to use another build.
+# convert   = "tools/convert_to_aiff.sh"
+# normalize = "vendor/loudness_normalizer/loudness_normalizer.py"

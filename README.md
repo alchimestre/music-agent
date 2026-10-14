@@ -7,15 +7,21 @@ result. Every step is written under `.state/jobs/<run>/`, so a run can be read b
 ## Install
 
 ```sh
+git submodule update --init    # the normalizer `process` drives
 uv sync                        # a virtualenv, from a checkout
 uv tool install --editable .   # the command on PATH, from this checkout
 uv tool install git+https://github.com/alchimestre/music-agent   # or with no checkout
 ```
 
-Soulseek, MusicBrainz and AcoustID need credentials. `config.toml` holds the environment variable names; the
-values live in `.env`:
+The converter to AIFF and the loudness normalizer both ship with the project — `tools/convert_to_aiff.sh` and
+the `vendor/loudness_normalizer` submodule — and `config.toml` can point `[tools]` at other copies.
+
+Soulseek, MusicBrainz and AcoustID need credentials, and the two Soulseek listening ports depend on the router
+this runs behind. `config.toml` holds the environment variable names; the values live in `.env`, which
+`.env.example` is the template for:
 
 ```sh
+cp .env.example .env    # then fill it in
 set -a; source .env; set +a
 ```
 
@@ -75,8 +81,18 @@ Those three flags are the only writers of the decision axis (`GLOSSARY.md`).
 
 `config.toml` beside this file — copy `config.example.toml` to start — or
 `~/.config/music-agent/config.toml` for an installed copy; `--config` reads another one. It holds the staging
-and library directories, the loudness targets and tolerances, the Soulseek pace, the paths of the converter and
-normalizer this project drives, and the names of the credential environment variables. No secrets.
+and library directories, the loudness targets and tolerances, the Soulseek pace, the `[tools]` paths, and the
+names of the credential environment variables. No secrets.
+
+The two Soulseek listening ports are not in it: which port this machine can accept peers on is a fact about its
+network, so `SLSK_LISTEN_PORT` and `SLSK_OBFUSCATED_PORT` live in `.env` with the credentials. Forward the
+first on the router — a peer that cannot reach it cannot deliver search results, and every search comes back
+empty.
+
+## Driving it from an agent
+
+`skill/SKILL.md` ships with the project: the commands in the order a run uses them, the review queue and how to
+put it to a person, and the one judgement the pipeline leaves to a caller. Point a harness at it.
 
 ## Tests
 

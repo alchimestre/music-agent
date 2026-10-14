@@ -5,12 +5,16 @@ With no path given, the file beside the package is read first — a checkout —
 a working configuration. `config.example.toml` is the template that ships — copy it and edit. It holds the
 directories, the loudness targets and tolerances, the search pace, the programs the pipeline drives, and the
 *names* of the environment variables carrying the credentials — never the secrets, so it is safe to commit.
+
+The Soulseek listening ports are not in it either: they come from the environment
+(`SLSK_LISTEN_PORT`, `SLSK_OBFUSCATED_PORT`), like the credentials.
 """
 
 from __future__ import annotations
 
+import os
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 # One string, so every credential tells the human the same thing.
@@ -74,6 +78,22 @@ def _resolve(value: str, base: Path) -> Path:
     return path if path.is_absolute() else (base / path).resolve()
 
 
+def _port_from_env(name: str, default: int) -> int:
+    """A listening port from the environment, where this machine keeps the network's own facts."""
+    value = os.environ.get(name)
+    return int(value) if value else default
+
+
+def _listening_ports() -> dict[str, int]:
+    """Both ports, under the field names `Config` gives them."""
+    return {
+        "soulseek_listen_port": _port_from_env("SLSK_LISTEN_PORT", DEFAULTS.soulseek_listen_port),
+        "soulseek_obfuscated_port": _port_from_env(
+            "SLSK_OBFUSCATED_PORT", DEFAULTS.soulseek_obfuscated_port
+        ),
+    }
+
+
 DEFAULTS = Config(
     staging=Path("~/Music/music-agent/staging").expanduser(),
     lossless=Path("~/Music/music-agent/lossless").expanduser(),
@@ -95,8 +115,7 @@ DEFAULTS = Config(
     ),
     slsk_username_env="SLSK_USERNAME",
     slsk_password_env="SLSK_PASSWORD",
-    # aioslsk would listen on 60000/60001, which another Soulseek client on this machine already holds —
-    # a second binder fails its login outright. 20000 is the port this project listens on.
+    # aioslsk's defaults are 60000/60001, which a second Soulseek client may already hold.
     soulseek_listen_port=20000,
     soulseek_obfuscated_port=20001,
     # Twenty transfers at a time, not one: the server's own defaults are 3 transfers, 4 searches and
@@ -110,10 +129,9 @@ DEFAULTS = Config(
     # seconds was answered with nothing, silently. Five seconds is twelve a minute, a quarter of that
     # rate. The threshold is a guess, which is why it is a knob.
     search_interval=5.0,
-    # Both are the canonical implementation of their step, so the CLI drives them instead of reimplementing
-    # them. The normalizer needs only ffmpeg and mutagen, and mutagen is one of our own dependencies.
-    convert_tool=Path("convert_to_aiff.sh"),
-    normalize_tool=Path("loudness_normalizer.py"),
+    # Both ship with the project: `tools/convert_to_aiff.sh` and the normalizer submodule under `vendor/`.
+    convert_tool=HERE / "tools/convert_to_aiff.sh",
+    normalize_tool=HERE / "vendor/loudness_normalizer/loudness_normalizer.py",
 )
 
 
@@ -132,7 +150,8 @@ def load(path: Path | None = None) -> Config:
         path = Path(path).expanduser()
     base = path.parent
     if not path.is_file():
-        return DEFAULTS
+        # The defaults are a working configuration, but the ports still come from the environment.
+        return replace(DEFAULTS, **_listening_ports())
 
     with path.open("rb") as handle:
         data = tomllib.load(handle)
@@ -157,10 +176,7 @@ def load(path: Path | None = None) -> Config:
         acoustid_key_env=credentials.get("acoustid_key", DEFAULTS.acoustid_key_env),
         discogs_token_env=credentials.get("discogs_token", DEFAULTS.discogs_token_env),
         soulseek_command=tuple(soulseek.get("command", DEFAULTS.soulseek_command)),
-        soulseek_listen_port=int(soulseek.get("listen_port", DEFAULTS.soulseek_listen_port)),
-        soulseek_obfuscated_port=int(
-            soulseek.get("obfuscated_port", DEFAULTS.soulseek_obfuscated_port)
-        ),
+        **_listening_ports(),
         max_downloads=int(soulseek.get("max_downloads", DEFAULTS.max_downloads)),
         max_searches=int(soulseek.get("max_searches", DEFAULTS.max_searches)),
         max_operations=int(soulseek.get("max_operations", DEFAULTS.max_operations)),

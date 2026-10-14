@@ -221,3 +221,17 @@ def test_writing_twice_changes_nothing_the_second_time(tmp_path):
     once = tag.read(path)
     tag.write(path, everything())
     assert tag.read(path) == once
+
+
+def test_reading_an_ogg_family_file_survives_the_names_only_id3_can_spell(tmp_path):
+    """The reader tries ID3's frames first, and a Vorbis-comment container answers `©nam` — a key it cannot
+    spell — by raising rather than by saying "not here", which took a whole `retag` down on the first
+    `.ogg` in a run."""
+    from audio_files import opus
+
+    path = opus(tmp_path / "noise.opus")
+
+    assert tag.read(path).title == "", "nothing there yet, and no ValueError"
+
+    tag.write(path, tag.Tags(title="Something"))
+    assert tag.read(path).title == "Something"

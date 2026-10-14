@@ -76,26 +76,32 @@ def read(path: Path) -> Tags:
 
     def first(keys: list[str]) -> str:
         for key in keys:
-            if key in tags:
+            try:
                 value = tags[key]
-                text = getattr(value, "text", None)
-                if text:
-                    return str(text[0])
-                if isinstance(value, list) and value:
-                    return str(value[0])
-                if isinstance(value, str):
-                    return value
+            except (KeyError, ValueError):
+                # A container that will not take the key at all reads the same as one that does not carry
+                # it: Vorbis raises ValueError for ID3's names rather than saying "not here".
+                continue
+            text = getattr(value, "text", None)
+            if text:
+                return str(text[0])
+            if isinstance(value, list) and value:
+                return str(value[0])
+            if isinstance(value, str):
+                return value
         return ""
 
+    # Each list holds the container's own spellings: ID3 for AIFF, `©nam` for MP4, and the plain names a
+    # Vorbis comment carries — which is what an ogg, an opus and a flac are written with.
     return Tags(
-        title=first(["TIT2", "\xa9nam"]),
-        artist=first(["TPE1", "\xa9ART"]),
-        album=first(["TALB", "\xa9alb"]),
-        album_artist=first(["TPE2", "aART"]),
-        year=first(["TDRC", "\xa9day"]),
-        label=first(["TPUB", "----:com.apple.iTunes:LABEL"]),
-        genre=first(["TCON", "\xa9gen"]),
-        catalog_number=first(["TXXX:CATALOGNUMBER", "----:com.apple.iTunes:CATALOGNUMBER"]),
+        title=first(["TIT2", "\xa9nam", "title"]),
+        artist=first(["TPE1", "\xa9ART", "artist"]),
+        album=first(["TALB", "\xa9alb", "album"]),
+        album_artist=first(["TPE2", "aART", "albumartist"]),
+        year=first(["TDRC", "\xa9day", "date"]),
+        label=first(["TPUB", "----:com.apple.iTunes:LABEL", "label"]),
+        genre=first(["TCON", "\xa9gen", "genre"]),
+        catalog_number=first(["TXXX:CATALOGNUMBER", "----:com.apple.iTunes:CATALOGNUMBER", "catalognumber"]),
         release_id=first(["TXXX:MusicBrainz Album Id", "----:com.apple.iTunes:MusicBrainz Album Id"]),
         release_group_id=first(["TXXX:MusicBrainz Release Group Id",
                                 "----:com.apple.iTunes:MusicBrainz Release Group Id"]),

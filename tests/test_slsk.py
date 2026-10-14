@@ -14,7 +14,6 @@ def make_config(tmp_path: Path, credentials: str = "") -> config_module.Config:
     path = tmp_path / "config.toml"
     path.write_text(
         '[paths]\nstaging = "staging"\nlossless = "lossless"\nlossy = "lossy"\nstate = "state"\n'
-        '[soulseek]\nlisten_port = 20000\nobfuscated_port = 20001\n'
         + credentials,
         encoding="utf-8",
     )
@@ -27,14 +26,18 @@ def creds(monkeypatch):
     monkeypatch.setenv("SLSK_PASSWORD", "a secret")
 
 
-def test_the_environment_carries_what_the_server_reads(tmp_path, creds):
+def test_the_environment_carries_what_the_server_reads(tmp_path, creds, monkeypatch):
+    """Including the listening ports, which come from the environment: a machine whose forwarded port is
+    not aioslsk's default has to bind the one peers can actually reach."""
+    monkeypatch.setenv("SLSK_LISTEN_PORT", "41000")
+    monkeypatch.setenv("SLSK_OBFUSCATED_PORT", "41001")
     config = make_config(tmp_path)
     env = slsk.environment(config)
 
     assert env["SLSK_USERNAME"] == "someone"
     assert env["SLSK_PASSWORD"] == "a secret"
     assert env["SLSK_DOWNLOAD_DIR"] == str(config.staging)
-    assert (env["SLSK_LISTEN_PORT"], env["SLSK_OBFUSCATED_PORT"]) == ("20000", "20001")
+    assert (env["SLSK_LISTEN_PORT"], env["SLSK_OBFUSCATED_PORT"]) == ("41000", "41001")
 
 
 def test_credentials_are_renamed_to_what_the_server_expects(tmp_path, monkeypatch):
