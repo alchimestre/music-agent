@@ -91,6 +91,11 @@ and the child's own log comes out on stderr with an `slsk: ` prefix — includin
 results` for a search that found nothing, which is the difference between a rare track and a network that has
 gone quiet.
 
+The pace is what a pass costs: its tracks × that interval in searching alone, about eight minutes for 250
+tracks and half an hour for a thousand, whichever way the rest of it is configured. The pass runs on after the
+last search until the tracks still rotating through candidates are done — a few minutes more, unless a peer
+declares a long queue.
+
 Fifty searches in a row with nothing back is that second case, and the pass stops rather than spending the
 rest of its allowance on silence: it reports those tracks as **not searched** and leaves them exactly as they
 were, because nothing should be written about a search that never happened. Run it again when the network is

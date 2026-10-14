@@ -45,6 +45,12 @@ STALL_BUDGET = 120.0
 # file is not coming.
 FINISHED_GRACE = 15.0
 
+# How often a transfer in flight is asked about. The server asks for thirty seconds between polls; that is
+# its own conservatism, and asking costs it a dictionary read. The number matters twice: every budget above
+# is decided *on a poll*, so this is the resolution they are kept to, and it is how long a file that has
+# already landed goes unnoticed, holding its worker.
+POLL_INTERVAL = 10.0
+
 # Statuses after which the server will never change its mind.
 _OVER = frozenset({"failed", "cancelled", "not_found", "session_expired"})
 
@@ -68,7 +74,20 @@ class Transfer:
     received_bytes: int = 0
     local_path: str = ""
     message: str = ""
-    wait_before_poll: float = 30.0
+
+
+def budget_for(transfer: Transfer, *, declared_queue: int = 0) -> float:
+    """How long a candidate the server still believes in may sit without a byte before it is let go.
+
+    A transfer that has started and stopped moving is dead whatever the server says; a peer that declared a
+    queue is behaving normally and gets a budget worth waiting for; anything else is a connection that either
+    opens quickly or never will.
+    """
+    if transfer.status == "finished":
+        return FINISHED_GRACE
+    if transfer.status == "downloading" or transfer.connection_state == "transferring":
+        return STALL_BUDGET
+    return QUEUE_BUDGET if declared_queue else CONNECT_BUDGET
 
 
 def move(transfer: Transfer, *, on_disk: bool, stuck_for: float, declared_queue: int = 0) -> Move:
@@ -83,10 +102,7 @@ def move(transfer: Transfer, *, on_disk: bool, stuck_for: float, declared_queue:
         return Move.WAIT if stuck_for <= FINISHED_GRACE else Move.FAILED
     if transfer.status in _OVER:
         return Move.FAILED
-    if transfer.status == "downloading" or transfer.connection_state == "transferring":
-        return Move.ROTATE if stuck_for > STALL_BUDGET else Move.WAIT
-    budget = QUEUE_BUDGET if declared_queue else CONNECT_BUDGET
-    return Move.ROTATE if stuck_for > budget else Move.WAIT
+    return Move.ROTATE if stuck_for > budget_for(transfer, declared_queue=declared_queue) else Move.WAIT
 
 
 def transfer_of(payload: dict) -> Transfer:
@@ -98,7 +114,6 @@ def transfer_of(payload: dict) -> Transfer:
         received_bytes=int(payload.get("received_bytes") or 0),
         local_path=str(payload.get("local_path") or ""),
         message=str(payload.get("message") or ""),
-        wait_before_poll=float(payload.get("wait_before_poll_secs") or 30.0),
     )
 
 
@@ -290,14 +305,17 @@ def await_transfer(
     last_bytes = 0
     last_change = clock()
     while True:
+        stuck_for = clock() - last_change
         on_disk = bool(local_path) and Path(local_path).is_file()
-        decision = move(
-            report, on_disk=on_disk, stuck_for=clock() - last_change, declared_queue=candidate.queue
-        )
+        decision = move(report, on_disk=on_disk, stuck_for=stuck_for, declared_queue=candidate.queue)
         if decision is not Move.WAIT:
             return decision, local_path
 
-        sleep(report.wait_before_poll)
+        # The wait is what is left of the budget, never more than one poll: sleeping the interval regardless
+        # would keep every budget to the poll's own grid — 36 s on a 10 s poll costs 40 — and would leave a
+        # file that landed mid-interval unnoticed for the rest of it.
+        budget = budget_for(report, declared_queue=candidate.queue)
+        sleep(max(0.0, min(POLL_INTERVAL, budget - stuck_for)))
         report = transfer_of(
             slsk.check(
                 server.call("download_status", {"id": identifier(candidate)}, timeout=CALL_TIMEOUT),
