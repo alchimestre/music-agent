@@ -23,8 +23,8 @@ SETTLED = state.Record(idx=1, artist="Kiasmos", title="Blurred", duration_s=449,
                        candidates=[Candidate(user="vinyl_only", path=r"M\Kiasmos - Blurred.flac",
                                              duration=448)])
 WAITING = state.Record(idx=2, artist="Ntogn", title="Mines", duration_s=528,
-                       candidates=[Candidate(user="mole", path=r"M\Ntogn - Mines.aiff",
-                                             duration=None)])
+                       candidates=[Candidate(user="mole", path=r"M\Ntogn - .aiff",
+                                             duration=528)])
 EMPTY = state.Record(idx=3, artist="Sven Wunder", title="Lotus", duration_s=260,
                      candidates=[Candidate(user="crateguy", path=r"M\Sven Wunder - Lotus.aiff",
                                            duration=290)])
@@ -98,10 +98,10 @@ def test_the_queue_lists_what_needs_a_decision(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert "Ntogn - Mines" in out
-    assert "the peer reports no length" in out
+    assert "the filename names no track" in out
     assert "Kiasmos" not in out                     # settled, so not the human's problem
     assert "1. aiff" in out, "a candidate line starts with the number review --accept takes"
-    assert "Ntogn - Mines.aiff" in out, "and names the file that number would fetch"
+    assert "Ntogn - .aiff" in out, "and names the file that number would fetch"
     assert "every one was refused" in out           # and the unusable one is named, and why
 
 
@@ -305,8 +305,8 @@ def test_review_with_no_terminal_prints_the_queue(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert "Ntogn - Mines" in out
-    assert "the peer reports no length" in out
-    assert "Ntogn - Mines.aiff" in out
+    assert "the filename names no track" in out
+    assert "Ntogn - .aiff" in out
     assert "settle one by hand" in out
 
 

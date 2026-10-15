@@ -121,22 +121,23 @@ def version_matches(cand, req):
 
 
 def classify(cand, req):
-    """(label, reason). Label is 'Ready', 'Needs you' or 'Rejected'.
+    """(label, reason). Label is 'Ready', 'Unchecked length', 'Needs you' or 'Rejected'.
 
     Order matters: a preview would otherwise be judged as a wrong mix, and a wildly wrong length
-    should not be reported as a mix problem.
+    should not be reported as a mix problem. A length nobody can check is not a question for a
+    person: the file stands on its name, and one offer is taken as it is.
     """
     if cand["duration"] is not None and cand["duration"] < MIN_SECONDS:
         return "Rejected", "%s — a preview clip" % hms(cand["duration"])
-    d = delta(cand, req)
-    if d is None:
-        return "Needs you", "the peer reports no length"
-    if abs(d) > DURATION_WINDOW:
-        return "Rejected", "runs %+d s against the reference" % d
     if not cand["lossless"] and cand["bitrate"] is not None and cand["bitrate"] < QUALITY_FLOOR:
         return "Rejected", "%d kbps — below the quality floor" % cand["bitrate"]
     if not version_matches(cand, req):
-        return "Needs you", "a different mix — %s" % (mix_of(cand) or "unnamed")
+        return "Rejected", "a different mix — %s" % (mix_of(cand) or "unnamed")
+    d = delta(cand, req)
+    if d is None:
+        return "Unchecked length", "the peer reports no length"
+    if abs(d) > DURATION_WINDOW:
+        return "Rejected", "runs %+d s against the reference" % d
     return "Ready", "same mix, length matches"
 
 
@@ -150,27 +151,36 @@ def visible(track):
     return [x for x in candidates(track) if x[1] != "Rejected"]
 
 
+def takeable(track):
+    """[(candidate, label, reason)] for candidates that could be taken unattended: a checked one, and one
+    whose length nobody could check."""
+    return [x for x in candidates(track) if x[1] in ("Ready", "Unchecked length")]
+
+
 def ready(track):
-    """[(candidate, label, reason)] for candidates that could be taken unattended."""
+    """[(candidate, label, reason)] for candidates verified against the reference."""
     return [x for x in candidates(track) if x[1] == "Ready"]
 
 
 def rank(cand):
-    """The ladder used when more than one candidate is Ready: lossless first, then the higher
+    """The ladder used when more than one candidate is takeable: lossless first, then the higher
     bitrate, then the shorter queue. A tie is settled by this, never by asking."""
     return (0 if cand["lossless"] else 1, -(cand["bitrate"] or 0), cand["queue"] or 0)
 
 
 def pick(track):
-    """The candidate the system takes on its own, or None if nothing is Ready."""
-    r = ready(track)
-    return sorted(r, key=lambda x: rank(x[0]))[0] if r else None
+    """The candidate the system takes on its own, or None if nothing is takeable. A length checked against
+    the reference outranks one that could not be checked at all."""
+    t = takeable(track)
+    if not t:
+        return None
+    return sorted(t, key=lambda x: (0 if x[1] == "Ready" else 1, rank(x[0])))[0]
 
 
 def taken(track):
-    """Any Ready candidate means the system settles the track itself, picking between several by
+    """Any takeable candidate means the system settles the track itself, picking between several by
     `rank` and logging which it took."""
-    return bool(ready(track))
+    return bool(takeable(track))
 
 
 def in_review(track):

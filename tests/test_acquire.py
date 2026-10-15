@@ -18,6 +18,7 @@ from music_agent import acquire
 from music_agent import config as config_module
 from music_agent import library, reference, state
 from music_agent.mcp import StdioServer
+from music_agent.rules import Candidate
 
 FAKE = str(Path(__file__).parent / "fake_server.py")
 
@@ -179,20 +180,20 @@ def pass_once(config, job, server, lookup, calls: Path, shelf=None) -> tuple[acq
         ("queued", "waiting_for_peer", True, 999.0, 0, acquire.Move.DONE),
         # A finished transfer whose file has not appeared is the rename, which is quick.
         ("finished", "", False, 1.0, 0, acquire.Move.WAIT),
-        ("finished", "", False, 16.0, 0, acquire.Move.FAILED),
+        ("finished", "", False, 6.0, 0, acquire.Move.FAILED),
         ("failed", "", False, 1.0, 0, acquire.Move.FAILED),
         ("cancelled", "", False, 1.0, 0, acquire.Move.FAILED),
         ("session_expired", "", False, 1.0, 0, acquire.Move.FAILED),
         # A transfer in flight is never rotated on the connect timer, however long it has been at zero.
-        ("downloading", "transferring", False, 119.0, 0, acquire.Move.WAIT),
-        ("downloading", "transferring", False, 121.0, 0, acquire.Move.ROTATE),
-        # A connection that never transferred a byte is rotated at 30 seconds.
-        ("queued", "waiting_for_peer", False, 31.0, 0, acquire.Move.ROTATE),
-        ("queued", "connecting", False, 30.0, 0, acquire.Move.WAIT),
+        ("downloading", "transferring", False, 44.0, 0, acquire.Move.WAIT),
+        ("downloading", "transferring", False, 46.0, 0, acquire.Move.ROTATE),
+        # A connection that never transferred a byte is rotated at twelve seconds.
+        ("queued", "waiting_for_peer", False, 13.0, 0, acquire.Move.ROTATE),
+        ("queued", "connecting", False, 11.0, 0, acquire.Move.WAIT),
         # A peer that declared a queue is behaving normally rather than failing, and gets the longer
         # budget.
-        ("queued", "waiting_for_peer", False, 179.0, 5, acquire.Move.WAIT),
-        ("queued", "waiting_for_peer", False, 181.0, 5, acquire.Move.ROTATE),
+        ("queued", "waiting_for_peer", False, 44.0, 5, acquire.Move.WAIT),
+        ("queued", "waiting_for_peer", False, 46.0, 5, acquire.Move.ROTATE),
     ],
 )
 def test_the_decision_to_wait_rotate_or_give_up(status, connection, on_disk, stuck, queue, expected):
@@ -290,26 +291,35 @@ def test_a_track_settled_by_hand_is_not_searched_again(tmp_path):
 def test_a_peer_that_reported_no_free_slot_is_remembered(tmp_path):
     """The answer belongs to the candidate, so it has to survive the search result rather than being
     dropped on the way into the record."""
-    config, job, server, calls = setup(tmp_path, results=NO_SLOTS)
+    landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
+    config, job, server, calls = setup(tmp_path, results=NO_SLOTS,
+                                       download=f"downloading:transferring:90000:{landed}")
+    landed.write_bytes(b"the file, already there when we look")
 
     with server:
         summary, quiet = pass_once(config, job, server, Reference(), calls)
 
-    assert summary.in_review == [1], quiet.lines
+    assert summary.downloaded == [1], quiet.lines
     candidate = job.records()[0].candidates[0]
     assert candidate.slots is False
     assert candidate.queue == 3
 
 
-def test_a_track_with_nothing_ready_waits_for_a_human(tmp_path):
-    config, job, server, calls = setup(tmp_path, results=NO_LENGTH)
+def test_a_track_with_no_length_to_check_is_taken_on_its_name(tmp_path):
+    """2026-10-14: it used to wait for a person. Nothing can check the length, so the file stands on its name
+    and is taken — the queue is not where an unverifiable offer goes."""
+    landed = tmp_path / "staging" / "Kiasmos - Blurred.aiff"
+    config, job, server, calls = setup(tmp_path, results=NO_LENGTH,
+                                       download=f"downloading:transferring:90000:{landed}")
+    landed.write_bytes(b"the file, already there when we look")
 
     with server:
         summary, quiet = pass_once(config, job, server, Reference(), calls)
 
-    assert summary.in_review == [1], quiet.lines
-    assert job.records()[0].status == state.PENDING
-    assert "download" not in tools_called(calls), "nothing was Ready to take"
+    assert summary.downloaded == [1], quiet.lines
+    assert summary.in_review == []
+    assert job.records()[0].status == state.DOWNLOADED
+    assert "download" in tools_called(calls), "taken, not put in the queue"
 
 
 def test_a_search_with_no_usable_candidate_says_so(tmp_path):
@@ -367,7 +377,7 @@ def test_a_transfer_is_asked_about_on_the_passs_own_interval(tmp_path):
         summary = acquire.run(config, job, server, Reference(), log=lambda line: None,
                               sleep=sleep, clock=clock)
 
-    assert summary.failed == [1]
+    assert summary.dropped == [1]
     assert max(slept) <= acquire.POLL_INTERVAL, "no wait longer than one poll"
     assert max(slept) < 30, "the server's own thirty-second ask is not obeyed"
     assert sum(slept) == pytest.approx(acquire.CONNECT_BUDGET, abs=0.01), \
@@ -390,19 +400,48 @@ def test_a_finished_transfer_whose_file_never_appears_is_given_its_grace(tmp_pat
         summary = acquire.run(config, job, server, Reference(), log=lambda line: None,
                               sleep=sleep, clock=clock)
 
-    assert summary.failed == [1]
+    assert summary.dropped == [1]
     assert sum(slept) == pytest.approx(acquire.FINISHED_GRACE, abs=0.01)
     assert tools_called(calls).count("download_status") == 2, "asked again, then given up on"
 
 
-def test_every_candidate_failing_leaves_the_track_to_retry(tmp_path):
+def test_every_candidate_failing_closes_the_track(tmp_path):
+    """2026-10-14: nothing left to try is the end of it. The track is settled rather than left waiting for
+    somebody to say so, which is what a run full of unanswerable rows cost."""
     config, job, server, calls = setup(tmp_path, results=TWO_PEERS, download="failed::0:")
     with server:
         summary, quiet = pass_once(config, job, server, Reference(), calls)
 
-    assert summary.failed == [1], quiet.lines
-    assert job.records()[0].status == state.RETRY_LATER
-    assert not job.finished(), "a run with a track left to retry is not finished"
+    assert summary.dropped == [1], quiet.lines
+    assert summary.failed == []
+    record = job.records()[0]
+    assert record.status == state.NOT_FOUND
+    assert record.decision == state.DECLINED
+    assert all(one.decided() for one in job.records()), "nothing is left to try, so nothing is left open"
+
+
+def test_a_track_with_a_candidate_left_untried_is_left_alone(tmp_path):
+    """The other half of that: an offer nobody got to — because the pass stopped at its candidate ceiling, or
+    the network went quiet — is not the same as one every peer refused."""
+    config, job, _server, _calls = setup(tmp_path, results=[])
+    first = Candidate(user="a", path=r"M\Kiasmos - Blurred.flac", duration=449)
+    second = Candidate(user="b", path=r"M\Kiasmos - Blurred.flac", duration=449, bitrate=320)
+    records = job.records()
+    records[0].status = state.RETRY_LATER
+    records[0].candidates = [first, second]
+    records[0].tried = [acquire.identifier(first)]
+    job.write_records(records)
+
+    assert acquire.drop_exhausted(job, log=lambda line: None) == []
+    kept = job.records()[0]
+    assert kept.status == state.RETRY_LATER
+    assert kept.decision == state.UNDECIDED
+
+    records = job.records()
+    records[0].tried = [acquire.identifier(first), acquire.identifier(second)]
+    job.write_records(records)
+    assert acquire.drop_exhausted(job, log=lambda line: None) == [1]
+    assert job.records()[0].status == state.NOT_FOUND
 
 
 def test_the_reference_is_resolved_once_and_only_once(tmp_path):
@@ -665,6 +704,23 @@ def test_any_hit_resets_the_run_of_empty_searches():
 
     assert not quiet.stopped.is_set()
     assert quiet.consecutive == 2
+
+
+def test_a_tail_of_rare_tracks_does_not_look_like_a_dead_network():
+    """2026-10-14, a 305-track techno playlist: the findable tracks go first, so what is left to search is
+    exactly the rare ones, and their searches answer nothing one after another. Two passes stopped at fifteen
+    empties in a row and left 184 tracks unsearched, while 179 of the 200 searches that did run had offered
+    candidates. The threshold is the whole difference between that and a network that has gone, so it is what
+    this pins."""
+    quiet = acquire.QuietNetwork()                      # the shipped limit, not one a test chose
+
+    for _ in range(15):
+        quiet.observe(0)
+    assert not quiet.stopped.is_set(), "a playlist's rare tail is not a dead network"
+
+    for _ in range(acquire.QUIET_AFTER):
+        quiet.observe(0)
+    assert quiet.stopped.is_set()
 
 
 def test_a_network_that_stops_answering_stops_the_pass(tmp_path):

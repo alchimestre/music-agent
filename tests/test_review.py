@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -318,7 +319,10 @@ def test_a_batch_with_an_index_that_is_not_on_offer_decides_nothing(tmp_path):
 
 def test_the_queue_is_split_by_why_a_track_is_in_it(tmp_path):
     config, job, _ = setup(tmp_path)
-    job.write_records([a_waiting_track(),
+    unnamed = a_waiting_track()
+    # A filename that names no track at all: nothing can be read off it, so it is the queue's business.
+    unnamed.candidates[:] = [replace(unnamed.candidates[0], path=r"M\Ntogn - .aiff", duration=528)]
+    job.write_records([unnamed,
                        state.Record(idx=1, artist="Sven Wunder", title="Lotus")])
     job.append_event("searched", idx=1, added=0, offered=0)     # asked, and the network held nothing
 
@@ -326,3 +330,11 @@ def test_the_queue_is_split_by_why_a_track_is_in_it(tmp_path):
     assert [record.idx for record in waiting.needs_you] == [2]
     assert [record.idx for record in waiting.nothing_offered] == [1]
     assert waiting.not_searched == []
+
+
+def test_a_track_whose_only_offer_has_no_length_is_not_in_the_queue(tmp_path):
+    """2026-10-14: a length nobody reported is taken on the file's name, so it never reaches a person."""
+    config, job, _ = setup(tmp_path)
+    job.write_records([a_waiting_track()])
+
+    assert state.queue(job).needs_you == []
