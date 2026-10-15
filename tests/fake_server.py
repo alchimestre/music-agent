@@ -126,7 +126,9 @@ def handle_call(message: dict) -> None:
     if SCENARIO == "dies":
         sys.exit(3)
     if SCENARIO == "silent":
-        time.sleep(3600)
+        # The call is never answered, which is the point; the process goes when its client does.
+        for _ in sys.stdin:
+            pass
         return
     if SCENARIO == "is_error":
         reply(message["id"], {"isError": True,
@@ -169,8 +171,11 @@ def handle_call(message: dict) -> None:
 
 def main() -> None:
     global _pending_call
+    # The mute and silent scenarios answer nothing, but they still have to go when the client does: the
+    # process that keeps sleeping through a closed stdin outlives the test run that started it.
     if SCENARIO == "mute":
-        time.sleep(3600)
+        for _ in sys.stdin:
+            pass
         return
 
     for line in sys.stdin:

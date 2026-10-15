@@ -10,6 +10,8 @@ import os
 
 from music_agent.config import ENV_HINT, Config, MissingCredential
 
+from . import processes
+
 
 class ToolError(RuntimeError):
     """The server refused a call. `code` is its own short reason, e.g. `not_authenticated`."""
@@ -19,6 +21,54 @@ class ToolError(RuntimeError):
         self.tool = tool
         self.code = code
         self.message = message
+
+
+class PortBusy(RuntimeError):
+    """Something on this machine holds a Soulseek listening port that is not a Soulseek client."""
+
+
+# A Soulseek client, by the name its process carries. The squatter here is another harness's `slsk-mcp`,
+# started on the same account and never stopped: it answers the same two ports, so the server routes search
+# replies to it and a pass on this side comes back empty while looking like a quiet network.
+_SLSK_NAMES = ("slsk-mcp", "slsk_mcp", "soulseek", "nicotine", "sldl")
+
+
+def free_ports(config: Config, *, log=print) -> list[int]:
+    """Clear the field: no other Soulseek client, and the two Soulseek ports ours.
+
+    aioslsk registers the listening port with the server, and a client that keeps the port after its run has
+    ended is not harmless: the account is the same, so the server hands every search reply to the session
+    that still holds it and this pass sees nothing. A holder whose command names a Soulseek client is
+    stopped; anything else holding the port is named and raised, because it is not ours to kill.
+
+    A client that is *logged in* is stopped whether or not it holds a port. The server keeps one session per
+    account, so a second client makes it close this one's connection: the pass then logs in, answers no
+    search, and looks like a dead network. A harness starts such a client again the moment it is killed, so
+    this is a defence that has to be repeated rather than a fix — the mount has to go.
+    """
+    stray = processes.stop_named(_SLSK_NAMES[:2], log=log)
+
+    ports = (config.soulseek_listen_port, config.soulseek_obfuscated_port)
+    held: list[int] = []
+    for port in ports:
+        for pid in processes.listeners(port):
+            command = processes.command_of(pid)
+            if not any(name in command.lower() for name in _SLSK_NAMES):
+                raise PortBusy(
+                    f"port {port} is held by {command or f'pid {pid}'} — stop it and run this again"
+                )
+            if pid not in held:                  # one client holds both ports, and is named once
+                held.append(pid)
+
+    if not held:
+        return stray
+
+    stubborn = processes.stop(held)
+    if stubborn:
+        raise PortBusy(f"pids {stubborn} would not stop, and they hold {ports}")
+    log(f"stopped a stale Soulseek client holding port{'s' if len(held) > 1 else ''} "
+        f"{', '.join(str(port) for port in ports)} (pid {', '.join(str(pid) for pid in held)})")
+    return stray + [pid for pid in held if pid not in stray]
 
 
 class ChildLog:
