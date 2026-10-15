@@ -443,6 +443,25 @@ def test_a_genre_the_table_knows_is_taken_from_the_services(tmp_path):
     assert job.records()[0].genre == "Jazz"
 
 
+def test_a_genre_the_table_takes_says_what_else_was_offered(tmp_path):
+    """2026-10-15: the line named only the name that won, so a source genre the table has no line for — the
+    one a rule reading sources off the run is looking for — vanished whenever a mappable name came with it.
+    The run's log is the only record of a track's source genres, so it names all of them."""
+    config = make_config(tmp_path)
+    record = state.Record(idx=1, artist="Kiasmos", title="Blurred",
+                          local_path=str(aiff(tmp_path / "staging" / "Blurred.aiff")),
+                          status=state.DOWNLOADED, format="aiff")
+    job = job_with(config, [record])
+    tools = with_identification(FakeRunner(), styles=("Deep Techno",), genres=("techno",),
+                                mappings={fold("techno"): "Techno"})
+    said: list[str] = []
+
+    process.run(config, job, tools=tools, log=said.append)
+
+    assert job.records()[0].genre == "Techno"
+    assert any("Deep Techno" in line and "Techno" in line for line in said), said
+
+
 def test_a_service_that_fails_leaves_the_name_doing_the_work(tmp_path):
     """The last resort, reached because a service was unreachable rather than because it was asked and
     had nothing."""
@@ -582,6 +601,30 @@ def test_a_re_tag_that_resolves_to_nothing_takes_the_old_name_off(tmp_path):
     assert tag.read(path).genre == ""
     assert summary.cleared == [1]
     assert summary.retagged == []
+
+
+def test_a_re_tag_that_could_not_ask_leaves_the_name_alone(tmp_path):
+    """2026-10-15: a service that could not be reached is not an answer. The blank it leaves is not the
+    table's verdict, and the next pass — which asks again — puts the name back, so two passes over one run
+    disagreed on 23 of 287 records and every one of them was a lookup that failed."""
+    config = make_config(tmp_path)
+    config.lossless.mkdir(parents=True, exist_ok=True)
+    path = aiff(config.lossless / "Kiasmos - Blurred.aiff")
+    tag.write(path, tag.Tags(title="Blurred", artist="Kiasmos", genre="Techno"))
+    record = state.Record(idx=1, artist="Kiasmos", title="Blurred", local_path=str(path),
+                          status=state.TAGGED)
+    job = job_with(config, [record])
+    hearing, matches, brainz, discogs = identification(broken=True)
+    tools = process.Tools(hearing=hearing, matches=matches, brainz=brainz, discogs=discogs,
+                          vocabulary=["Techno"], mappings={"techno": "Techno"})
+    said: list[str] = []
+
+    summary = process.retag(job, tools=tools, log=said.append)
+
+    assert tag.read(path).genre == "Techno", "the name it carries stays"
+    assert summary.unasked == [1]
+    assert summary.cleared == [] and summary.retagged == [], "neither an answer nor a clearing"
+    assert any("could not be asked" in line for line in said), said
 
 
 def test_a_name_that_fitted_nothing_is_recorded_so_it_can_be_counted(tmp_path):

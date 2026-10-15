@@ -236,8 +236,10 @@ music-agent retag
 
 is the deliberate half of that rule, and the only way a genre changes on a file. It re-identifies each track
 already placed, resolves the genre again, and writes over whatever the file holds; where nothing resolves, the
-old name comes **off**, because a name the collection has not got is a row nothing will absorb. Say what it
-did — how many it re-tagged and how many it left blank.
+old name comes **off**, because a name the collection has not got is a row nothing will absorb. A track whose
+services could not be reached at all is left as it is — one lookup failing is not the taxonomy's verdict, and
+the next pass would put the name back. Say what it did — how many it re-tagged, how many it left blank, and
+how many it could not ask about.
 
 Retag after an import leaves the collection's rows holding the genre the file had *then*. Reload the tags for
 those tracks in rekordbox, or accept the difference.
