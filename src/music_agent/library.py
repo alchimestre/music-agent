@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import Config
-from .parsing import bare_title, extract_mix, fold, parse_filename
+from .parsing import bare_title, extract_mix, fold, parse_filename, same_credit
 from .rules import AUDIO_EXTENSIONS, DURATION_WINDOW, LOSSLESS_EXTENSIONS
 
 
@@ -38,9 +38,14 @@ class Held:
     mix: str = ""
 
     @property
-    def key(self) -> tuple[str, str]:
-        """The identity a match is made on — folded, so accents and case cannot break it."""
-        return (fold(self.artist), fold(self.title))
+    def key(self) -> str:
+        """The identity a match is made on — the title, folded, so accents and case cannot break it.
+
+        The credit is deliberately not part of it. `A x B`, `A & B` and `A, B` are one collaboration written
+        three ways, the files themselves disagree about which, and a key that spells the credit out holds
+        one track twice. The credit is compared by name instead, once the title has narrowed the field.
+        """
+        return fold(self.title)
 
     @property
     def lossless(self) -> bool:
@@ -58,7 +63,7 @@ class Library:
 
     def __init__(self, rows: list[Held], genres: list[str]) -> None:
         self._genres = list(genres)
-        self._by_key: dict[tuple[str, str], list[Held]] = {}
+        self._by_key: dict[str, list[Held]] = {}
         for row in rows:
             if row.title:
                 self._by_key.setdefault(row.key, []).append(row)
@@ -70,14 +75,16 @@ class Library:
     def held(self, artist: str, title: str, seconds: int | None) -> Held | None:
         """The row for this track when the collection already holds it, else None.
 
-        Folded artist and title, and a length within the matcher's own `DURATION_WINDOW`, so "already
-        held" can never be looser than "the right file". Without a length there is nothing to compare, so
-        the answer is None: the track is not *known* to be held, and a search costs less than a wrong skip.
+        Folded title, the matcher's own `DURATION_WINDOW` on the length, and a credit naming the same
+        people — so "already held" can never be looser than "the right file". Without a length there is
+        nothing to compare, so the answer is None: the track is not *known* to be held, and a search costs
+        less than a wrong skip.
         """
         if seconds is None:
             return None
-        for row in self._by_key.get((fold(artist), fold(title)), []):
-            if row.seconds is not None and abs(row.seconds - seconds) <= DURATION_WINDOW:
+        for row in self._by_key.get(fold(title), []):
+            if (row.seconds is not None and abs(row.seconds - seconds) <= DURATION_WINDOW
+                    and same_credit(row.artist, artist)):
                 return row
         return None
 
@@ -88,7 +95,7 @@ class Library:
         copy in the collection *is* the reference — a white-label MusicBrainz holds no recording for — the
         name is the only thing left to recognise it by.
         """
-        return list(self._by_key.get((fold(artist), fold(title)), []))
+        return [row for row in self._by_key.get(fold(title), []) if same_credit(row.artist, artist)]
 
     def __len__(self) -> int:
         return sum(len(rows) for rows in self._by_key.values())

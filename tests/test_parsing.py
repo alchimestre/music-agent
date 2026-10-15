@@ -17,6 +17,7 @@ from music_agent.parsing import (
     mix_matches,
     parse_filename,
     primary_artist,
+    same_credit,
     search_query,
     strip_code_tail,
 )
@@ -62,6 +63,43 @@ def test_credits_split_on_the_separators_the_library_uses(line, expected):
 def test_a_name_containing_a_lone_x_is_not_split_in_two():
     """The `x` separator needs its spaces, or Malcolm X becomes Malcolm."""
     assert credits("Malcolm X") == ["Malcolm X"]
+
+
+@pytest.mark.parametrize("one, other", [
+    ("Altinbas x Cirkle", "Altinbas & Cirkle"),
+    ("Altinbas x Cirkle", "Altinbas, Cirkle"),
+    ("A feat. B", "A & B"),
+    ("Rødhåd", "Rødhåd & Vril"),
+    ("Dettmann | Klock", "Marcel Dettmann & Ben Klock"),
+    ("Ø [Phase]", "Ø [Phase]"),
+])
+def test_two_spellings_of_one_credit_are_one_credit(one, other):
+    """The files disagree about how a collaboration is written, and the collection gets the track twice."""
+    assert same_credit(one, other) is True
+    assert same_credit(other, one) is True
+
+
+@pytest.mark.parametrize("one, other", [
+    ("Altinbas", "Phara"),
+    ("A & B", "A & C"),
+    ("Marcel Dettmann", "Ben Klock"),
+    ("", "Altinbas"),
+])
+def test_two_credits_naming_different_people_are_not_one_credit(one, other):
+    assert same_credit(one, other) is False
+
+
+def test_two_tracks_that_name_nobody_are_matched_on_title_and_length_alone():
+    """A white label credits no one, and that is not evidence against the match — the title and the length
+    have already carried it."""
+    assert same_credit("", "") is True
+
+
+def test_a_solo_artist_is_not_the_namesake_whose_name_contains_it():
+    """`X` is a word of `Malcolm X`, so a bare subset rule would take one person for the other. A credit is
+    only allowed to name fewer people when the other names more than one, which is what stops it."""
+    assert same_credit("Malcolm X", "X") is False
+    assert same_credit("Malcolm X", "Malcolm") is False
 
 
 def test_a_repeated_credit_is_counted_once():

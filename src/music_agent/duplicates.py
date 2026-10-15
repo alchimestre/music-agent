@@ -70,10 +70,15 @@ class Copy:
         return self.path.suffix.lower().lstrip(".") in rules.LOSSLESS_EXTENSIONS
 
     @property
-    def key(self) -> tuple[str, str, str]:
-        """What makes two rows the same track: the pipeline's own identity — folded artist, bare title, and
-        the mix, which is never a substitute for another mix."""
-        return (parsing.fold(self.artist), parsing.fold(self.title), parsing.fold(self.mix))
+    def key(self) -> tuple[str, str]:
+        """What makes two rows the same track: the bare title folded, and the mix, which is never a
+        substitute for another mix.
+
+        The artist has to stay out of it. `A x B`, `A & B` and `A, B` are one collaboration written three
+        ways and the files disagree about which, so a key that spells the credit out cannot see the very
+        duplicates this looks for. The credit is compared by name instead, in `find`.
+        """
+        return (parsing.fold(self.title), parsing.fold(self.mix))
 
     def used(self) -> int:
         """How much of the library leans on this row."""
@@ -171,10 +176,10 @@ def find(listed: list[Copy]) -> list[Merge]:
     more than a row without one knows), then the older row, then the lower id — so the answer is the same every
     time a pass is run, whatever order the database hands the rows over in.
     """
-    buckets: dict[tuple[str, str, str], list[list[Copy]]] = defaultdict(list)
+    buckets: dict[tuple[str, str], list[list[Copy]]] = defaultdict(list)
     for copy in sorted(listed, key=lambda one: (one.key, one.seconds or 0, one.content_id)):
         for bucket in buckets[copy.key]:
-            if agrees(bucket[0], copy):
+            if agrees(bucket[0], copy) and parsing.same_credit(bucket[0].artist, copy.artist):
                 bucket.append(copy)
                 break
         else:
