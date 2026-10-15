@@ -18,7 +18,6 @@ from . import library
 from . import mcp
 from . import process
 from . import reference
-from .parsing import fold
 from . import review
 from .rules import hms
 from . import slsk
@@ -26,6 +25,60 @@ from . import spotify
 from . import state
 from . import sweep
 from . import tracklist
+from . import traktor
+
+
+def _run(config: config_module.Config, args: argparse.Namespace) -> int:
+    """A tracklist in, files in both collections out: every stage, in order, in one command.
+
+    This is the same code the stage commands run — nothing is decided differently here — so a run needs
+    nobody driving between the steps. Nothing is asked along the way: what the rules would not settle is
+    printed once at the end, and it can be answered in one batch or left alone.
+    """
+    from types import SimpleNamespace
+
+    _stage("run", f"one tracklist, all the way to both collections")
+
+    job = _start(config, args) if args.tracks is not None else _job(config, args)
+    if job is None:
+        if args.tracks is None:
+            print("no run to work on — give --tracks, or a --job to continue", file=sys.stderr)
+        return 1
+
+    # Pinned by id from here on: "the newest unfinished run" is not this run once another one starts.
+    pinned = SimpleNamespace(job=job.id, tracks=None, name=None, retry=True,
+                             no_backup=False, no_traktor=args.no_traktor)
+
+    for retry in (False, True):
+        try:
+            summary = _acquire_pass(config, job, retry=retry)
+        except ACQUIRE_ERRORS as error:
+            print(error, file=sys.stderr)
+            return 1
+        _report(summary, job, len(summary.failed))
+        if not retry:
+            # A second pass costs minutes and takes what the first one left: a peer whose queue was full at
+            # the wrong moment, a search that timed out. Past that, nothing more is worth asking for.
+            if not (summary.failed or summary.unsearched):
+                break
+
+    for stage, handler in (("process", _process), ("import", _import)):
+        code = handler(config, pinned)
+        if code:
+            print(f"stopped at {stage}", file=sys.stderr)
+            return code
+
+    _stage("sweep", "staging")
+    leftovers = sweep.find(config)
+    removed = sweep.clear(sweep.Leftovers(leftovers.partial, ()), log=print)
+    print(f"{removed} interrupted transfer(s) cleared" if removed else "nothing to clear")
+    if leftovers.loose:
+        print(f"{len(leftovers.loose)} file(s) no record points at — music-agent sweep to see them")
+
+    _queue(job)
+    print(f"\nrun {job.id} is in both collections. Traktor wants Check Consistency → Analyze for what it "
+          f"added; rekordbox is done.")
+    return 0
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -41,6 +94,16 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="music-agent", parents=[common],
         description="Acquire, process and import tracks")
     commands = parser.add_subparsers(dest="command", required=True)
+
+    run = commands.add_parser(
+        "run", parents=[common],
+        help="the whole pipeline in one command: acquire, process, import, sweep")
+    run.add_argument("--tracks", default=None, metavar="FILE|URL",
+                     help="the tracklist to start from — a file, or a public Spotify playlist's URL")
+    run.add_argument("--name", default=None, metavar="NAME",
+                     help="what to call the run (default: the tracklist's own name)")
+    run.add_argument("--no-traktor", action="store_true",
+                     help="rekordbox only: leave Traktor's collection alone")
 
     status = commands.add_parser("status", parents=[common],
                                  help="what the current run has done, and what needs you")
@@ -82,9 +145,11 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="convert, place and normalize what was downloaded")
 
     importing = commands.add_parser("import", parents=[common],
-                                    help="add what was tagged to the rekordbox collection")
+                                    help="add what was tagged to the rekordbox collection, then to Traktor's")
     importing.add_argument("--no-backup", action="store_true",
                            help="skip copying the collection first (not recommended)")
+    importing.add_argument("--no-traktor", action="store_true",
+                           help="rekordbox only: leave Traktor's collection alone")
 
     commands.add_parser("retag", parents=[common],
                         help="re-derive the genre on files already placed, replacing what they carry")
@@ -111,13 +176,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _import(config: config_module.Config, args: argparse.Namespace) -> int:
-    """The one stage that has to run with rekordbox closed."""
+    """Both collections: rekordbox first, then Traktor through the project that owns it.
+
+    Every stage before this one has to be run in order, so this is also the stage that ends a run — hence
+    both halves here rather than a separate command to remember.
+    """
     job = _target(config, args, "import")
     if job is None:
         return 1
 
     from pyrekordbox import Rekordbox6Database
 
+    _stage("import", f"rekordbox · run {job.id}")
     try:
         database = Rekordbox6Database()
     except Exception as error:
@@ -133,6 +203,10 @@ def _import(config: config_module.Config, args: argparse.Namespace) -> int:
         database.close()
 
     _report(summary, job, len(summary.failed))
+
+    if not args.no_traktor:
+        _stage("import", "traktor")
+        traktor.sync(config)
     return 0
 
 
@@ -233,10 +307,37 @@ def _target(config: config_module.Config, args: argparse.Namespace, action: str)
 
 
 def _tools(config: config_module.Config) -> process.Tools:
-    """The stage tools, over the collection's own genre vocabulary."""
+    """The stage tools, over the collection's own genre vocabulary.
+
+    The vocabulary is the collection's own names plus the families music-tagger defines, and the mapping onto
+    them is that project's taxonomy — read here rather than kept a second time, so the two cannot drift.
+    """
     shelf = library.open(config)
-    return process.Tools.live(config, vocabulary=genre.vocabulary(shelf.genres(), genre.approved()),
-                              mappings=genre.table())
+    families = genre.families(config.taxonomy)
+    if not families:
+        print(f"no genre taxonomy at {str(config.taxonomy) or '(unset)'} — genres stay blank; point "
+              f"[genres] taxonomy in config.toml at music-tagger's taxonomy.json", file=sys.stderr)
+    return process.Tools.live(config, vocabulary=genre.vocabulary(shelf.genres(), families),
+                              mappings=genre.table(config.taxonomy))
+
+
+# Everything a pass can fail on that is worth one line and a stop: credentials, a port someone else holds,
+# a child that will not answer, a child that stopped answering, an unreadable collection.
+ACQUIRE_ERRORS = (slsk.MissingCredential, slsk.PortBusy, mcp.ServerError, acquire.ServerStuck,
+                  library.Unreadable)
+
+# A pass is resumed this many times when the child dies under it. Everything it did is already in the run, so
+# a restart costs the price of a login; four children in a row dying is a problem a restart will not fix.
+RESTARTS = 3
+
+
+def _stage(name: str, detail: str = "") -> None:
+    """One line saying which stage is running, and on what.
+
+    A run is several stages long and each one used to start silently, so a long run read as if the previous
+    stage were still going. This is the line that says where it is.
+    """
+    print(f"\n── {name}" + (f" · {detail}" if detail else ""))
 
 
 def _report(summary, job: state.Job, failures: int = 0) -> None:
@@ -258,10 +359,12 @@ def _process(config: config_module.Config, args: argparse.Namespace) -> int:
         print(error, file=sys.stderr)
         return 1
 
+    _stage("process", f"run {job.id} · convert, place, normalize, tag")
     summary = process.run(config, job, tools=tools)
     _report(summary, job, len(summary.failed))
     if summary.ungenred:
-        print(f"{len(summary.ungenred)} without a genre from the table — the caller decides those")
+        print(f"{len(summary.ungenred)} without a genre — nothing resolved for them, or the taxonomy "
+              f"has no line for what it found")
     return 0
 
 
@@ -277,6 +380,7 @@ def _retag(config: config_module.Config, args: argparse.Namespace) -> int:
         print(error, file=sys.stderr)
         return 1
 
+    _stage("retag", f"run {job.id} · the genre, re-derived from the files")
     summary = process.retag(job, tools=tools)
     _report(summary, job, len(summary.failed))
     return 0
@@ -333,6 +437,63 @@ def _start(config: config_module.Config, args: argparse.Namespace) -> state.Job 
     return job
 
 
+def _silence(error: Exception) -> str:
+    """What a child that stops answering usually means, when its own log says the login was refused.
+
+    A second Soulseek client on the same account is the usual cause and it is not this program's process: the
+    server keeps one session per account, closes the other one's connection, and every search then goes
+    unanswered while the client itself stays up. A harness's own Soulseek MCP server is the one that does it,
+    and killing it does not settle the question — it is started again on demand.
+    """
+    said = str(error)
+    refused = ("Login failed" in said or "closed connection" in said
+               or "expected login response" in said)
+    if not refused:
+        return ""
+    return ("\n  its own log says the login was refused: another client is using this account — "
+            "an MCP server a harness starts is the usual one, and it has to be disabled for a pass, not killed")
+
+
+def _acquire_pass(config: config_module.Config, job: state.Job, *, retry: bool) -> acquire.Summary:
+    """Resume a pass through a fresh child whenever the child dies under it.
+
+    The child is somebody else's server and it can go down mid-pass — a crash in its own asyncio loop, a
+    killed process, a lost session. Everything it did is already written to the run as it went, so the pass
+    is resumed rather than lost: a new child, the same records, and a line saying so. Only if the child
+    cannot be kept alive at all does this end, and it says that too.
+    """
+    for attempt in range(1, RESTARTS + 2):
+        try:
+            return _one_pass(config, job, retry=retry, attempt=attempt)
+        except (mcp.ServerError, acquire.ServerStuck) as error:
+            if attempt > RESTARTS:
+                raise
+            print(f"the server went down mid-pass ({error}){_silence(error)}; "
+                  f"{RESTARTS + 1 - attempt} more attempt(s)", file=sys.stderr)
+    raise AssertionError("unreachable: the loop either returns or raises")
+
+
+def _one_pass(config: config_module.Config, job: state.Job, *, retry: bool,
+              attempt: int = 1) -> acquire.Summary:
+    """One pass, everything it needs and nothing else: the ports, the server, the records."""
+    # The child logs what each search came to, one line per track — `Search complete: 0 raw
+    # results` was the only thing that knew the network had stopped answering, and it was thrown away.
+    # stderr keeps the pass's own report clean on stdout, and the filter keeps the walls out of stderr.
+    logs = slsk.ChildLog()
+    # The ports first: a client left on them by an earlier run answers the same account, and the pass then
+    # looks like a quiet network instead of a port conflict.
+    slsk.free_ports(config)
+    shelf = library.open(config)
+    _stage("acquire", f"{len(job.records())} tracks · pass {attempt}"
+                      f"{' · retry' if retry else ''}")
+    with mcp.StdioServer(list(config.soulseek_command), env=slsk.environment(config),
+                         on_log=logs) as server:
+        summary = acquire.run(config, job, server, reference.lookup(config),
+                              library=shelf, retry=retry)
+    logs.report()
+    return summary
+
+
 def _acquire(config: config_module.Config, args: argparse.Namespace) -> int:
     if args.tracks is not None:
         job = _start(config, args)
@@ -343,29 +504,19 @@ def _acquire(config: config_module.Config, args: argparse.Namespace) -> int:
         if job is None:
             return 1
 
-    # The child logs what each search came to, one line per track — `Search complete: 0 raw
-    # results` was the only thing that knew the network had stopped answering, and it was thrown away.
-    # stderr keeps the pass's own report clean on stdout, and the filter keeps the walls out of stderr.
-    logs = slsk.ChildLog()
     try:
-        shelf = library.open(config)
-        with mcp.StdioServer(list(config.soulseek_command), env=slsk.environment(config),
-                             on_log=logs) as server:
-            summary = acquire.run(config, job, server, reference.lookup(config),
-                                  library=shelf, retry=args.retry)
-        logs.report()
-    except (slsk.MissingCredential, mcp.ServerError, library.Unreadable) as error:
+        summary = _acquire_pass(config, job, retry=args.retry)
+    except ACQUIRE_ERRORS as error:
         print(error, file=sys.stderr)
         return 1
 
     _report(summary, job, len(summary.failed))
-    if summary.in_review or summary.nothing_usable:
-        print(f"music-agent status --job {job.id} --queue")
+    if summary.dropped:
+        print(f"{len(summary.dropped)} closed — every offer was refused, so nothing will ask again")
     if summary.in_review:
-        print("the ones needing a decision are settled by hand: "
-              "music-agent review --accept IDX [--candidate N]")
-    if summary.unsearched:
-        print("the network stopped answering part-way through — run this again when it is back")
+        print(f"{len(summary.in_review)} need a decision: music-agent review --job {job.id}")
+    if summary.nothing_usable:
+        print(f"music-agent status --job {job.id} --queue")
     return 0
 
 
@@ -496,6 +647,7 @@ def _review(config: config_module.Config, args: argparse.Namespace) -> int:
                     return 1
                 picks = [(picks[0][0], args.candidate)]
             logs = slsk.ChildLog()
+            slsk.free_ports(config)
             server = lambda: mcp.StdioServer(list(config.soulseek_command),      # noqa: E731
                                              env=slsk.environment(config), on_log=logs)
             if len(picks) == 1:
@@ -537,34 +689,22 @@ def _review(config: config_module.Config, args: argparse.Namespace) -> int:
 
 
 def _genres(config: config_module.Config, job: state.Job) -> None:
-    """Tracks the genre table has nothing for, and names proposed as a genre of their own."""
+    """Tracks the taxonomy had nothing for. Reported and counted, never asked about: the vocabulary is
+    music-tagger's, and a name it does not know is a line missing there, not a question for a person."""
     ungenred = [record for record in job.records()
                 if record.status in {state.TAGGED, state.NORMALIZED} and not record.genre]
-
-    if ungenred:
-        print()
-        print(f"{len(ungenred)} waiting on a genre — the table has nothing and the caller decides:")
-        for record in ungenred:
-            print(f"  [{record.idx}] {record.label}")
-        # The choice has to be among the collection's own genres, so print them — and the database is opened
-        # only when there is such a choice to make.
-        try:
-            for name in sorted(library.open(config).genres()):
-                print(f"      {name}")
-        except library.Unreadable as error:
-            print(f"      (the collection could not be read, so its genres are not listed: {error})")
-
-    proposals = genre.proposals(state.ungenred_names(state.all_jobs(config)), mappings=genre.table())
-    if not proposals:
+    if not ungenred:
         return
     print()
-    print(f"{len(proposals)} name{'s' if len(proposals) != 1 else ''} that fitted nothing, on enough "
-          "tracks to become a genre:")
-    for proposal in proposals:
-        print(f"  {proposal.name!r}, on {proposal.tracks} tracks — to accept it, add both lines to "
-              "genres.toml:")
-        print(f'      "{fold(proposal.name)}" = "{proposal.name}"')
-        print(f'      approved = [..., "{proposal.name}"]')
+    print(f"{len(ungenred)} without a genre — nothing resolved for them, or no line in the taxonomy:")
+    for record in ungenred:
+        print(f"  [{record.idx}] {record.label}")
+    counted = state.ungenred_names(state.all_jobs(config))
+    if counted:
+        top = sorted(counted.items(), key=lambda pair: (-pair[1], pair[0]))[:5]
+        print("  names seen on them, most first (add a line under a family in music-tagger's taxonomy):")
+        for name, tracks in top:
+            print(f"      {name!r} · {tracks}")
 
 
 def _status(config: config_module.Config, args: argparse.Namespace) -> int:
@@ -622,6 +762,8 @@ def _sweep(config: config_module.Config, args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     config = config_module.load(getattr(args, "config", None))
+    if args.command == "run":
+        return _run(config, args)
     if args.command == "status":
         return _status(config, args)
     if args.command == "acquire":

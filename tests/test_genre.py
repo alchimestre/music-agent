@@ -1,158 +1,161 @@
-"""Choosing a genre: the most specific mapping wins, and a miss is a blank rather than a guess."""
+"""Choosing a genre from the collection's own vocabulary, mapped through music-tagger's taxonomy."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-
-import pytest
 
 from music_agent import genre
 from music_agent.parsing import fold
 
-VOCABULARY = ["Techno", "House", "Deep House", "Minimal / Deep Tech", "Ambient / Experimental",
-              "Jazz", "Rock", "World", "Pop", "Drum & Bass"]
-
-# `genre.table` folds both sides as it loads, so a mapping passed straight in has to be folded too.
-MAPPINGS = {fold(name): mapped for name, mapped in {
-    "techno": "Techno",
-    "minimal techno": "Minimal / Deep Tech",
-    "dub techno": "Minimal / Deep Tech",
-    "deep house": "Deep House",
-    "house": "House",
-    "ambient": "Ambient / Experimental",
-    "jazz-funk": "Jazz",
-    "psychedelic rock": "Rock",
-    "drum n bass": "Drum & Bass",
-}.items()}
+# A taxonomy small enough to reason about, in the shape music-tagger ships: a family, the names that map
+# onto it, and the finer tiers this module never reads.
+TAXONOMY = {
+    "_design": {"note": "written by music-tagger, not read here"},
+    "groups": [
+        {"tier1": "Techno", "from": ["Techno", "Dub Techno", "Minimal Techno"],
+         "tier2": {"Raw / Deep / Hypnotic": "Techno (Raw / Deep / Hypnotic)"}, "tier3": {}},
+        {"tier1": "House", "from": ["House", "Deep House", "Acid House"],
+         "tier2": {}, "tier3": {}},
+        {"tier1": "Ambient", "from": ["Ambient", "Field Recording", "Cold Drone"],
+         "tier2": {}, "tier3": {}},
+    ],
+}
 
 
-def resolve(*offered: str) -> genre.Choice:
-    return genre.resolve(offered, vocabulary=VOCABULARY, mappings=MAPPINGS)
+def written(tmp_path: Path, document: dict = TAXONOMY) -> Path:
+    path = tmp_path / "taxonomy.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return path
 
 
-def test_a_single_mapping_is_taken():
-    assert resolve("Jazz-Funk").genre == "Jazz"
+def resolved(tmp_path: Path, *offered: str) -> genre.Choice:
+    """Resolve against the written taxonomy, for a collection that holds its families."""
+    path = written(tmp_path)
+    return genre.resolve(offered, vocabulary=genre.families(path), mappings=genre.table(path))
 
 
-def test_case_and_punctuation_do_not_matter():
-    """Both sides are folded, so nobody has to remember how a mapping was written."""
-    assert resolve("jazz funk").genre == "Jazz"
-    assert resolve("JAZZ-FUNK").genre == "Jazz"
+# ── reading the taxonomy ------------------------------------------------------
 
 
-def test_the_most_specific_name_wins():
-    """`Minimal Techno` is not `Techno`, and `Dub Techno` is not either."""
-    assert resolve("Techno", "Minimal Techno").genre == "Minimal / Deep Tech"
-    assert resolve("Minimal Techno", "Dub Techno").genre == "Minimal / Deep Tech"
-    assert resolve("Techno").genre == "Techno"
+def test_the_taxonomy_is_read_from_the_file(tmp_path):
+    assert genre.document(written(tmp_path)) == TAXONOMY
 
 
-def test_between_equally_specific_names_the_first_offered_wins():
-    """The caller's order is its order of trust: Discogs styles ahead of MusicBrainz genres."""
-    assert resolve("House", "Deep House").genre == "Deep House"
-    assert resolve("Deep House", "House").genre == "Deep House"
+def test_no_taxonomy_is_an_empty_document_and_never_an_error(tmp_path):
+    """A machine without music-tagger installed gets blank genres rather than a crash."""
+    assert genre.document(None) == {}
+    assert genre.document("") == {}
+    assert genre.document(tmp_path / "absent.json") == {}
 
 
-def test_a_mapping_to_a_genre_the_library_does_not_have_is_ignored():
-    """The vocabulary is read from the collection at run time, and the table may have drifted from it."""
-    drifted = {"techno": "Techno (Old Name)"}
-    choice = genre.resolve(["Techno"], vocabulary=VOCABULARY, mappings=drifted)
-    assert choice.found is False
+def test_a_taxonomy_that_does_not_parse_is_empty_rather_than_an_error(tmp_path):
+    broken = tmp_path / "broken.json"
+    broken.write_text("{ not json", encoding="utf-8")
+    assert genre.document(broken) == {}
 
 
-def test_nothing_that_fits_is_a_blank_and_not_a_guess():
-    choice = resolve("Krautrock", "Field Recording")
-    assert choice.found is False
-    assert choice.genre == ""
-    assert choice.considered == ("Krautrock", "Field Recording"), \
-        "what was considered travels with the answer, for a human to look at"
+def test_a_json_list_is_not_a_taxonomy(tmp_path):
+    listed = tmp_path / "list.json"
+    listed.write_text("[1, 2, 3]", encoding="utf-8")
+    assert genre.document(listed) == {}
 
 
-def test_the_source_of_the_decision_is_kept():
-    choice = resolve("Techno", "Dub Techno")
-    assert choice.source == "Dub Techno"
-    assert choice.genre == "Minimal / Deep Tech"
+def test_families_are_the_tier1_names_in_the_files_order(tmp_path):
+    assert genre.families(written(tmp_path)) == ["Techno", "House", "Ambient"]
 
 
-def test_an_empty_list_is_a_blank():
-    assert genre.resolve([], vocabulary=VOCABULARY, mappings=MAPPINGS).found is False
+def test_every_from_name_maps_to_its_family_folded(tmp_path):
+    assert genre.table(written(tmp_path)) == {
+        fold("Techno"): "Techno",
+        fold("Dub Techno"): "Techno",
+        fold("Minimal Techno"): "Techno",
+        fold("House"): "House",
+        fold("Deep House"): "House",
+        fold("Acid House"): "House",
+        fold("Ambient"): "Ambient",
+        fold("Field Recording"): "Ambient",
+        fold("Cold Drone"): "Ambient",
+    }
 
 
-def test_specificity_is_words_first_then_length():
-    assert genre.specificity("Dub Techno") > genre.specificity("Techno")
-    assert genre.specificity("Techno") > genre.specificity("Tech")
+def test_a_name_two_groups_claim_goes_to_the_last_of_them(tmp_path):
+    """Nothing stops a taxonomy listing a name twice, and nothing here notices: the later group
+    overwrites the earlier one's answer."""
+    document = {"groups": [
+        {"tier1": "Techno", "from": ["Club"]},
+        {"tier1": "House", "from": ["Club"]},
+    ]}
+    assert genre.table(written(tmp_path, document))[fold("Club")] == "House"
 
 
-def real_vocabulary() -> list[str]:
-    """The collection's own genres, when a collection is here to be read."""
-    from music_agent import library
-
-    try:
-        _, genres = library.read_database()
-    except Exception:                       # no rekordbox here: the test has nothing to check against
-        return []
-    return genres
+# ── what a genre may be -------------------------------------------------------
 
 
-def test_the_shipped_table_loads_and_points_only_at_real_genres():
-    """A mapping that points at a genre the collection does not have would never match, and would say
-    nothing about why."""
-    mappings = genre.table()
-    assert mappings, "genres.toml should carry the mappings"
-
-    vocabulary = real_vocabulary()
-    if not vocabulary:
-        pytest.skip("no collection here to check the table against")
-    allowed = {name.casefold() for name in vocabulary}
-    stray = {name: mapped for name, mapped in mappings.items() if mapped.casefold() not in allowed}
-    assert not stray, f"the table points outside the collection's vocabulary: {stray}"
+def test_the_vocabulary_is_the_collections_names_then_the_families(tmp_path):
+    held = ["Techno", "Deep House"]
+    assert genre.vocabulary(held, genre.families(written(tmp_path))) == [
+        "Techno", "Deep House", "House", "Ambient"]
 
 
-def test_a_table_that_is_not_there_is_empty_rather_than_an_error(tmp_path: Path):
-    assert genre.table(tmp_path / "absent.toml") == {}
+def test_a_family_the_collection_already_holds_is_not_repeated():
+    """Compared folded, so `TECHNO` in the collection is the family `Techno` already."""
+    assert genre.vocabulary(["TECHNO"], ["Techno", "House"]) == ["TECHNO", "House"]
 
 
-# ── growing the vocabulary, which is allowed ---------------------------------
-
-
-def test_approved_names_come_from_the_file(tmp_path):
-    path = tmp_path / "genres.toml"
-    path.write_text('approved = ["Goa Trance"]\n\n[map]\n"x" = "Techno"\n', encoding="utf-8")
-    assert genre.approved(path) == ("Goa Trance",)
-    assert genre.approved(tmp_path / "absent.toml") == ()
-
-
-def test_the_vocabulary_is_the_collections_own_plus_what_is_approved():
-    assert genre.vocabulary(["Techno"], ["Goa Trance"]) == ["Techno", "Goa Trance"]
-    assert genre.vocabulary(["Techno"], ["techno"]) == ["Techno"], "already there, said once"
+def test_the_vocabulary_is_the_collections_own_when_there_are_no_families():
     assert genre.vocabulary(["Techno"]) == ["Techno"]
 
 
-def test_only_an_approved_name_lets_a_genre_out_of_the_vocabulary():
-    """`resolve` refuses a name the collection does not have, so approval is what makes a new one
-    possible at all."""
-    shortcut = {fold("goa trance"): "Goa Trance"}
-    assert genre.resolve(["Goa Trance"], vocabulary=["Techno"], mappings=shortcut).found is False
-    approved = genre.vocabulary(["Techno"], ["Goa Trance"])
-    assert genre.resolve(["Goa Trance"], vocabulary=approved, mappings=shortcut).genre == "Goa Trance"
+# ── choosing ------------------------------------------------------------------
 
 
-def test_proposals_need_enough_tracks_and_come_best_evidenced_first():
-    found = genre.proposals({"Goa Trance": 7, "Krautrock": 4, "Dark Disco": 12}, mappings={})
-    assert [proposal.name for proposal in found] == ["Dark Disco", "Goa Trance"]
-    assert (found[0].name, found[0].tracks) == ("Dark Disco", 12)
+def test_a_name_that_maps_and_is_allowed_resolves(tmp_path):
+    choice = resolved(tmp_path, "Dub Techno")
+    assert (choice.genre, choice.source) == ("Techno", "Dub Techno")
+    assert choice.considered == ("Dub Techno",)
+    assert choice.found is True
 
 
-def test_four_tracks_is_not_yet_a_proposal():
-    assert genre.proposals({"Krautrock": 4}, mappings={}) == []
-    assert genre.proposals({"Goa Trance": 5}, mappings={}) != [], "five is the bar"
+def test_a_mapping_to_a_genre_the_collection_lacks_is_ignored(tmp_path):
+    """The vocabulary is the collection's, and the shipped table may have drifted from it."""
+    choice = genre.resolve(["Dub Techno"], vocabulary=["House"],
+                           mappings={fold("Dub Techno"): "Techno"})
+    assert choice.found is False
+    assert choice.genre == ""
 
 
-def test_a_name_that_already_has_a_mapping_is_never_a_proposal():
-    """It resolved, or it pointed at a genre the collection does not have — and either way the table is
-    where that gets fixed, not a proposal."""
-    assert genre.proposals({"Techno": 9}, mappings={fold("techno"): "Techno"}) == []
+def test_the_most_specific_of_two_matching_names_wins(tmp_path):
+    choice = resolved(tmp_path, "Techno", "Dub Techno")
+    assert (choice.genre, choice.source) == ("Techno", "Dub Techno")
+    assert choice.considered == ("Techno", "Dub Techno")
 
 
-def test_the_threshold_can_be_moved():
-    assert genre.proposals({"Goa Trance": 2}, mappings={}, threshold=2) != []
+def test_between_equally_specific_names_the_earlier_offered_wins(tmp_path):
+    """`Cold Drone` and `Deep House` are both two words and ten characters, so the caller's order of
+    trust decides — Discogs styles ahead of MusicBrainz genres."""
+    assert resolved(tmp_path, "Cold Drone", "Deep House").genre == "Ambient"
+    assert resolved(tmp_path, "Deep House", "Cold Drone").genre == "House"
+
+
+def test_nothing_that_fits_is_a_blank_that_keeps_what_was_considered(tmp_path):
+    choice = resolved(tmp_path, "Krautrock", "Footwork")
+    assert choice.found is False
+    assert choice.genre == ""
+    assert choice.considered == ("Krautrock", "Footwork"), \
+        "what was considered travels with the answer, for a human to look at"
+
+
+def test_an_empty_offer_is_a_blank(tmp_path):
+    path = written(tmp_path)
+    choice = genre.resolve([], vocabulary=genre.families(path), mappings=genre.table(path))
+    assert choice.found is False
+    assert choice.considered == ()
+
+
+def test_specificity_is_words_first():
+    assert genre.specificity("Minimal Techno") > genre.specificity("Techno")
+
+
+def test_specificity_is_length_between_the_same_number_of_words():
+    assert genre.specificity("Minimal Techno") > genre.specificity("Dub Techno")

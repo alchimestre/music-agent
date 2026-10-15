@@ -25,17 +25,29 @@ command = [
 # the child as SLSK_DOWNLOAD_DIR.
 
 # Ceilings handed to the child as SLSK_*. `max_operations` is the socket lock: a search holds it for its whole
-# window and a download start takes it again, so it must clear `max_searches` with a start to spare, and
-# `max_searches` must cover SEARCH_TIMEOUT / search_interval (six at the two-second default).
-# `workers` must not exceed `max_downloads`, or a download start blocks on the transfer ceiling.
+# window and a download start takes it again, so it has to clear `max_searches` with a start to spare.
+# The invariant that bites: `max_searches` must be at least `workers`, because every track in flight may be
+# holding a search, and one queued behind this lock times out at the call deadline rather than waiting. A
+# smaller number here does not slow the pass down, it ends it: four timeouts in a row stop it.
+# `workers` must not exceed `max_downloads` either, or a download start blocks on the transfer ceiling.
 max_downloads  = 20
-max_searches   = 12
-max_operations = 24
+max_searches   = 24
+max_operations = 32
 workers        = 20
 
 # Seconds between two searches. A throttled search and a rare track read the same, so the pace is ours: the
 # one rate measured going silent was 0.9 a second.
-search_interval = 2.0
+search_interval = 1.0
+
+[genres]
+# The vocabulary's mapping table, which lives in music-tagger: its taxonomy maps the names the rest of the
+# world uses onto the families this collection has. Empty or absent means genres stay blank.
+taxonomy = "~/projects/music-tagger/skills/music-tagger/taxonomy.json"
+
+[traktor]
+# Traktor's collection is another project's to write. This is how to run its tool here; a machine without it
+# leaves the collection alone.
+command = ["traktor-nml"]
 
 [credentials]
 # Names only — never the secrets.

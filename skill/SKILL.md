@@ -1,31 +1,39 @@
 ---
 name: music-agent
 description: >
-  Drive the music-agent CLI: turn a tracklist — a file, a folder of downloads, or a public Spotify
-  playlist — into tracks acquired from Soulseek, processed into a rekordbox collection, and imported.
-  Covers the commands in the order a run uses them, the review queue and how to put it to a person, and
-  the one judgement the pipeline leaves to a caller: a genre its table has no mapping for. Use when a
-  tracklist should become files in the collection, when something should end up in rekordbox, and when a
-  run's state, its review queue, or a genre proposal is the question.
+  Drive the music-agent CLI: turn a tracklist — a file, or a public Spotify playlist — into tracks
+  acquired from Soulseek, processed into a rekordbox collection, and imported into Traktor's collection
+  as well. Covers `run`, which does all of it in one command, the stage commands behind it, what each
+  stage prints, and the rare track the queue still asks about. Use when a tracklist should become files
+  in both collections, and when a run's state or its queue is the question.
 metadata:
   requires: "the music-agent CLI on PATH, with the credentials from .env loaded into its environment"
 ---
 
 # The pipeline
 
-These are the commands, in the order a run uses them. Each works on the same **run** without being told
-which — only the import closes a run — so they are typed in sequence rather than orchestrated.
+One command does all of it:
+
+```sh
+set -a; source .env; set +a
+music-agent run --tracks <file|URL>
+```
+
+It acquires, processes, imports into rekordbox, imports into Traktor, and clears staging — in that order,
+printing a line as each stage starts. It asks nothing along the way: what the rules would not settle is
+printed once at the end. **This is the whole job for an ordinary tracklist**, and the rest of this file is
+what it does.
+
+The stage commands are the same code, one stage at a time, for when a stage needs running on its own — after
+a failure, or on a run that was interrupted.
 
 `music-agent` reads `config.toml` beside the package, or `~/.config/music-agent/config.toml` for an installed
 copy, so it works from any directory. The credentials and the two Soulseek ports come from the environment —
 copy `.env.example` to `.env` and fill it in — and every command that reaches the network stops with a
-missing key until they are loaded:
-
-```sh
-set -a; source .env; set +a
-```
+missing key until they are loaded.
 
 ```
+music-agent run --tracks <file|URL>             # all of it, in order, one command (see above)
 music-agent acquire --tracks <file|URL>         # the tracklist, searched and downloaded into staging
 music-agent status --queue                      # what the run has not settled, by why (see 3)
 music-agent review                              # the queue as text; the flags below write a decision
@@ -33,13 +41,16 @@ music-agent process                             # identified, genred, converted,
 music-agent retag                               # re-derive the genre on files already tagged (see 6)
 music-agent reconcile                           # rebuild the records from the files this run made (see 7)
 music-agent status --files                      # what nothing points at, and what points at nothing (see 7)
-music-agent import                              # into rekordbox, which has to be closed first
+music-agent import                              # rekordbox, then Traktor (see 8)
 music-agent dedupe                              # one row per track, dry run; --apply merges (see 10)
 music-agent backfill                            # a row for every file, dry run; --apply adds (see 10)
 music-agent sweep                               # staging's own leftovers, dry run; --apply clears (see 11)
 ```
 
-The vocabulary — run, track, candidate, Ready, Needs you, reference, proposal, and the decision axis
+Every stage prints where it is: a `── stage · what it is working on` line as it starts, one line per track, and
+one summary line at the end. Read those three and the run's position is never in doubt.
+
+The vocabulary — run, track, candidate, Ready, Unchecked length, Needs you, reference, and the decision axis
 (accepted / skipped / not found) — is defined in `GLOSSARY.md` beside the package. Read it once; every
 command's output is written in it, and a report in those words is the difference between a status and a guess.
 
@@ -64,10 +75,10 @@ There is no separate command for a playlist and no file to write first: the URL 
 read once, by the same reader. To read back what a run holds, its own list is `tracks.jsonl` beside its
 `events.jsonl`, under `<state root>/<run id>/`.
 
-What is worth saying before a run starts: a playlist of well-covered classics will land **in review**, not in
-staging. MusicBrainz holds many edits of each — `Dreams` comes back as 21 recordings from 126 s to 301 s — and
-the ±1 s rule then refuses to pick a reference. That is the rule working, not the playlist failing; a list of
-newer or rarer tracks does better.
+What is worth saying before a run starts: a playlist of well-covered classics will come back with a **reference
+that is hard to pin** — MusicBrainz holds many edits of each, `Dreams` among them as 21 recordings from 126 s
+to 301 s — and an offer whose length matches none of them is refused rather than guessed at. That is the rule
+working, not the playlist failing; a list of newer or rarer tracks does better.
 
 **Done when** the run holds every track that was asked for, in the order it was asked for.
 
@@ -85,33 +96,29 @@ A pass shows its position while it runs: one line rewritten in place at a termin
 it settles when the output is captured — which is the form a harness reads back. Each line carries the count,
 what the track came to, and its label.
 
-Searching is paced: one search every `search_interval` seconds in `config.toml`, two by default. The network
-answers searches at a rate and says nothing when it stops answering at all, so the pace is kept on this side,
-and the child's own log comes out on stderr with an `slsk: ` prefix — including `Search complete: 0 raw
-results` for a search that found nothing, which is the difference between a rare track and a network that has
-gone quiet.
+Searching is paced: one search every `search_interval` seconds in `config.toml`, one by default, which is the
+rate the network has answered at. The child's own log comes out on stderr with an `slsk: ` prefix.
 
-The pace is what a pass costs: its tracks × that interval in searching alone, about eight minutes for 250
-tracks and half an hour for a thousand, whichever way the rest of it is configured. The pass runs on after the
-last search until the tracks still rotating through candidates are done — a few minutes more, unless a peer
-declares a long queue.
+Two failures stop a pass rather than being waited out, and both say so in one line:
 
-Fifty searches in a row with nothing back is that second case, and the pass stops rather than spending the
-rest of its allowance on silence: it reports those tracks as **not searched** and leaves them exactly as they
-were, because nothing should be written about a search that never happened. Run it again when the network is
-back.
+- **Nothing coming back.** Fifty searches in a row with no results means the network has stopped answering, and
+  the pass stops rather than spending its allowance on silence. Tracks it never reached are reported as **not
+  searched** and left exactly as they were. The threshold is high on purpose: once the findable tracks are
+  taken, what is left to search is the rare ones, and their searches come back empty one after another without
+  anything being wrong.
+- **Nothing answering.** Four searches in a row that time out instead of returning means the child itself has
+  stopped talking. The pass stops, the run stays open, and a fresh pass picks it up.
 
-An empty search has more than one cause, and this measures the one on the network's side before a pass is
-spent:
+The other silent failure is the ports. `SLSK_LISTEN_PORT` and `SLSK_OBFUSCATED_PORT` (20000 and 20001 by
+default) must be free: a Soulseek client left on them by an earlier run is logged in on the same account, so
+the server hands it every search reply and the pass sees an empty network. A pass frees them itself, stopping
+that client and saying which, so nothing has to be arranged by hand. Anything *else* holding a port is named
+and the pass stops rather than killing a stranger's process.
 
-```sh
-python skill/probe-search.py      # with .env loaded
-```
-
-It asks for one track the network cannot be short of and prints the child's own account of the search. A query
-that broad finding nothing is the network, never the tracklist — but a listening port a peer cannot reach also
-comes back empty, so check `SLSK_LISTEN_PORT` in `.env` names a port forwarded on the router before blaming
-the network. The probe needs the ports to itself, so run it when no pass is running.
+That is why a harness's own Soulseek MCP server has to be **disabled or unmounted**, not just stopped, while a
+pass runs: it is on the same account, the server keeps one session per account, and it is started again the
+moment it is killed. The symptom is a child that logs in and then answers no searches at all — its own log says
+`Login failed: expected login response from server but got : None`, or `server closed connection`.
 
 **Done when** every track in the run is accounted for: settled, in review, or already held.
 
@@ -121,37 +128,41 @@ the network. The probe needs the ports to itself, so run it when no pass is runn
 music-agent status --queue
 ```
 
+The queue is nearly always empty, and that is the design: the pass settles a track whenever it can, including
+when a length nobody could check leaves one offer standing. **One review pass is the most anyone is asked
+for.** What is left in the queue is the case nothing can read: a file whose own name names no track.
+
 It splits what the run has not settled by **why**, and keeping those apart is the point of the split — four
 different facts, which printed as one number would state something about the network as if it were something
 about the tracks:
 
 | heading | what it means | what it calls for |
 |---|---|---|
-| *N need a decision* | the length cannot be checked, so nothing but a person can settle it | a person picks one, or skips the track |
+| *N need a decision* | the file's name says nothing, so nothing but a person can settle it | a person picks one, or skips the track |
 | *N not searched* | no pass has reached the track | the pass: `acquire --retry` |
 | *N the network offered nothing* | a search answered and held no files | another pass, when the network is answering |
 | *N with nothing usable* | files were offered and every one was ruled out | another pass, later |
-| *N settled by hand* | the decision axis — nothing will ask about them again | nothing |
+| *N settled by hand* | the decision axis, plus the tracks a pass closed itself | nothing |
 
-A track the rule **can** settle is in none of them: the pass owes that one, not a person.
+A track the rule **can** settle is in none of them, and a track whose every offer was refused is closed by the
+pass that refused them: nothing is left to try, so it is dropped rather than left as a row waiting for somebody
+to say so.
 
-**The queue asks one question**, and it is worth knowing what it does *not* ask: is a file acceptable when its
-length cannot be checked against the reference? Everything else the rule decides alone and never shows — a file
-below the 192 kbps floor, a different version, a different artist, a length outside the one-second window. So
-the only two reasons a candidate carries are *the peer reports no length* and *no reference length for this
-track*. If a track reads *nothing usable* it means every file offered was ruled out, not that nobody answered.
+**The length decides between offers, never whether to take one.** A reference length that resolved is what
+tells two offers apart — the ±1 s window — and it is compared only where there is something to compare it to.
+With one offer and no length to check, the file is taken on its name; with several, the ladder decides: lossless
+before lossy, then the higher bitrate, then the shorter queue. That is a real trade — an arbitrary tie can pick
+the wrong file — and the pass logs which candidate it took and why, so the choice is visible afterwards rather
+than silent.
+
+Everything else the rule decides alone and never shows: a file below the 192 kbps floor, a different version, a
+different artist, a length outside the window, a preview clip.
 
 **An upgrade is never a question at all.** When the track is one the collection holds as a lossy copy
-(`replaces`), nothing about it reaches the queue: a lossy offer cannot improve on the copy that plays, and an
-offer nobody can check buys nothing when the alternative already works. An upgrade in a queue is a bug — say
-so rather than working it.
+(`replaces`), nothing about it reaches the queue: a lossy offer cannot improve on the copy that plays. An
+upgrade in a queue is a bug — say so rather than working it.
 
-The queue is text, so a caller can put it to a person as a menu: one item per track, its candidates in the
-printed order with peer, format and reason, and *skip* / *not found* beside them — and ask about the tracks in
-one batch rather than one message each. A peer that reported a bitrate but no length is not in the list: the
-length is computed from the file's size and that bitrate, so the rule decides it either way.
-
-The answer is written by the CLI, never by hand, and always against a candidate's number:
+A batch is one login, not one per track:
 
 ```
 music-agent review --accept 12 --candidate 2   # fetch that one and hand the record to process
@@ -162,23 +173,15 @@ music-agent review --not-found 12              # no usable copy exists; nothing 
 
 `--accept` is the only one that needs the network: it fetches that file from that peer, and takes a file
 already in staging from there rather than fetching it twice. A batch goes through **one** server and as many
-transfers as `workers` allows, and reports per track what came through and what was refused — one login, not
-one per track, which is the difference between minutes and an hour on a queue of thirty. `--skip` and
-`--not-found` are writes and nothing else, and every later pass leaves a decided track alone. Close with a
-line per decision: the track, the file, what was written.
-
-Taking a candidate whose length cannot be verified is exactly the call the rule refuses to make unattended, so
-it belongs to a person; from then on the record is an ordinary downloaded one and `process` carries on.
+transfers as `workers` allows, and reports per track what came through and what was refused. `--skip` and
+`--not-found` are writes and nothing else, and every later pass leaves a decided track alone.
 
 ```
 music-agent acquire --retry
 ```
 
 is the later pass: it re-searches what failed, preferring peers with free slots, and moves on to candidates it
-has not already asked. Reach for it when the queue holds tracks whose candidates all failed.
-
-**Done when** every track is settled, held, or in the queue with a reason a person has seen, and every track
-that was answered has been answered through `review`.
+has not already asked. `run` does this second pass itself, and then a third never.
 
 ## 4. Process
 
@@ -201,33 +204,28 @@ skips what the collection already has cannot answer without one.
 
 **Done when** the run reports its counts and every track it processed is tagged.
 
-## 5. Decide the genres the table missed
+## 5. Genres
 
-This is the judgement the pipeline leaves to a caller, and the only one. Where `genres.toml` has no mapping, a
-track is tagged with no genre and named in `status --queue` under *waiting on a genre*, with the genres the
-collection already uses printed beside it.
+The genre vocabulary is not this repo's, and deliberately so: it is **music-tagger's**, whose taxonomy names
+the collection's families (tier 1) and the names the rest of the world uses for each. `[genres] taxonomy` in
+`config.toml` points at that file. With no taxonomy configured, no track gets a genre and one line says so.
 
-For each such track, choose one of those genres, or leave it blank deliberately — a genre outside the
-collection's vocabulary is the library owner's decision, never the caller's. Add the mapping to
-`genres.toml`, and make the target one of the library's **own top-level families**: the collection's genres are
-a typology (the first tier in the Genre field, the lower tiers in My Tag columns), so a target that is not a
-family names something the collection no longer holds, and the resolver ignores it rather than trusting it.
+A name with no line in the taxonomy is left **blank** — never invented, because a genre cannot be undone after
+an import — and `status --queue` lists the tracks that came out ungenred with the names seen on them, most
+frequent first. That list is a report, not a question: nothing is asked, and which family a name belongs to is
+the library owner's call. The same list is what a missing taxonomy leaves behind, with nothing under it.
 
-```toml
-"krautrock" = "Rock & Psych"
-```
+The second and third tiers of the typology — the My Tag columns, Smartlists, the classification pass — are
+music-tagger's work and not this pipeline's. Reach for that project when the tiers need filling; this stage
+only writes the family into the Genre field.
 
-A name that *five* tracks have carried with nothing to map it to is a **proposal** rather than a decision:
-`status --queue` prints each one with the two lines that would accept it. Put the proposal to the library owner
-and let them answer; accepting is theirs, and it is the one thing that makes a new genre possible at all.
+**Done when** every processed track either carries a family or is named in that list.
 
-**Done when** every track named under *waiting on a genre* has a mapping now, or was left blank on purpose.
-
-## 6. Re-tag when the table has moved
+## 6. Re-tag when the vocabulary has moved
 
 A run never replaces a genre: a file already carrying one keeps it, because a genre cannot be undone after
-import. So a mapping added above, or a vocabulary that changes under you, reaches only the tracks processed
-*after* it — the ones already tagged keep what they carry, and the import turns that into rows.
+import. So a line added to music-tagger's taxonomy, or a vocabulary that changes under you, reaches only the
+tracks processed *after* it.
 
 ```
 music-agent retag
@@ -238,8 +236,11 @@ already placed, resolves the genre again, and writes over whatever the file hold
 old name comes **off**, because a name the collection has not got is a row nothing will absorb. Say what it
 did — how many it re-tagged and how many it left blank.
 
-**Done when** the files carry what the table resolves today, and whatever came out blank is named under
-*waiting on a genre*.
+Retag after an import leaves the collection's rows holding the genre the file had *then*. Reload the tags for
+those tracks in rekordbox, or accept the difference.
+
+**Done when** the files carry what the taxonomy resolves today, and whatever came out blank is in the ungenred
+list.
 
 ## 7. Rebuild the records when they disagree with the files
 
@@ -269,30 +270,42 @@ beside the copy the collection kept), and the rows whose file has gone. Nothing 
 cannot tell which copy of a stem the collection's row is meant to keep, and guessing is the mistake that
 report exists to prevent — so say what is there and let the owner say what should go.
 
-## 8. Import
-
-Rekordbox has to be closed — pyrekordbox refuses to commit while it runs, and the command says so rather than
-writing half a run. It copies the collection aside first, commits the whole run once, and closes the run.
+## 8. Import — both collections
 
 ```
 music-agent import
 ```
 
-**Done when** the run reports how many it imported, and `music-agent status` shows the run finished.
+Two writes, in order, from one command.
 
-## 9. Traktor's collection
+**Rekordbox first.** It has to be closed — pyrekordbox refuses to commit while the app runs, and the command
+says so rather than writing half a run. A `rekordbox-mcp` left running by a harness is stopped first, since it
+is a second writer on the same file. The collection is copied aside, the whole run commits once, and the run is
+closed.
 
-Not this pipeline's job, and deliberately not its code: Traktor has no database and no API, its collection is
-one XML file, and the tool that reconciles it is a separate project. It reads this pipeline's job state as
-data — `replaces` → `local_path` is how it learns which file replaced which — so after a run that upgraded
-anything, say the one thing there is to say and run it with Traktor closed.
+**Traktor's collection second**, through the project that owns it — `[traktor] command` in `config.toml`, or
+`traktor-nml` on `PATH`. `traktor-nml` owns `collection.nml`, its own configuration and its own rules; it reads
+this run's records as data, where `replaces` → `local_path` is how it learns which file replaced which. The
+import runs its `plan`, applies it if it would change anything, and reports both. A machine without that tool
+prints one line and nothing else happens — **`--no-traktor`** skips it deliberately.
 
-It repoints the entries that describe a file the pipeline replaced, adds what the collection has never seen,
-and reports the rest without removing anything. Two things it reports are for a person rather than the tool: a
-file whose name carries a byte-order mark has to be renamed, and what the run leaves unanalyzed is what
-**Check Consistency → Analyze** in Traktor is for.
+Neither Traktor step is this pipeline's code, and nothing about Traktor is decided here.
 
-**Done when** its report reads `0 repointed · 0 added` for what is on disk, and the analyze pass has been run.
+**Done when** rekordbox reports how many it imported, `music-agent status` shows the run finished, and the
+Traktor tool's report reads `0 to repoint · 0 to add · 0 to purge`.
+
+## 9. Traktor's own last step
+
+Traktor's collection carries no analysis of its own: the entries this import added have no grid and no
+waveform until the app analyzes them. That is the one thing left to a person, and it needs the app:
+
+1. Open Traktor.
+2. Run **Check Consistency → Analyze**.
+
+Two things its report can say that are for a person rather than the tool: a file whose name carries a
+byte-order mark has to be renamed, and a track with no file was left for `traktor-nml purge`.
+
+**Done when** the analysis pass has run for the tracks the import added.
 
 ## 10. One row per track, and a row for every file
 
@@ -318,7 +331,7 @@ says (its tags, falling back to its name — never invented), and a file whose t
 under another file is refused with that row named, because that one is a duplicate for `dedupe` instead.
 
 What `dedupe` leaves behind in Traktor is a dead entry for the file that left the lanes, so say the second half
-of it: run the Traktor tool's purge (see 9).
+of it: run `traktor-nml purge` (the tool this pipeline calls in section 8).
 
 **Done when** a second `dedupe` and a second `backfill` both find nothing, and `music-agent status --files`
 says nothing was left behind.
@@ -334,13 +347,19 @@ A pass that is interrupted, or refused a placement, leaves a shell behind: an in
 which is incomplete by definition, and a converted file no record points at any more. Neither is anything a
 later pass will pick up, and both read as work in progress to whoever opens the folder.
 
-Nothing a record names is in the list — that file is a track a pass still owes — and no lane is touched. The
-collection is not read or written.
+`run` clears the interrupted transfers itself and lists the rest rather than deleting them, because a loose
+file could still be wanted. Nothing a record names is in the list — that file is a track a pass still owes —
+and no lane is touched. The collection is not read or written.
 
 **Done when** a second `sweep` finds nothing.
 
 ## Longer runs
 
-A run of dozens of tracks takes a while and prints a great deal. Hand it to a subagent where the harness has
-one, so the pipeline's own output stays out of the conversation, and have it report the counts, the review
-queue with its reasons, and any genre proposal back.
+A run of dozens of tracks prints a great deal, and `run` is one command from start to finish, so a session
+does not have to sit through it. Hand it to a subagent where the harness has one, and have it report back the
+stage counts, the review queue with its reasons, and the ungenred list — three things, and nothing that needs
+a conversation.
+
+Stop a tool you started. A harness's Soulseek MCP server holds the ports this pipeline needs, and a
+`rekordbox-mcp` holds the database the import writes; both are restarted by the harness when it wants them, so
+stopping them needs nobody's permission.

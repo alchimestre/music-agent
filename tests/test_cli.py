@@ -10,9 +10,10 @@ import pytest
 
 from audio_files import aiff
 
+from music_agent import acquire
 from music_agent import cli as cli_module
 from music_agent import config as config_module
-from music_agent import library, spotify, state
+from music_agent import library, spotify, state, sweep
 from music_agent.cli import main
 from music_agent.mcp import StdioServer
 from music_agent.rules import Candidate
@@ -173,8 +174,9 @@ def test_a_named_run_can_be_selected(tmp_path, capsys):
     assert job.id in capsys.readouterr().out
 
 
-def test_a_name_on_enough_tracks_is_put_to_the_user(tmp_path, capsys):
-    """The proposal is the user's to accept or decline, so it has to say what accepting looks like."""
+def test_a_name_that_fitted_nothing_is_counted(tmp_path, capsys):
+    """No longer a proposal to accept: the vocabulary lives in music-tagger's taxonomy, so the report says
+    what was seen and where the line would go — and asks nothing."""
     config_path = make_config(tmp_path)
     config = config_module.load(config_path)
     job = state.create(config, "run")
@@ -186,13 +188,14 @@ def test_a_name_on_enough_tracks_is_put_to_the_user(tmp_path, capsys):
     assert main(["--config", str(config_path), "status", "--queue"]) == 0
 
     out = capsys.readouterr().out
-    assert "waiting on a genre" in out
-    assert "Goa Trance" in out
-    assert "5 tracks" in out
-    assert '"goa trance" = "Goa Trance"' in out, "the line to paste, not just the name"
+    assert "without a genre" in out
+    assert "Goa Trance" in out and "5" in out
+    assert "taxonomy" in out, "where the line would go, since that is not this repo's file"
 
 
-def test_a_name_on_too_few_tracks_is_not_put_to_the_user(tmp_path, capsys):
+def test_a_name_seen_on_a_few_tracks_is_reported_too(tmp_path, capsys):
+    """The counting has no threshold any more: a name seen twice is as worth knowing about as one seen
+    five times, and neither is a question for a person."""
     config_path = make_config(tmp_path)
     config = config_module.load(config_path)
     job = state.create(config, "run")
@@ -203,26 +206,24 @@ def test_a_name_on_too_few_tracks_is_not_put_to_the_user(tmp_path, capsys):
 
     main(["--config", str(config_path), "status", "--queue"])
 
-    assert "to become a genre" not in capsys.readouterr().out
+    assert "Goa Trance" in capsys.readouterr().out
 
 
-def test_the_genres_to_choose_between_are_printed_with_the_tracks_that_need_one(tmp_path, capsys,
-                                                                               monkeypatch):
-    """The genre is the one judgement left to the caller, and it has to be made among the collection's own
-    genres — so they are printed beside the tracks waiting for one."""
+def test_the_genre_report_does_not_open_the_collection(tmp_path, capsys, monkeypatch):
+    """The vocabulary moved to music-tagger, so nothing here reads the collection for a genre: the report is
+    the tracks that got none, and the names seen on them."""
+    def explode(config):
+        raise AssertionError("status opened the collection for a genre")
+
+    monkeypatch.setattr(library, "open", explode)
     config_path = make_config(tmp_path)
-    config = config_module.load(config_path)
-    job = state.create(config, "run")
+    job = state.create(config_module.load(config_path), "run")
     job.write_records([state.Record(idx=1, artist="Kiasmos", title="Blurred",
                                     status=state.TAGGED, genre="")])
-    shelf = library.Library([], ["Techno", "Jazz"])
-    monkeypatch.setattr(library, "open", lambda config: shelf)
 
     main(["--config", str(config_path), "status", "--queue"])
 
-    out = capsys.readouterr().out
-    assert "waiting on a genre" in out
-    assert "Jazz" in out and "Techno" in out, "the vocabulary the choice is made from"
+    assert "without a genre" in capsys.readouterr().out
 
 
 def test_the_collection_is_not_opened_when_no_track_needs_a_genre(tmp_path, monkeypatch):
@@ -423,6 +424,69 @@ def test_accepting_carries_the_record_on_to_process(tmp_path, capsys, monkeypatc
     assert record.local_path == str(landed)
     assert "accepted" in out
     assert "music-agent process" in out, "the next command is the useful thing to say"
+
+
+def test_run_does_every_stage_in_order_and_asks_nothing(tmp_path, capsys, monkeypatch):
+    """2026-10-14: one command from a tracklist to both collections.
+
+    The stages are pinned to the run by id rather than by "the newest", which is what the stages themselves
+    have to fall back on — the wrong run is how a batch of decisions once landed on an older one.
+    """
+    config_path = make_paths_config(tmp_path)
+    tracklist = tmp_path / "list.txt"
+    tracklist.write_text("Kiasmos - Blurred\nNtogn - Ame No Hi\n", encoding="utf-8")
+
+    happened: list[str] = []
+    seen: list[str] = []
+
+    def pass_off(config, job, *, retry):
+        happened.append(f"acquire:{int(retry)}")
+        seen.append(job.id)
+        return acquire.Summary(in_review=[1], failed=[] if retry else [2])
+
+    def stage(name):
+        def run(config, args):
+            happened.append(name)
+            seen.append(args.job)
+            return 0
+        return run
+
+    monkeypatch.setattr(cli_module, "_acquire_pass", pass_off)
+    monkeypatch.setattr(cli_module, "_process", stage("process"))
+    monkeypatch.setattr(cli_module, "_import", stage("import"))
+    # Lists, not tuples: the run passes on a slice of what `find` returned, and it must not care.
+    monkeypatch.setattr(cli_module.sweep, "find", lambda config: sweep.Leftovers([], []))
+
+    # Called the way `main` calls it without `--config`: the namespace it gets has no `config` attribute at
+    # all, and every stage below takes the config as an argument of its own.
+    args = Namespace(job=None, tracks=str(tracklist), name=None, no_traktor=False)
+    assert cli_module._run(config_module.load(config_path), args) == 0
+
+    out = capsys.readouterr().out
+    # Two acquire passes — the second only because the first left something to retry — then process, then
+    # import. The sweep is the fourth stage and writes nothing here.
+    assert happened == ["acquire:0", "acquire:1", "process", "import"], happened
+    assert seen[0] == seen[-1], "every stage worked on the one run the tracklist started"
+    assert "── run ·" in out, "the run says what it is doing before it starts"
+    assert "── sweep" in out, "and each stage of its own says so"
+    assert "in both collections" in out
+
+
+def test_run_stops_at_the_stage_that_failed(tmp_path, capsys, monkeypatch):
+    """A stage that fails stops the run where it is: the later stages would write against a run that is not
+    ready for them."""
+    config_path = make_paths_config(tmp_path)
+    tracklist = tmp_path / "list.txt"
+    tracklist.write_text("Kiasmos - Blurred\n", encoding="utf-8")
+
+    monkeypatch.setattr(cli_module, "_acquire_pass",
+                        lambda config, job, *, retry: acquire.Summary())
+    monkeypatch.setattr(cli_module, "_process", lambda config, args: 1)
+    monkeypatch.setattr(cli_module, "_import",
+                        lambda config, args: pytest.fail("import ran after process failed"))
+
+    assert main(["--config", str(config_path), "run", "--tracks", str(tracklist)]) == 1
+    assert "stopped at process" in capsys.readouterr().err
 
 
 def test_a_playlist_url_starts_the_run_a_file_would_have(tmp_path, monkeypatch):
