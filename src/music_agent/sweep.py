@@ -26,6 +26,13 @@ class Leftovers:
     partial: tuple[Path, ...]
     loose: tuple[Path, ...]
 
+    def __post_init__(self) -> None:
+        # Whatever the caller has to hand — a slice of another Leftovers, a list from a directory listing —
+        # is kept as a tuple, because `all` concatenates the two and a list next to a tuple is a TypeError
+        # waiting for the one caller who guessed differently.
+        object.__setattr__(self, "partial", tuple(self.partial))
+        object.__setattr__(self, "loose", tuple(self.loose))
+
     @property
     def all(self) -> tuple[Path, ...]:
         return self.partial + self.loose

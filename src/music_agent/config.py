@@ -52,6 +52,9 @@ class Config:
     acoustid_key_env: str
     discogs_token_env: str
     soulseek_command: tuple[str, ...]
+    # Traktor's collection belongs to another project, which owns it and its own config. This is how to run
+    # that tool here; empty means the machine has no Traktor tool and its half is skipped.
+    traktor_command: tuple[str, ...]
     soulseek_listen_port: int
     soulseek_obfuscated_port: int
     # How much of the acquisition runs at once. The first three are the child's own ceilings, handed to it
@@ -65,6 +68,9 @@ class Config:
     search_interval: float
     slsk_username_env: str
     slsk_password_env: str
+    # The genre vocabulary's mapping table, which lives in music-tagger: its taxonomy maps the names the
+    # rest of the world uses onto the families this collection has. Empty means no genres are assigned.
+    taxonomy: Path
     convert_tool: Path
     normalize_tool: Path
 
@@ -111,6 +117,8 @@ DEFAULTS = Config(
     ),
     slsk_username_env="SLSK_USERNAME",
     slsk_password_env="SLSK_PASSWORD",
+    # The tool's own name on PATH. A machine that runs it out of a checkout sets this to its own argv.
+    traktor_command=("traktor-nml",),
     # aioslsk's defaults are 60000/60001, which a second Soulseek client may already hold.
     soulseek_listen_port=20000,
     soulseek_obfuscated_port=20001,
@@ -126,9 +134,12 @@ DEFAULTS = Config(
     workers=20,
     # A pass once fired 330 searches in six minutes — eight at a time — and every search after the first
     # seconds was answered with nothing, silently; that is 0.9 a second, and it is the ceiling to stay under.
-    # Two seconds is 0.5 a second, and 30 searches started at that pace were all answered. The threshold is a
-    # guess, which is why it is a knob.
-    search_interval=2.0,
+    # One second is 1.0 a second, and the searches that came back did so in a second or two. The threshold is
+    # a guess, which is why it is a knob.
+    search_interval=1.0,
+    # No taxonomy by default: a machine without music-tagger installed assigns no genres and prints one line
+    # saying so, rather than inventing a vocabulary of its own.
+    taxonomy=Path(""),
     # Both ship with the project: `tools/convert_to_aiff.sh` and the normalizer submodule under `vendor/`.
     convert_tool=HERE / "tools/convert_to_aiff.sh",
     normalize_tool=HERE / "vendor/loudness_normalizer/loudness_normalizer.py",
@@ -160,6 +171,8 @@ def load(path: Path | None = None) -> Config:
     loudness = data.get("loudness", {})
     credentials = data.get("credentials", {})
     soulseek = data.get("soulseek", {})
+    traktor = data.get("traktor", {})
+    genres = data.get("genres", {})
     tools = data.get("tools", {})
 
     return Config(
@@ -175,6 +188,7 @@ def load(path: Path | None = None) -> Config:
         acoustid_key_env=credentials.get("acoustid_key", DEFAULTS.acoustid_key_env),
         discogs_token_env=credentials.get("discogs_token", DEFAULTS.discogs_token_env),
         soulseek_command=tuple(soulseek.get("command", DEFAULTS.soulseek_command)),
+        traktor_command=tuple(traktor.get("command", DEFAULTS.traktor_command)),
         **_listening_ports(),
         max_downloads=int(soulseek.get("max_downloads", DEFAULTS.max_downloads)),
         max_searches=int(soulseek.get("max_searches", DEFAULTS.max_searches)),
@@ -183,6 +197,7 @@ def load(path: Path | None = None) -> Config:
         search_interval=float(soulseek.get("search_interval", DEFAULTS.search_interval)),
         slsk_username_env=credentials.get("soulseek_user", DEFAULTS.slsk_username_env),
         slsk_password_env=credentials.get("soulseek_password", DEFAULTS.slsk_password_env),
+        taxonomy=(_resolve(genres["taxonomy"], base) if genres.get("taxonomy") else DEFAULTS.taxonomy),
         convert_tool=_resolve(tools.get("convert", str(DEFAULTS.convert_tool)), base),
         normalize_tool=_resolve(tools.get("normalize", str(DEFAULTS.normalize_tool)), base),
     )

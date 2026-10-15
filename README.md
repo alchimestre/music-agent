@@ -1,8 +1,9 @@
 # music-agent
 
-Turns a tracklist into tracks in a rekordbox collection: finds the files on Soulseek, keeps lossless ones as
-AIFF, normalizes loudness to −14 LUFS / −1 dBTP, writes tags from MusicBrainz and AcoustID, and imports the
-result. Every step is written under `.state/jobs/<run>/`, so a run can be read back, resumed, or repeated.
+Turns a tracklist into tracks in a rekordbox collection and Traktor's: finds the files on Soulseek, keeps
+lossless ones as AIFF, normalizes loudness to −14 LUFS / −1 dBTP, writes tags from MusicBrainz and AcoustID, and
+imports the result into both. Every step is written under `.state/jobs/<run>/`, so a run can be read back,
+resumed, or repeated.
 
 ## Install
 
@@ -27,7 +28,14 @@ set -a; source .env; set +a
 
 ## Commands
 
-In the order a run uses them. Each works on the same run.
+One command does the whole job:
+
+```
+music-agent run --tracks <file|URL>             # acquire, process, import both collections, sweep
+```
+
+It prints a line as each stage starts and asks nothing along the way. The stages are also commands of their own,
+for a run that was interrupted or a stage that failed.
 
 ```
 music-agent acquire --tracks <file|URL>         # the tracklist, searched and downloaded into staging
@@ -37,9 +45,10 @@ music-agent process                             # identify, genre, convert, norm
 music-agent retag                               # re-derive the genre on files already tagged
 music-agent reconcile                           # rebuild the records from the files this run made
 music-agent status --files                      # files nothing points at, and rows whose file is gone
-music-agent import                              # into rekordbox, which must be closed first
+music-agent import                              # rekordbox, then Traktor; rekordbox must be closed
 music-agent dedupe                              # one row per track; dry run, --apply merges
 music-agent backfill                            # a row for every file that has none; dry run, --apply adds
+music-agent sweep                               # staging's leftover .part files; --apply clears
 ```
 
 `acquire` and `process` take hours on a long tracklist. `review`, `status`, `import`, `dedupe` and `backfill`
@@ -55,9 +64,14 @@ until `--apply`:
 
 Neither verb identifies or re-tags anything.
 
-Traktor's collection is a separate project: [`traktor-nml`](https://github.com/alchimestre/traktor-nml) reads
-this project's job state as data to learn which file replaced which. Run `traktor-nml apply` after an
-acquisition, with Traktor closed, and `traktor-nml purge` for the entries `dedupe` leaves behind.
+Traktor's collection belongs to a separate project: [`traktor-nml`](https://github.com/alchimestre/traktor-nml)
+owns `collection.nml`, its own configuration and its own rules, and reads this project's job state as data to
+learn which file replaced which. `import` runs its `plan` and `apply` when it is installed, so a run ends in
+both collections; `[traktor] command` in `config.toml` says how to run it, and `--no-traktor` skips it. The
+entries `dedupe` leaves behind are still `traktor-nml purge`'s to remove.
+
+The genre vocabulary is not this project's either: it is music-tagger's taxonomy, and `[genres] taxonomy`
+points at it. Genres outside it are left blank rather than invented.
 
 ## The review queue
 
@@ -66,7 +80,9 @@ music-agent review
 ```
 
 Prints the tracks the rule will not settle: each track, its candidates numbered, and why each was left alone.
-The queue is text, so a caller can put it to a person as a menu and write the answer back:
+It is nearly always empty — the pass takes a file whose length cannot be checked rather than asking — and what
+is left is a file whose own name names no track. The queue is text, so a caller can put it to a person as a menu
+and write the answer back:
 
 ```sh
 music-agent review --accept 12 --candidate 2   # fetch that one and hand the record to process
@@ -91,8 +107,9 @@ empty.
 
 ## Driving it from an agent
 
-`skill/SKILL.md` ships with the project: the commands in the order a run uses them, the review queue and how to
-put it to a person, and the one judgement the pipeline leaves to a caller. Point a harness at it.
+`skill/SKILL.md` ships with the project: `run` first, then the stage commands behind it, what each stage prints,
+and the rare track the queue still asks about. Point a harness at it. A pass frees the two Soulseek ports itself,
+stopping a client left on them, so a harness's own Soulseek server does not have to be arranged around.
 
 ## Tests
 

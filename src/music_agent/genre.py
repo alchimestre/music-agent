@@ -1,39 +1,27 @@
-"""Choosing a genre from the library's own vocabulary.
+"""Choosing a genre from the collection's own vocabulary.
 
-A curated table in `genres.toml` maps other people's genre names onto the library's, which is read from the
-collection at run time because it exists nowhere else — only 27 of 1627 files carry a genre tag. The most
-specific match wins, and when nothing fits the genre is **left blank** for a human rather than invented,
-because a genre cannot be undone after import.
+Two things have to meet: the genre names the collection actually holds, read from the library at run time
+because they exist nowhere else, and a mapping from everybody else's names onto those. The mapping is
+music-tagger's taxonomy — the same table that project classifies the collection with — so it is read from
+there rather than kept a second time here. The most specific name wins, and when nothing fits, the genre is
+left blank rather than invented, because a genre cannot be undone after an import.
+
+Nothing here is put to a person: a name that fits nothing is counted and printed, and that is the end of it.
 """
 
 from __future__ import annotations
 
-import tomllib
-from collections.abc import Mapping, Sequence
+import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Mapping, Sequence
 
 from .parsing import fold
-
-# Beside the code rather than beside a particular config file: the mappings are data this project ships.
-DEFAULT_TABLE_PATH = Path(__file__).resolve().parents[2] / "genres.toml"
-
-# A name that fits nothing is counted, and at five tracks it is put to the user to accept or decline rather
-# than staying blank for ever. The pipeline never mints a genre itself.
-PROPOSAL_THRESHOLD = 5
-
-
-@dataclass(frozen=True)
-class Proposal:
-    """A name that fitted nothing on enough tracks to be worth becoming a genre."""
-
-    name: str
-    tracks: int
 
 
 @dataclass(frozen=True)
 class Choice:
-    """What the table made of what was offered, and whether it made anything of it at all."""
+    """What the vocabulary made of what was offered, and whether it made anything of it at all."""
 
     genre: str = ""
     source: str = ""
@@ -49,47 +37,52 @@ def specificity(style: str) -> tuple[int, int]:
     return (len(fold(style).split()), len(style))
 
 
-def _document(path: Path | None) -> dict:
-    source = Path(path) if path is not None else DEFAULT_TABLE_PATH
+def document(path: str | Path | None) -> dict:
+    """The taxonomy, or nothing when there is none to read. A missing file is not an error: a machine
+    without music-tagger installed simply gets blank genres."""
+    if not path:
+        return {}
+    source = Path(path).expanduser()
     if not source.is_file():
         return {}
-    with source.open("rb") as handle:
-        return tomllib.load(handle)
+    try:
+        loaded = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
 
 
-def table(path: Path | None = None) -> dict[str, str]:
-    """The mappings, folded on both sides so nothing has to remember how they were written."""
-    return {fold(name): mapped for name, mapped in (_document(path).get("map") or {}).items()}
+def families(path: str | Path | None = None) -> list[str]:
+    """The genre families themselves, in the taxonomy's own order."""
+    return [
+        tier1
+        for tier1 in (str(group.get("tier1") or "").strip()
+                      for group in document(path).get("groups") or [])
+        if tier1
+    ]
 
 
-def approved(path: Path | None = None) -> tuple[str, ...]:
-    """Genre names the collection is allowed to gain, which the database does not have yet.
+def table(path: str | Path | None = None) -> dict[str, str]:
+    """Every name the taxonomy maps onto a family, folded on both sides as it loads."""
+    mappings: dict[str, str] = {}
+    for group in document(path).get("groups") or []:
+        family = str(group.get("tier1") or "").strip()
+        if not family:
+            continue
+        for name in group.get("from") or []:
+            if str(name).strip():
+                mappings[fold(str(name))] = family
+    return mappings
 
-    `resolve` refuses to hand out a name the collection does not have, so an approved name is the
-    collection being told it may have this one.
+
+def vocabulary(held: Sequence[str], family_names: Sequence[str] = ()) -> list[str]:
+    """What a genre may be: the collection's own names, plus the families it does not have yet.
+
+    The collection's own names come first because they are what its files and its screen already say.
     """
-    return tuple(str(name) for name in (_document(path).get("approved") or ()))
-
-
-def vocabulary(held: Sequence[str], approved_names: Sequence[str] = ()) -> list[str]:
-    """What a genre may be: the collection's own names, plus the ones approved for it."""
     known = list(held)
     folded = {fold(name) for name in known}
-    return known + [name for name in approved_names if fold(name) not in folded]
-
-
-def proposals(counted: Mapping[str, int], *, mappings: Mapping[str, str],
-              threshold: int = PROPOSAL_THRESHOLD) -> list[Proposal]:
-    """The names worth putting to the user, the best-evidenced first.
-
-    A name that already has a mapping is not a proposal: it resolved, or it pointed somewhere the
-    collection does not have, and either way the table is where that gets fixed.
-    """
-    return [
-        Proposal(name, tracks)
-        for name, tracks in sorted(counted.items(), key=lambda pair: (-pair[1], pair[0]))
-        if tracks >= threshold and fold(name) not in mappings
-    ]
+    return known + [name for name in family_names if fold(name) not in folded]
 
 
 def resolve(offered: Sequence[str], *, vocabulary: Sequence[str],
