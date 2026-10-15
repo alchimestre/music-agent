@@ -69,8 +69,8 @@ class Config:
     slsk_username_env: str
     slsk_password_env: str
     # The genre vocabulary's mapping table, which lives in music-tagger: its taxonomy maps the names the
-    # rest of the world uses onto the families this collection has. Empty means no genres are assigned.
-    taxonomy: Path
+    # rest of the world uses onto the families this collection has. Unset means no genres are assigned.
+    taxonomy: Path | None
     convert_tool: Path
     normalize_tool: Path
 
@@ -139,7 +139,7 @@ DEFAULTS = Config(
     search_interval=1.0,
     # No taxonomy by default: a machine without music-tagger installed assigns no genres and prints one line
     # saying so, rather than inventing a vocabulary of its own.
-    taxonomy=Path(""),
+    taxonomy=None,
     # Both ship with the project: `tools/convert_to_aiff.sh` and the normalizer submodule under `vendor/`.
     convert_tool=HERE / "tools/convert_to_aiff.sh",
     normalize_tool=HERE / "vendor/loudness_normalizer/loudness_normalizer.py",
