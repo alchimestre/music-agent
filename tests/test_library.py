@@ -54,6 +54,16 @@ def test_a_track_the_collection_does_not_hold_is_not_found(shelf):
     assert shelf.held("Someone", "Else", 300) is None
 
 
+def test_one_collaboration_written_two_ways_is_held_once():
+    """The files disagree about the credit, so the match rides on the title and the length, with the credit
+    checked by name beside them — otherwise the same track is acquired a second time."""
+    shelf = library.Library(rows=[held("Altinbas x Cirkle", "Time in Motion", 350, "/L/a.aiff")], genres=[])
+    assert shelf.held("Altinbas & Cirkle", "Time in Motion", 350) is not None
+    assert shelf.held("Altinbas, Cirkle", "Time in Motion", 350) is not None
+    assert shelf.held("Phara", "Time in Motion", 350) is None
+    assert shelf.held("Altinbas & Cirkle", "Time in Motion", 353) is None
+
+
 def test_an_unknown_length_never_counts_as_held(shelf):
     """Nothing to compare, so the answer is no: a search costs less than a wrong skip."""
     assert shelf.held("Unknown", "No length", None) is None

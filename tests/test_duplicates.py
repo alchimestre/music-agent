@@ -86,6 +86,34 @@ def test_two_mixes_of_one_title_are_two_tracks():
     assert duplicates.find([original, remix]) == []
 
 
+def test_one_collaboration_written_two_ways_is_one_track():
+    """`A x B` on one file and `A & B` on the other: the files disagree about the credit, and a key that
+    spelled the credit out cannot see that these are the same track."""
+    one = copy(1, "Altinbas x Cirkle - Time in Motion.aiff", artist="Altinbas x Cirkle",
+               title="Time in Motion", seconds=350)
+    other = copy(2, "Altinbas, Cirkle - Time in Motion.aiff", artist="Altinbas & Cirkle",
+                 title="Time in Motion", seconds=350)
+    [merged] = duplicates.find([one, other])
+    assert merged.keep is one
+    assert merged.drops == [other]
+
+
+def test_a_pair_named_as_one_credit_is_the_same_track_as_its_members():
+    """`Dettmann | Klock` against `Marcel Dettmann & Ben Klock` — two taggers naming the same two people."""
+    pair = copy(1, "Dettmann _ Klock - Phantom Studies.aiff", artist="Dettmann | Klock",
+                title="Phantom Studies", seconds=350)
+    members = copy(2, "Marcel Dettmann, Ben Klock - Phantom Studies.aiff",
+                   artist="Marcel Dettmann & Ben Klock", title="Phantom Studies", seconds=350)
+    [merged] = duplicates.find([pair, members])
+    assert merged.keep is pair
+
+
+def test_two_credits_that_name_different_people_are_two_tracks():
+    """Everything else agrees, so the credit is the only thing left to tell them apart by."""
+    assert duplicates.find([copy(1, "a.aiff", artist="Altinbas"),
+                            copy(2, "b.aiff", artist="Phara")]) == []
+
+
 def test_a_row_with_no_length_still_pairs_with_one_that_has_it():
     """rekordbox measures what it holds, so this is rare — and a row with no length is the one case name
     matching has to serve."""

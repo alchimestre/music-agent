@@ -95,6 +95,38 @@ def credits(text: str) -> list[str]:
     return found
 
 
+def _credit_words(parts: list[str]) -> frozenset[str]:
+    """Every word of every name in a credit, folded."""
+    return frozenset(word for part in parts for word in fold(part).split() if word)
+
+
+def same_credit(one: str, other: str) -> bool:
+    """Whether two credits name the same people, one of them possibly naming fewer.
+
+    Built on `credits`, so the separators are the ones the splitter already knows: `A x B`, `A & B`, `A, B`
+    and `A feat. B` are one collaboration written four ways, and the files themselves disagree about which,
+    which is how one track arrives twice.
+
+    This is never asked on its own. It is asked beside a title and a length that already agree, and the
+    length is what decides — two different recordings of one title do not land within a second of each
+    other. Two shapes are allowed once that holds: the same people, or the lead artist alone against the
+    full credit (`Rødhåd` against `Rødhåd & Vril`), and a pair's own name against its members written out
+    (`Dettmann | Klock` against `Marcel Dettmann & Ben Klock`).
+
+    A credit naming fewer people is only credible when the other names more than one, or the solo artist
+    `X` would be the same person as `Malcolm X`. An empty credit matches only another empty one: a track
+    that names nobody cannot be evidence that somebody else's track is held.
+    """
+    left, right = credits(one), credits(other)
+    left_words, right_words = _credit_words(left), _credit_words(right)
+    if not left_words or not right_words:
+        return left_words == right_words
+    if left_words == right_words:
+        return True
+    shorter, longer = ((left, right) if len(left_words) < len(right_words) else (right, left))
+    return _credit_words(shorter) <= _credit_words(longer) and len(longer) > 1
+
+
 def primary_artist(text: str) -> str:
     """The first artist credited — the one the credit line leads with."""
     found = credits(text)

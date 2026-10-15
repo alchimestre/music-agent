@@ -107,7 +107,9 @@ def candidates(config: Config, rows: list[Copy]) -> list[Candidate]:
 
         mine = Copy(content_id=0, path=path, artist=artist, title=parsing.bare_title(title),
                     mix=parsing.extract_mix(title), seconds=seconds)
-        clash = next((row for row in rows if row.key == mine.key and agrees(row, mine)), None)
+        clash = next((row for row in rows
+                      if row.key == mine.key and agrees(row, mine)
+                      and parsing.same_credit(row.artist, mine.artist)), None)
         if clash is not None:
             candidate.held_by = clash.path
             candidate.why = f"the collection already holds this track, under {clash.path.name}"
