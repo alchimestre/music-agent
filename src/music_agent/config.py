@@ -124,12 +124,12 @@ DEFAULTS = Config(
     soulseek_obfuscated_port=20001,
     # Twenty transfers at a time, not one: the server's defaults are 3 transfers, 4 searches and *one*
     # operation — the socket lock, which a search holds for its whole window and a download start takes
-    # again. So `max_operations` must clear `max_searches` with a start to spare, and `max_searches` must
-    # cover SEARCH_TIMEOUT / search_interval (six at the two-second default), or a faster pace queues up
-    # behind the ceiling instead of going out.
+    # again. So `max_operations` must clear `max_searches` with a start to spare, and `max_searches` must be
+    # at least `workers`, or a search queued behind the lock reaches the call deadline instead of waiting.
+    # A number under `workers` does not slow the pass down; it ends it, on four timeouts in a row.
     max_downloads=20,
-    max_searches=12,
-    max_operations=24,
+    max_searches=24,
+    max_operations=32,
     # Never above `max_downloads`, or a download start blocks on the transfer ceiling.
     workers=20,
     # A pass once fired 330 searches in six minutes — eight at a time — and every search after the first

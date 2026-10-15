@@ -458,15 +458,22 @@ def _acquire_pass(config: config_module.Config, job: state.Job, *, retry: bool) 
     """Resume a pass through a fresh child whenever the child dies under it.
 
     The child is somebody else's server and it can go down mid-pass — a crash in its own asyncio loop, a
-    killed process, a lost session. Everything it did is already written to the run as it went, so the pass
-    is resumed rather than lost: a new child, the same records, and a line saying so. Only if the child
-    cannot be kept alive at all does this end, and it says that too.
+    killed process, calls that stop returning. Everything it did is already written to the run as it went,
+    so the pass is resumed rather than lost: a new child, the same records, and a line saying so.
+
+    A session the server has taken away is not that, and it is not the child's fault either: the account
+    had another client on it, and the next child loses the session in exactly the same way. The first loss
+    is worth one fresh child, which costs a call and settles whether the account is contended; the second
+    ends it with what to do about it, instead of four attempts' worth of deadlines to learn nothing.
     """
+    lost = 0
     for attempt in range(1, RESTARTS + 2):
         try:
             return _one_pass(config, job, retry=retry, attempt=attempt)
         except (mcp.ServerError, acquire.ServerStuck) as error:
-            if attempt > RESTARTS:
+            if isinstance(error, acquire.ServerStuck) and error.lost_session:
+                lost += 1
+            if attempt > RESTARTS or lost > 1:
                 raise
             print(f"the server went down mid-pass ({error}){_silence(error)}; "
                   f"{RESTARTS + 1 - attempt} more attempt(s)", file=sys.stderr)
@@ -489,7 +496,7 @@ def _one_pass(config: config_module.Config, job: state.Job, *, retry: bool,
     with mcp.StdioServer(list(config.soulseek_command), env=slsk.environment(config),
                          on_log=logs) as server:
         summary = acquire.run(config, job, server, reference.lookup(config),
-                              library=shelf, retry=retry)
+                              library=shelf, retry=retry, child=logs)
     logs.report()
     return summary
 

@@ -155,3 +155,20 @@ def test_the_line_that_says_the_network_went_quiet_survives_the_filter():
         "slsk: INFO:aioslsk.network.network:Search complete: 0 raw results",
         "slsk:     an indented line that is not a traceback",
     ]
+
+
+def test_the_child_saying_it_has_no_session_is_counted_rather_than_repeated():
+    """It says this once per search and there can be a thousand of them; the count is what the pass needs,
+    and the line on its own says nothing a person can do anything about."""
+    said = []
+    logs = slsk.ChildLog(log=said.append)
+
+    for _ in range(3):
+        logs("WARNING:aioslsk.search.manager:not returning search results : no valid session was set")
+
+    assert logs.lost_session == 3
+    assert said == []
+
+    logs.report()
+    assert len(said) == 1
+    assert "session" in said[0]
