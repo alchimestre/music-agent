@@ -51,6 +51,7 @@ class Label(Enum):
     """What would happen to a candidate if it were left alone."""
 
     READY = "Ready"
+    UNCHECKED = "Unchecked length"
     NEEDS_YOU = "Needs you"
     REJECTED = "Rejected"
 
@@ -214,14 +215,15 @@ def classify(candidate: Candidate, request: Request) -> Verdict:
                            "nothing to check it against, and the copy held already plays")
 
     if candidate.duration is None or request.ref_duration is None:
-        # Nothing can judge the length, so the queue's one question is what is left — but only for a file
-        # that is this track at all. What the name says needs no reference length to read.
+        # Nothing can check the length, so the file stands on its name alone and is taken rather than asked
+        # about: one offer is accepted as it is, and several are settled by the ladder. The length keeps its
+        # job where it can do it — telling offers apart when the reference is known.
         named = _judged_by_name(candidate, request)
         if named is not None:
             return named
         if candidate.duration is None:
-            return Verdict(candidate, Label.NEEDS_YOU, "the peer reports no length")
-        return Verdict(candidate, Label.NEEDS_YOU, "no reference length for this track")
+            return Verdict(candidate, Label.UNCHECKED, "the peer reports no length")
+        return Verdict(candidate, Label.UNCHECKED, "no reference length for this track")
 
     offset = candidate.duration - request.ref_duration
     if abs(offset) > DURATION_WINDOW:
@@ -252,24 +254,32 @@ def ready(track: Track) -> list[Verdict]:
     return [v for v in track.verdicts if v.label is Label.READY]
 
 
+def takeable(track: Track) -> list[Verdict]:
+    """The candidates the system takes unattended: a checked one, and one whose length nobody could check."""
+    return [v for v in track.verdicts if v.label in (Label.READY, Label.UNCHECKED)]
+
+
 def taken(track: Track) -> bool:
-    """Whether the system settles this track itself, picking between Ready candidates by the ladder."""
-    return bool(ready(track))
+    """Whether the system settles this track itself, picking between the takeable candidates by the ladder."""
+    return bool(takeable(track))
 
 
 def rank(candidate: Candidate) -> tuple[int, int, int]:
-    """The ladder when several candidates are Ready: lossless, then the higher bitrate, then the shorter
+    """The ladder when several candidates are takeable: lossless, then the higher bitrate, then the shorter
     queue."""
     return (0 if candidate.lossless else 1, -(candidate.bitrate or 0), candidate.queue or 0)
 
 
 def pick(track: Track) -> Verdict | None:
-    """The candidate the system takes on its own, or None when nothing is Ready.
+    """The candidate the system takes on its own, or None when nothing is takeable.
 
-    The ladder is blind to everything but lossless, bitrate and queue depth, so a tie goes to the first as
+    A length checked against the reference outranks one that could not be checked at all; below that the
+    ladder is blind to everything but lossless, bitrate and queue depth, so a tie goes to the first as
     offered. The choice is logged, and that log is what makes an arbitrary tie visible afterwards.
     """
-    return min(ready(track), key=lambda v: rank(v.candidate), default=None)
+    return min(takeable(track),
+               key=lambda v: (0 if v.label is Label.READY else 1, rank(v.candidate)),
+               default=None)
 
 
 def in_review(track: Track) -> bool:

@@ -10,7 +10,8 @@ something the track has already become.
 | label | what it means |
 |---|---|
 | Ready | agrees with the reference, and would be taken without asking. A track with any Ready candidate is settled by the system, which picks between several by a fixed ladder, so it never reaches review |
-| Needs you | the length cannot be checked against the reference: the peer reported none, or the track has no reference length at all. Only for a track the collection does not already hold (see Upgrade) |
+| Unchecked length | nothing could check the length — the peer reported none, or the track has no reference length at all. Also taken rather than asked about: one offer stands on its own name, and several go to the ladder like any other. Only for a track the collection does not already hold (see Upgrade) |
+| Needs you | what is left for a person: the file's own name names no track, so nothing can be read off it at all |
 | Rejected | ruled out: not a format this project takes, a preview, a length outside the window, quality below the floor, not the version or the track that was asked for; on an upgrade, lossy or unverifiable. A rejected candidate is never shown |
 
 ## Decision
@@ -30,8 +31,8 @@ not searched again.
 
 ## Review queue
 
-The tracks that need a decision: those where no candidate is Ready. When several are Ready the system picks one
-by its own ladder and logs the choice, so a tie never appears here.
+The tracks that need a decision: those with a candidate labelled *Needs you*, which is a file whose own name
+names no track. Everything else the system settles itself.
 
 A track the system cannot offer a candidate for at all is not in the queue either. The three ways that happens
 are kept apart, because they are three facts about three different things:
@@ -42,13 +43,15 @@ are kept apart, because they are three facts about three different things:
 | the network offered nothing | a search answered and held no files |
 | nothing usable | files were offered and every one was ruled out |
 
-So the queue asks one question only: is a file acceptable when its length cannot be checked? A file below the
-floor, a different version, a different artist, a length outside the window are ruled out and never shown. A
-length is the only piece of evidence that cannot be read off the candidate, and it is the only thing a person
-is asked about.
+A track whose every offer was refused is closed by the pass that refused them — *settled by hand* in the queue's
+own words, with a note saying so — because there is nothing left to try.
 
-It asks it only about a track the collection does not already hold: an upgrade is optional, so nothing about
-one is put to a person.
+The length decides between offers, never whether to take one. Where it cannot check anything, one offer is taken
+on its name and several go to the ladder (lossless, then bitrate, then queue depth). That is a real trade: an
+arbitrary tie can take the wrong file, and the pass logs which it took.
+
+Nothing about an upgrade is ever put to a person: an upgrade is optional, so a lossy or uncheckable offer buys
+nothing against a copy that already plays.
 
 ## Reference
 

@@ -61,16 +61,21 @@ def test_a_rejected_candidate_is_never_shown():
     assert [v.candidate for v in visible(track)] == []
 
 
-def test_a_peer_that_reports_no_length_needs_a_human():
+def test_a_peer_that_reports_no_length_is_taken_on_its_name():
+    """2026-10-14: a length nobody reported is no longer a question. The file stands on its name, and the
+    ladder settles a track with several offers."""
     assert verdict_for("Artist - Title (Original Mix).flac", REQUEST,
-                       duration=None) is Label.NEEDS_YOU
+                       duration=None) is Label.UNCHECKED
 
 
-def test_a_track_with_no_reference_length_can_never_be_settled():
-    """The length is resolved from MusicBrainz, and a track with none is review-only."""
+def test_a_track_with_no_reference_length_is_still_settled():
+    """No reference means no length to check, not a question: the offer is taken as it stands."""
     unresolved = Request(artist="Kraftwerk", title="Neonlicht", ref_duration=None)
+    single = candidate("Kraftwerk - Neonlicht (Original Mix).flac", duration=300)
     assert verdict_for("Kraftwerk - Neonlicht (Original Mix).flac", unresolved,
-                       duration=300) is Label.NEEDS_YOU
+                       duration=300) is Label.UNCHECKED
+    assert in_review(Track(unresolved, [single])) is False
+    assert taken(Track(unresolved, [single])) is True
 
 
 def test_a_file_that_names_another_track_is_not_even_asked_about():
@@ -330,11 +335,13 @@ def test_a_lossless_upgrade_that_matches_is_still_taken():
     assert classify(better, an_upgrade()).label is Label.READY
 
 
-def test_a_track_that_is_not_held_still_asks_about_an_uncheckable_file():
-    """The queue's remaining question: a file that may be the only copy, on a track nothing else can settle."""
+def test_a_file_whose_length_cannot_be_checked_is_still_taken():
+    """2026-10-14: the queue's remaining question is gone. One offer with no length to check is taken as it
+    stands — the length still tells offers apart where the reference resolved, which is where it works."""
     unknown = candidate("Artist - Title (Original Mix).flac", duration=None)
-    assert classify(unknown, REQUEST).label is Label.NEEDS_YOU
-    assert in_review(Track(REQUEST, [unknown])) is True
+    assert classify(unknown, REQUEST).label is Label.UNCHECKED
+    assert in_review(Track(REQUEST, [unknown])) is False
+    assert taken(Track(REQUEST, [unknown])) is True
 
 
 def test_two_mixes_of_one_title_are_two_different_tracks():
@@ -381,16 +388,39 @@ def test_a_lone_ready_candidate_settles_the_track():
 
 # -- what belongs in review ------------------------------------------------
 
-def test_no_ready_candidate_puts_a_track_in_review():
-    """The fixture's Altinbas case: four copies, none of them takeable unattended."""
+def test_one_offer_with_an_uncheckable_length_is_taken():
+    """A reject on one candidate and an unverifiable length on another: the second is taken, not asked
+    about. There is nobody else it could be, and the length has nothing to check it against."""
     track = Track(REQUEST, [
         candidate("Artist - Title (Original Mix).aiff", duration=304),          # outside the window
-        candidate("Artist - Title.wav", duration=None),                          # unverifiable
+        candidate("Artist - Title.wav", duration=None),                          # uncheckable
         candidate("Artist - Title (Kayla Painter Remix).flac", duration=300),    # wrong mix
     ])
-    assert in_review(track) is True
+    assert taken(track) is True
+    assert in_review(track) is False
+    assert pick(track).candidate.path.endswith(".wav")
+
+
+def test_a_file_whose_filename_names_no_track_is_still_reviewed():
+    """What the queue is left for: a file that could be taken, whose own name says nothing about what it is.
+    Nothing can be read off it, so somebody has to look."""
+    nameless = candidate("Artist - .mp3", duration=300)
+    track = Track(REQUEST, [nameless])
+    assert classify(nameless, REQUEST).label is Label.NEEDS_YOU
     assert taken(track) is False
+    assert in_review(track) is True
     assert pick(track) is None
+
+
+def test_a_track_whose_every_offer_is_ruled_out_is_not_in_review():
+    """A rejected candidate is never shown, so a track with nothing left is reported rather than queued."""
+    track = Track(REQUEST, [
+        candidate("Artist - Title (Original Mix).aiff", duration=304),          # outside the window
+        candidate("Artist - Title (Kayla Painter Remix).flac", duration=290),    # wrong mix
+    ])
+    assert taken(track) is False
+    assert in_review(track) is False
+    assert nothing_usable(track) is True
 
 
 def test_a_settled_track_never_reaches_review():
@@ -447,10 +477,14 @@ def test_the_grilled_fixture_still_settles_and_queues_the_same_way():
         assert nothing_usable(ported) == (fixture_track in reference.nothing_usable()), request.title
 
 
-def test_the_fixture_still_settles_and_queues_the_same_three_and_two():
-    """The reference's summary, as a literal: if the rules drift, this is where it shows."""
+def test_the_fixture_still_settles_and_queues_the_same_four_and_none():
+    """The reference's summary, as a literal: if the rules drift, this is where it shows.
+
+    Four of the five settle themselves. The state this replaces put two of them in the queue, which is the
+    cost the fixture was paying for asking about a length nobody could check.
+    """
     reference = _reference()
     summary = reference.summary()
-    assert summary.startswith("2 in review")
-    assert "2 settled automatically" in summary
+    assert summary.startswith("0 in review")
+    assert "4 settled automatically" in summary
     assert "1 with nothing usable" in summary

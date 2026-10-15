@@ -25,10 +25,11 @@ def a_settled_track(idx: int = 1) -> state.Record:
 
 
 def a_track_needing_you(idx: int = 2) -> state.Record:
-    """An unverifiable length, so it cannot be settled alone."""
+    """A filename that names no track at all, which is what the queue is left for: nothing about the file
+    can be read, so somebody has to look at it."""
     return state.Record(idx=idx, artist="Ntogn", title="Mines", duration_s=528,
-                        candidates=[Candidate(user="mole", path=r"M\Ntogn - Mines.aiff",
-                                              duration=None)])
+                        candidates=[Candidate(user="mole", path=r"M\Ntogn - .aiff",
+                                              duration=528)])
 
 
 def test_a_new_run_writes_its_files(tmp_path):
@@ -49,7 +50,7 @@ def test_records_round_trip(tmp_path):
     assert [r.idx for r in read_back] == [1, 2]
     assert read_back[0].artist == "Kiasmos"
     assert read_back[1].candidates[0].user == "mole"
-    assert read_back[1].candidates[0].duration is None
+    assert read_back[1].candidates[0].duration == 528
 
 
 def test_a_record_computes_its_own_verdicts(tmp_path):

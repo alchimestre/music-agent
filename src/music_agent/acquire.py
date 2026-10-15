@@ -23,36 +23,44 @@ from .rules import Candidate
 
 # The child sleeps exactly this long after a query goes out, so this is how long a peer has to answer at
 # all. The server sorts and truncates results, so a small cap discards good candidates before we see them.
-SEARCH_TIMEOUT = 12
-CALL_TIMEOUT = 15.0
+SEARCH_TIMEOUT = 10
+CALL_TIMEOUT = 8.0
 MAX_RESULTS = 60
 
-# Candidates attempted per track, per pass.
-MAX_CANDIDATES = 10
+# Candidates attempted per track, per pass. Enough to work past a peer or two who never opens the
+# connection, and no more: each one costs its own budget below.
+MAX_CANDIDATES = 6
+
+# Search calls in a row that timed out instead of answering. One costs a full deadline to learn nothing; a
+# run of them is a child that has stopped talking, and the pass stops rather than spending twenty more.
+STUCK_AFTER = 4
 
 # A connection that never transferred a byte is rotated after this long. A peer either opens the connection
 # quickly or it is not going to.
-CONNECT_BUDGET = 30.0
+CONNECT_BUDGET = 12.0
 
 # A peer that declared a queue is behaving normally rather than failing, so it gets a budget worth waiting
-# for; a transfer that has started and stopped moving bytes is dead whatever the server says. The pass waits
-# out the last candidate of a track while everything else is done, so these are what the tail of a pass is
-# made of: five minutes each across ten candidates is fifty minutes for one track.
-QUEUE_BUDGET = 180.0
-STALL_BUDGET = 120.0
+# for; a transfer that has started and stopped moving bytes is dead whatever the server says.
+QUEUE_BUDGET = 45.0
+STALL_BUDGET = 45.0
 
 # A finished transfer whose file has not appeared is the `.part` rename, which is quick. Past this, the
 # file is not coming.
-FINISHED_GRACE = 15.0
+FINISHED_GRACE = 5.0
 
 # How often a transfer in flight is asked about. The server asks for thirty seconds between polls; that is
 # its own conservatism, and asking costs it a dictionary read. The number matters twice: every budget above
 # is decided *on a poll*, so this is the resolution they are kept to, and it is how long a file that has
 # already landed goes unnoticed, holding its worker.
-POLL_INTERVAL = 10.0
+POLL_INTERVAL = 3.0
 
 # Statuses after which the server will never change its mind.
 _OVER = frozenset({"failed", "cancelled", "not_found", "session_expired"})
+
+
+class ServerStuck(RuntimeError):
+    """The child stopped answering — searches timed out in a row, so the pass stopped asking rather than
+    spending a deadline each time to learn nothing."""
 
 
 class Move(Enum):
@@ -174,6 +182,7 @@ class Summary:
     nothing_usable: list[int] = field(default_factory=list)
     failed: list[int] = field(default_factory=list)
     unsearched: list[int] = field(default_factory=list)   # the network stopped answering
+    dropped: list[int] = field(default_factory=list)      # every candidate refused, nothing left to try
 
     def report(self) -> str:
         parts = [
@@ -187,6 +196,8 @@ class Summary:
             parts.append(f"{len(self.already_downloaded)} already downloaded")
         if self.decided:
             parts.append(f"{len(self.decided)} settled by hand")
+        if self.dropped:
+            parts.append(f"{len(self.dropped)} dropped — every offer was refused")
         if self.failed:
             parts.append(f"{len(self.failed)} to retry")
         if self.unsearched:
@@ -195,6 +206,12 @@ class Summary:
 
 
 # This many empty searches in a row is a network that has stopped answering, not a run of rare tracks.
+#
+# Fifty, and it was lowered to fifteen for a day: on a 305-track techno playlist the pass stopped twice at
+# fifteen and left 184 tracks unsearched, because once the findable tracks are taken the ones still to search
+# are exactly the rare ones and their searches answer nothing one after another. Two hundred searches had run
+# and 179 of them had offered candidates, so the network was answering perfectly well. A streak this long is
+# the cheap signal to trust; a shorter one is the tail of a playlist.
 QUIET_AFTER = 50
 
 
@@ -204,22 +221,38 @@ class QuietNetwork:
 
     *In a row*: one hit anywhere means the network is answering, so it resets. The event is what the loop
     watches — a thread that sees it stops starting work rather than spending a search to find out.
+
+    A search that times out instead of answering counts separately: an empty answer is the network, and no
+    answer at all is the child. A run of those stops the pass as well, because every one of them costs a
+    full deadline to learn nothing.
     """
 
     limit: int = QUIET_AFTER
+    stuck_after: int = STUCK_AFTER
     stopped: threading.Event = field(default_factory=threading.Event)
 
     def __post_init__(self) -> None:
         self._lock = threading.Lock()
         self._run = 0
         self._trip = 0
+        self._fails = 0
+        self._hung = 0
 
     def observe(self, found: int) -> None:
         """One search's raw result count, as the child reports it."""
         with self._lock:
             self._run = 0 if found else self._run + 1
+            self._fails = 0
             if self.limit and self._run >= self.limit and not self.stopped.is_set():
                 self._trip = self._run
+                self.stopped.set()
+
+    def failed(self) -> None:
+        """One search that never answered."""
+        with self._lock:
+            self._fails += 1
+            if self.stuck_after and self._fails >= self.stuck_after and not self.stopped.is_set():
+                self._hung = self._fails
                 self.stopped.set()
 
     @property
@@ -232,6 +265,12 @@ class QuietNetwork:
         """How long the run of empty searches was when the pass gave up on the network."""
         with self._lock:
             return self._trip
+
+    @property
+    def hung(self) -> int:
+        """How many calls in a row timed out, when that is what stopped the pass. Zero means it did not."""
+        with self._lock:
+            return self._hung
 
 
 class Pacer:
@@ -363,6 +402,32 @@ def record_taken(
         job.append_event("upgrade_downloaded", idx=record.idx, replaces=upgrade.path, path=local_path)
 
 
+def drop_exhausted(job: state.Job, log=print) -> list[int]:
+    """Close every track whose every candidate was tried and refused.
+
+    Nothing is left to try, so the track is settled rather than left in the queue: a pass that ended with a
+    peer's queue full is worth another pass, and a track with one untried candidate is left alone. A track a
+    hand settled, or one no pass has reached, is never touched.
+    """
+    dropped: list[int] = []
+    records = job.records()
+    for record in records:
+        if record.decided() or record.status != state.RETRY_LATER:
+            continue
+        tried = set(record.tried)
+        if not tried or any(identifier(candidate) not in tried for candidate in record.candidates):
+            continue
+        record.decision = state.DECLINED
+        record.status = state.NOT_FOUND
+        record.notes = "every offer was refused"
+        job.append_event("dropped", idx=record.idx, tried=len(tried))
+        dropped.append(record.idx)
+    if dropped:
+        job.write_records(records)
+        log(f"{len(dropped)} dropped — every offer was refused, nothing left to try")
+    return dropped
+
+
 def _prepare(
     job: state.Job,
     record: state.Record,
@@ -377,12 +442,12 @@ def _prepare(
     """
     if not record.candidates:
         # Resolved once, then written into the record: a resumed run never re-queries, and a track that
-        # resolved nothing stays review-only rather than being re-asked every time.
+        # resolved nothing is not re-asked every time — it is simply taken on its name.
         seconds = reference.resolve(record.request, lookup)
         record.duration_s = seconds
         job.append_event("reference", idx=record.idx, seconds=seconds)
         log(f"[{record.idx}] {record.label}: "
-            + (f"reference {seconds}s" if seconds else "no MusicBrainz reference — review only"))
+            + (f"reference {seconds}s" if seconds else "no reference length — taken on its name"))
 
     if library is None:
         return None, None
@@ -472,7 +537,7 @@ def one(
 
     tried = set(record.tried)
     queue = sorted(
-        (verdict.candidate for verdict in rules.ready(record.track)
+        (verdict.candidate for verdict in rules.takeable(record.track)
          if identifier(verdict.candidate) not in tried),
         key=rules.rank,
     )
@@ -576,6 +641,8 @@ def run(
         except (slsk.ToolError, ServerError) as error:
             record.status = state.RETRY_LATER
             outcome = "failed"
+            if quiet is not None:
+                quiet.failed()
             say(f"[{record.idx}] {record.label}: the server refused — {error}")
             job.append_event("refused", idx=record.idx, error=str(error))
         getattr(summary, outcome).append(record.idx)
@@ -590,15 +657,32 @@ def run(
         with ThreadPoolExecutor(max_workers=max(1, config.workers)) as pool:
             list(pool.map(work, records))
 
+    if quiet.hung:
+        summary.failed.sort()
+        summary.dropped = drop_exhausted(job, log=say)
+        summary.failed = [idx for idx in summary.failed if idx not in set(summary.dropped)]
+        job.append_event("server_stuck", consecutive=quiet.hung, unsearched=len(summary.unsearched))
+        job.write_status(config)
+        bar.close()
+        raise ServerStuck(
+            f"{quiet.hung} searches timed out in a row — {len(summary.unsearched)} tracks were never "
+            f"searched. The child had stopped answering; the run is open, so a fresh pass picks it up."
+        )
+
     if quiet.stopped.is_set():
         job.append_event("network_quiet", consecutive=quiet.tripped_at,
                          unsearched=len(summary.unsearched))
         say(f"the last {quiet.tripped_at} searches came back with nothing — the network has stopped "
             f"answering, so {len(summary.unsearched)} tracks were not searched at all")
 
+    # A track whose every candidate refused is closed here rather than put to a person: there is nothing
+    # left to try, and asking about it would only be asking permission to stop.
+    summary.dropped = drop_exhausted(job, log=say)
+    summary.failed = [idx for idx in summary.failed if idx not in set(summary.dropped)]
+
     # The lists fill in whatever order the tracks finish, so they are put back in track order to report.
     for name in ("downloaded", "already_downloaded", "already_held", "in_review",
-                 "nothing_usable", "failed", "unsearched"):
+                 "nothing_usable", "failed", "unsearched", "dropped"):
         getattr(summary, name).sort()
 
     job.write_status(config)
