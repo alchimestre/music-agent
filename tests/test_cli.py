@@ -509,6 +509,36 @@ def test_accepting_carries_the_record_on_to_process(tmp_path, capsys, monkeypatc
     assert "music-agent process" in out, "the next command is the useful thing to say"
 
 
+def test_only_a_held_session_is_waited_out(tmp_path, monkeypatch, capsys):
+    """Two of the three ways a child goes wrong are retried at once: a reader that died, and calls that
+    stopped returning. The third cannot be — the child that lost the session could not log out either, so the
+    server holds the account until its own timeout passes and a fresh child is refused until then. Retrying
+    straight into it is a login that cannot succeed, which is what three passes in a row did."""
+    waits: list[float] = []
+    monkeypatch.setattr(cli_module, "SESSION_WAITS", (5.0,))
+    monkeypatch.setattr(cli_module.time, "sleep", waits.append)
+
+    answers: list[object] = [
+        acquire.ServerStuck("the child's message reader died", lost_session=False),
+        acquire.ServerStuck("the child was left without a session", lost_session=True),
+        acquire.Summary(downloaded=[1]),
+    ]
+
+    def pass_off(config, job, *, retry, attempt):
+        answer = answers[attempt - 1]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(cli_module, "_one_pass", pass_off)
+    config = config_module.load(make_config(tmp_path))
+    job = state.create(config, "run")
+
+    assert cli_module._acquire_pass(config, job, retry=False).downloaded == [1]
+    assert waits == [5.0], "the reader death waited for nothing; the held session did"
+    assert "held by the child that died" in capsys.readouterr().err
+
+
 def test_run_does_every_stage_in_order_and_asks_nothing(tmp_path, capsys, monkeypatch):
     """2026-10-14: one command from a tracklist to both collections.
 
