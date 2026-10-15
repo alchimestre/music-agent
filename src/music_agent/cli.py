@@ -72,8 +72,10 @@ def _run(config: config_module.Config, args: argparse.Namespace) -> int:
     leftovers = sweep.find(config)
     removed = sweep.clear(sweep.Leftovers(leftovers.partial, ()), log=print)
     print(f"{removed} interrupted transfer(s) cleared" if removed else "nothing to clear")
-    if leftovers.loose:
-        print(f"{len(leftovers.loose)} file(s) no record points at — music-agent sweep to see them")
+
+    # The code is dropped on purpose: work left for a person is not a failed run, and the pass ends normally
+    # either way. Only `music-agent tidy` on its own turns it into an exit status.
+    _tidy(config, pinned)
 
     _queue(job)
     print(f"\nrun {job.id} is in both collections. Traktor wants Check Consistency → Analyze for what it "
@@ -172,6 +174,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="clear staging of what no pass will pick up (dry run unless --apply)")
     sweep.add_argument("--apply", action="store_true",
                        help="remove them; without this nothing is deleted")
+    commands.add_parser(
+        "tidy", parents=[common],
+        help="what a pass left for a person: duplicates, unrowed files, staging and lane drift")
     return parser
 
 
@@ -748,6 +753,82 @@ def _status(config: config_module.Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def _say(label: str, detail: str, action: str = "") -> int:
+    """One check's line: what it found, or that it found nothing, and the verb that would act on it."""
+    if not detail:
+        print(f"  {label:<11} nothing")
+        return 0
+    print(f"  {label:<11} {detail}")
+    if action:
+        print(f"  {'':<11} {action}")
+    return 1
+
+
+def _tidy(config: config_module.Config, args: argparse.Namespace) -> int:
+    """What a pass left behind, in one look. Nothing is written and every line names the verb that would.
+
+    Four verbs decide these and each one has to be remembered: `dedupe` for two rows that are one track,
+    `backfill` for a file in a lane the collection has no row for, `sweep` for staging nothing will pick up,
+    and `status --files` for the drift the other way, between a run's records and what is actually on disk.
+
+    This is the last thing a run prints, because the failure it exists for is silence. A duplicate reached
+    the collection and nothing said so: the pass that imported it was reading its own records, every other
+    check is a verb a person has to know to run, and the track was heard twice before anything looked.
+    """
+    from pyrekordbox import Rekordbox6Database
+
+    from . import backfill, duplicates
+
+    job = _job(config, args)
+    print(f"\ntidy · run {job.id}" if job is not None else "\ntidy")
+    trouble = 0
+
+    database = None
+    try:
+        database = Rekordbox6Database()
+    except Exception as error:                      # pyrekordbox raises its own types and its own messages
+        print(f"  {'rekordbox':<11} cannot read the collection ({error})", file=sys.stderr)
+        trouble += 1
+
+    if database is not None:
+        try:
+            rows = duplicates.run(config, db=database, apply=False, remove_files=False)
+            trouble += _say("duplicates", rows.report() if rows.merges else "",
+                            "music-agent dedupe --apply")
+        except duplicates.NotClosed as error:
+            print(f"  {'duplicates':<11} {error}", file=sys.stderr)
+            trouble += 1
+        try:
+            gaps = backfill.run(config, db=database, apply=False)
+            trouble += _say("backfill", gaps.report() if gaps.candidates else "",
+                            "music-agent backfill --apply")
+        except backfill.NotClosed as error:
+            print(f"  {'backfill':<11} {error}", file=sys.stderr)
+            trouble += 1
+        finally:
+            database.close()
+
+    left = sweep.find(config)
+    trouble += _say("staging", f"{len(left.all)} to clear" if left.all else "",
+                    "music-agent sweep --apply")
+
+    if job is not None:
+        try:
+            drift = library.unpointed(
+                config, claimed=[record.local_path for record in job.records() if record.local_path])
+            # `staging` above already owns what is in staging, so this line is the part `sweep` cannot see:
+            # a file in a lane nothing points at, and a row whose file has gone.
+            counted = (f"{len(drift.lane)} in a lane, {len(drift.gone)} rows whose file has gone")
+            trouble += _say("lanes", "" if not (drift.lane or drift.gone) else counted,
+                            "music-agent status --files")
+        except library.Unreadable as error:
+            print(f"  {'lanes':<11} {error}", file=sys.stderr)
+            trouble += 1
+
+    print("nothing to do" if not trouble else f"{trouble} thing(s) for you")
+    return 1 if trouble else 0
+
+
 def _sweep(config: config_module.Config, args: argparse.Namespace) -> int:
     """Staging's own leftovers: an interrupted transfer, and a file no record points at.
 
@@ -792,6 +873,8 @@ def main(argv: list[str] | None = None) -> int:
         return _backfill(config, args)
     if args.command == "sweep":
         return _sweep(config, args)
+    if args.command == "tidy":
+        return _tidy(config, args)
     return 2                                        # unreachable: the subparser requires a command
 
 
