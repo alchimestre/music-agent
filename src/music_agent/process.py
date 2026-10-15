@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -133,7 +133,9 @@ def identify_one(record: state.Record, tools: Tools, log) -> identify.Identified
                                  discogs=tools.discogs, log=log)
     except Exception as error:          # a network or a service is not a reason to lose the track
         log(f"      could not identify it ({type(error).__name__}) — the name will have to do")
-        return identify.from_filename(record.request)
+        # `asked=False`: nothing was consulted, so nothing was answered — which a caller that writes a genre
+        # has to tell apart from a service that answered with nothing.
+        return replace(identify.from_filename(record.request), asked=False)
 
 
 def apply_genre(record: state.Record, found: identify.Identified, tools: Tools, log) -> genre.Choice:
@@ -150,7 +152,10 @@ def apply_genre(record: state.Record, found: identify.Identified, tools: Tools, 
 
     record.genre = choice.genre
     if choice.genre:
-        log(f"      genre {choice.genre!r}, from {choice.source!r}")
+        # 2026-10-15: the winner alone hid what else the services offered, and a rule that reads a track's
+        # source genres off the run — the retag pass is the only place they are ever named — cannot match a
+        # name that lost to a more specific one.
+        log(f"      genre {choice.genre!r}, from {choice.source!r} (offered {offered})")
     elif offered:
         log(f"      nothing in the table for {offered} — the caller decides this one")
     else:
@@ -243,12 +248,15 @@ class Retagged:
 
     retagged: list[int] = field(default_factory=list)   # a genre was resolved and written
     cleared: list[int] = field(default_factory=list)    # the old name came off and nothing replaced it
+    unasked: list[int] = field(default_factory=list)    # no service could be reached, so nothing was written
     failed: list[int] = field(default_factory=list)
 
     def report(self) -> str:
         parts = [f"{len(self.retagged)} re-tagged"]
         if self.cleared:
             parts.append(f"{len(self.cleared)} cleared")
+        if self.unasked:
+            parts.append(f"{len(self.unasked)} left alone, the services unreachable")
         if self.failed:
             parts.append(f"{len(self.failed)} failed")
         return " · ".join(parts)
@@ -259,7 +267,8 @@ def retag(job: state.Job, *, tools: Tools | None = None, log=print) -> Retagged:
 
     A run never re-genres a track, because a genre cannot be undone after import, so changing one has to be
     deliberate: the table has changed, and the tracks tagged under the old one carry names the collection no
-    longer has. When nothing resolves the old name comes off, because the import reads the *file*.
+    longer has. When the services answer that nothing resolves, the old name comes off, because the import
+    reads the *file*; when they cannot be reached at all, nothing is written.
     """
     tools = tools or Tools()
     summary = Retagged()
@@ -276,6 +285,18 @@ def retag(job: state.Job, *, tools: Tools | None = None, log=print) -> Retagged:
             continue
 
         found = identify_one(record, tools, log)
+        if not found.asked:
+            # 2026-10-15: a service that could not be reached is not an answer, and the blank it leaves is not
+            # the taxonomy's verdict. Two passes over the same 287 records disagreed on 23 of them, every one a
+            # lookup that failed; the second pass took off names the first had read off the same services. So
+            # nothing is written here, and the record keeps what its file says.
+            record.genre = tag.read(path).genre
+            record.notes = "the services could not be asked — its genre stands"
+            summary.unasked.append(record.idx)
+            log(f"[{record.idx}] {record.label}: the services could not be asked — "
+                f"{(record.genre or 'no genre')!r} stands")
+            job.write_records(records)
+            continue
         # No ungenred event here: those names were counted when the run first genred these tracks, and
         # counting them again would inflate a genre proposal rather than inform one.
         apply_genre(record, found, tools, log)

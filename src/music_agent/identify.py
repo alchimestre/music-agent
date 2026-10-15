@@ -84,6 +84,9 @@ class Identified:
     genres: tuple[str, ...] = ()
     score: float = 0.0
     source: str = ""        # fingerprint | search | filename
+    # False when no service could be reached at all, which `source` cannot say: the filename is also what is
+    # left after a search that answered with nothing.
+    asked: bool = True
 
 
 class Hearing(Protocol):
