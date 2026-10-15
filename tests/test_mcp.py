@@ -142,6 +142,33 @@ def alive(pid: int) -> bool:
     return True
 
 
+def test_the_wait_is_on_the_group_and_never_on_the_wrapper(tmp_path):
+    """The Soulseek child has a logout to send on the way out and a logout is a round trip. Waiting on the
+    wrapper cannot give it that moment: the wrapper is reaped the instant its input closes — which is why
+    the group is signalled at all — so the wait returns at once and the kill lands on a server that was
+    still shutting down. One killed there leaves the account holding a session, and the next pass reads as
+    a login that never completes."""
+    wrapper = tmp_path / "wrapper.py"
+    wrapper.write_text(WRAPPER.format(fake=FAKE), encoding="utf-8")
+    seen: list[str] = []
+
+    server = StdioServer([sys.executable, str(wrapper)], on_log=seen.append)
+    grandchild = int(next(line for line in seen if line.startswith("child ")).split()[1])
+    try:
+        server._proc.stdin.close()                  # the first thing close() does
+
+        # Our own child goes the moment its input closes, and what it started does not. This is the pair the
+        # wait exists to tell apart: waiting on the child alone returns here, with the group still alive.
+        assert server._proc.wait(timeout=5.0) is not None
+        assert server._wait_for_group(0.3) is False, "the sleeper keeps the group alive"
+
+        os.kill(grandchild, signal.SIGKILL)
+
+        assert server._wait_for_group(3.0) is True, "with it gone the group is empty"
+    finally:
+        server.close()
+
+
 DEFERRING = '''
 import json, sys
 

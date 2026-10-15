@@ -23,7 +23,9 @@ PROTOCOL_VERSION = "2024-11-05"
 
 _STARTUP_TIMEOUT = 60.0     # uvx may have to build the server the first time it runs
 _CALL_TIMEOUT = 15.0
-_GRACE = 0.5                # a server that exits when its input closes does so at once
+# What the group is given to shut itself down before it is signalled. The Soulseek child has a logout to
+# send on the way out, and a logout is a round trip to the server.
+_GRACE = 3.0
 _KILL_GRACE = 2.0
 _STDERR_TAIL = 40           # lines kept to explain a failure
 
@@ -246,6 +248,12 @@ class StdioServer:
         The command we run is usually a wrapper (`uvx` around the real server), and the wrapper exiting does
         not take the server with it. A server left behind holds the Soulseek listening ports, and the next
         pass then logs in as a second client: every search comes back empty. So the group goes, every time.
+
+        What is waited on is the group and never the wrapper. The wrapper is reaped the instant its input
+        closes — that is the whole reason the group is signalled — so waiting on that alone returns at once
+        and the kill lands on a server still shutting down. The Soulseek child has a logout to send on the
+        way out, and one killed before it sends it leaves the account holding a session that the next pass
+        cannot get past, which reads as a login that never completes.
         """
         if self._closed:
             return
@@ -256,19 +264,39 @@ class StdioServer:
                 self._proc.stdin.close()
         except OSError:
             pass
-        try:
-            self._proc.wait(timeout=_GRACE)
-            self._signal_group(signal.SIGKILL)
-            return
-        except subprocess.TimeoutExpired:
-            pass
 
+        if self._wait_for_group(_GRACE):
+            return
         self._signal_group(signal.SIGTERM)
-        try:
-            self._proc.wait(timeout=_KILL_GRACE)
-        except subprocess.TimeoutExpired:
-            pass
+        if self._wait_for_group(_KILL_GRACE):
+            return
         self._signal_group(signal.SIGKILL)
+
+    def _wait_for_group(self, seconds: float) -> bool:
+        """Whether the whole group has gone within `seconds`, reaping the wrapper while it waits.
+
+        A group is not empty until its last member is gone, and the wrapper is reaped here so that a zombie
+        is not mistaken for a server still running.
+        """
+        if not hasattr(os, "killpg"):
+            try:
+                self._proc.wait(timeout=seconds)
+                return True
+            except subprocess.TimeoutExpired:
+                return False
+        deadline = time.monotonic() + seconds
+        while True:
+            try:
+                os.killpg(self._pgid, 0)
+            except OSError:
+                return True                      # nothing left in the group
+            if time.monotonic() >= deadline:
+                return False
+            try:
+                self._proc.wait(timeout=0.05)
+            except subprocess.TimeoutExpired:
+                pass
+            time.sleep(0.05)
 
     def _signal_group(self, sig: int) -> None:
         """Signal the child and everything it started. The ports belong to the process at the bottom."""
