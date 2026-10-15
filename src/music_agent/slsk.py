@@ -89,7 +89,10 @@ class ChildLog:
     # deserialize, the task ends, and nothing says so — every search after it answers nothing, and `_connect`
     # then short-circuits on a flag only `logout()` clears, so it cannot log in again either.
     LOST_SESSION = (
-        "no valid session was set",
+        # Both spellings the child has for it: the search manager's `no valid session was set`, once per
+        # search, and the shares manager's `attempted to report shares without valid session` at startup,
+        # which is a login that never completed at all.
+        "valid session",
         "MessageDeserializationError",
         "cannot access local variable 'message'",
     )
