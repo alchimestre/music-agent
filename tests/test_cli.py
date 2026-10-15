@@ -49,6 +49,50 @@ def test_status_before_any_run_says_so(tmp_path, capsys):
     assert "no runs yet" in capsys.readouterr().out
 
 
+def test_tidy_ends_with_whether_a_person_has_anything_to_do(tmp_path, capsys, monkeypatch):
+    """Four checks, each owned by a verb of its own and each easy to forget. The exit status is what a
+    wrapper branches on, so a clean pass has to be 0 and a finding has to be 1 and name the verb that
+    clears it."""
+    import pyrekordbox
+
+    from music_agent import backfill, duplicates
+
+    class Rows:
+        merges: list = []
+        files: list = []
+
+        def report(self) -> str:
+            return "0 duplicate groups"
+
+    class Gaps:
+        candidates: list = []
+
+        def report(self) -> str:
+            return "0 to add"
+
+    class Database:
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(pyrekordbox, "Rekordbox6Database", Database)
+    monkeypatch.setattr(duplicates, "run", lambda config, db, apply, remove_files: Rows())
+    monkeypatch.setattr(backfill, "run", lambda config, db, apply: Gaps())
+    monkeypatch.setattr(sweep, "find", lambda config: sweep.Leftovers((), ()))
+    monkeypatch.setattr(library, "unpointed", lambda config, claimed: library.Unpointed())
+    config_path = make_config(tmp_path)
+    seed(config_path, [])
+
+    assert main(["--config", str(config_path), "tidy"]) == 0
+    assert "nothing to do" in capsys.readouterr().out
+
+    monkeypatch.setattr(sweep, "find", lambda config: sweep.Leftovers((), (tmp_path / "x.flac",)))
+
+    assert main(["--config", str(config_path), "tidy"]) == 1
+    out = capsys.readouterr().out
+    assert "staging" in out
+    assert "music-agent sweep --apply" in out
+
+
 def test_a_finished_run_is_still_the_one_a_command_works_on(tmp_path, capsys):
     """The import finishes a run and nothing else, so what it leaves open has to stay reachable without
     naming the run. On 2026-10-12 `music-agent review` said there was nothing to review while a queue of

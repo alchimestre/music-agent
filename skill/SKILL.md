@@ -45,6 +45,7 @@ music-agent import                              # rekordbox, then Traktor (see 8
 music-agent dedupe                              # one row per track, dry run; --apply merges (see 10)
 music-agent backfill                            # a row for every file, dry run; --apply adds (see 10)
 music-agent sweep                               # staging's own leftovers, dry run; --apply clears (see 11)
+music-agent tidy                                # every leftover check at once, writing nothing (see 10, 11)
 ```
 
 Every stage prints where it is: a `── stage · what it is working on` line as it starts, one line per track, and

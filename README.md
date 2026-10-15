@@ -49,20 +49,22 @@ music-agent import                              # rekordbox, then Traktor; rekor
 music-agent dedupe                              # one row per track; dry run, --apply merges
 music-agent backfill                            # a row for every file that has none; dry run, --apply adds
 music-agent sweep                               # staging's leftover .part files; --apply clears
+music-agent tidy                                # all four leftover checks at once; writes nothing
 ```
 
-`acquire` and `process` take hours on a long tracklist. `review`, `status`, `import`, `dedupe` and `backfill`
-take seconds.
+`acquire` and `process` take hours on a long tracklist. `review`, `status`, `import`, `dedupe`, `backfill`
+and `tidy` take seconds.
 
 `import` is scoped to one run's records. Two verbs keep the collection and the lanes in step, both dry runs
 until `--apply`:
 
 | verb | when | what it does |
 |---|---|---|
-| `dedupe` | two rows for one track: the same folded artist, title and mix, lengths within one second | merges them. The row holding the better copy survives (lossless before lossy, then the row the library has used, then the measured one, then the older), what the other held moves onto it (playlist lines, plays, My Tags, cues), and the redundant file leaves the lanes for `paths.duplicates` |
+| `dedupe` | two rows for one track: the same title and mix, lengths within one second, and a credit naming the same people (`A x B`, `A & B` and `A, B` are one collaboration written three ways) | merges them. The row holding the better copy survives (lossless before lossy, then the row the library has used, then the measured one, then the older), what the other held moves onto it (playlist lines, plays, My Tags, cues), and the redundant file leaves the lanes for `paths.duplicates` |
 | `backfill` | a file in a lane that no row points at | mints a row from what the file says (its tags, then its name) and the length off its header; refuses a file whose track the collection already holds under another file, naming that row |
+| `tidy` | nothing of its own | runs the four leftover checks in one dry run — duplicates, unrowed files, staging, lane drift — and exits 1 when any of them has something. Every line names the verb that clears it, so a wrapper can branch on it and a person can stop looking |
 
-Neither verb identifies or re-tags anything.
+Neither `dedupe` nor `backfill` identifies or re-tags anything.
 
 Traktor's collection belongs to a separate project: [`traktor-nml`](https://github.com/alchimestre/traktor-nml)
 owns `collection.nml`, its own configuration and its own rules, and reads this project's job state as data to
