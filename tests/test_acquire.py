@@ -727,6 +727,24 @@ def test_a_lost_session_stops_the_pass_and_says_which_it_was(tmp_path):
     assert "lost_session" in events
 
 
+def test_the_reader_dying_is_one_childs_bad_luck_and_not_the_accounts(tmp_path):
+    """The two are told apart because the caller answers them differently: an account that keeps losing the
+    session ends the passes, while a reader that died in this child is retried. Without the distinction a
+    flaky child per pass is a pass that cannot finish a long list."""
+    config, job, server, calls = setup(tmp_path, results=[], tracks=6)
+    child = slsk.ChildLog(log=lambda line: None)
+    child("UnboundLocalError: cannot access local variable 'message'")
+
+    with server, pytest.raises(acquire.ServerStuck) as raised:
+        pass_once(config, job, server, Reference(), calls, child=child)
+
+    assert raised.value.lost_session is False
+    assert "could not read" in str(raised.value)
+    events = (config.state_root / job.id / "events.jsonl").read_text(encoding="utf-8")
+    assert "reader_died" in events
+    assert "lost_session" not in events
+
+
 def test_one_candidate_may_not_own_the_pass():
     """Every other budget is reset by a byte, so a peer slow enough never trips one: 0.107 MB/s sustained on
     a 99 MB file held a whole pass open for 764 of its 1,772 seconds, with nothing else able to run."""

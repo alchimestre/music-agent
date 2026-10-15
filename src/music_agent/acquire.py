@@ -264,14 +264,14 @@ class QuietNetwork:
 
     @property
     def session_lost(self) -> bool:
-        """Whether the child has said it has no session left.
+        """Whether the child has said it can no longer answer — a session it does not have, or a message
+        reader that died on a frame it could not read.
 
         The server drops a client, aioslsk does not reconnect, and every search from then on is an ordinary
-        success with nothing in it — which is what a rare track looks like too. Nothing else in the stack
-        can tell those apart, and the child will not recover: `ReconnectSettings.auto` is off and the
-        watchdog is cancelled when the connection closes.
+        success with nothing in it — which is what a rare track looks like too. Nothing else in the stack can
+        tell those apart, and the child recovers from neither.
         """
-        return self.child is not None and self.child.lost_session > 0
+        return self.child is not None and self.child.cannot_answer
 
     def observe(self, found: int) -> None:
         """One search's raw result count, as the child reports it."""
@@ -701,17 +701,25 @@ def run(
             list(pool.map(work, records))
 
     if quiet.hung or quiet.session_lost:
+        account = quiet.session_lost and child is not None and child.lost_session > 0
         summary.failed.sort()
         summary.dropped = drop_exhausted(job, log=say)
         summary.failed = [idx for idx in summary.failed if idx not in set(summary.dropped)]
         if quiet.session_lost:
-            # The child answered, and every answer was empty because it had no session to search with.
-            # Reported and named here, because from the inside this is indistinguishable from a quiet
-            # network, and a pass that stops on it while returning success is a pass that lies.
-            job.append_event("lost_session", unsearched=len(summary.unsearched))
-            reason = (f"the child lost its session — {len(summary.unsearched)} tracks were never searched. "
-                      f"The server stopped answering it and it does not reconnect, so a fresh pass with a "
-                      f"fresh child picks them up.")
+            # The child answered, and every answer was empty because it had no way to search. Named here
+            # because from the inside this is indistinguishable from a quiet network, and a pass that stops
+            # on it while returning success is a pass that lies.
+            job.append_event("lost_session" if account else "reader_died",
+                             unsearched=len(summary.unsearched))
+            reason = (
+                f"the child was left without a session — {len(summary.unsearched)} tracks were never "
+                f"searched. Another client has the account, or the server has stopped answering this one, "
+                f"and a fresh child loses it the same way, so the passes stop here."
+                if account else
+                f"the child's message reader died on a frame it could not read — "
+                f"{len(summary.unsearched)} tracks were never searched. That is one child's bad luck, not "
+                f"the account's, so a fresh child resumes the pass from here."
+            )
         else:
             job.append_event("server_stuck", consecutive=quiet.hung, unsearched=len(summary.unsearched))
             reason = (f"{quiet.hung} searches timed out in a row — {len(summary.unsearched)} tracks were "
@@ -719,7 +727,7 @@ def run(
                       f"picks it up.")
         job.write_status(config)
         bar.close()
-        raise ServerStuck(reason, lost_session=quiet.session_lost)
+        raise ServerStuck(reason, lost_session=account)
 
     if quiet.stopped.is_set():
         job.append_event("network_quiet", consecutive=quiet.tripped_at,
