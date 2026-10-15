@@ -691,8 +691,9 @@ def _review(config: config_module.Config, args: argparse.Namespace) -> int:
 def _genres(config: config_module.Config, job: state.Job) -> None:
     """Tracks the taxonomy had nothing for. Reported and counted, never asked about: the vocabulary is
     music-tagger's, and a name it does not know is a line missing there, not a question for a person."""
+    # A run ends at `imported`: a set of only the half-way statuses reports nothing on a finished one.
     ungenred = [record for record in job.records()
-                if record.status in {state.TAGGED, state.NORMALIZED} and not record.genre]
+                if record.status in {state.NORMALIZED, state.TAGGED, state.IMPORTED} and not record.genre]
     if not ungenred:
         return
     print()
