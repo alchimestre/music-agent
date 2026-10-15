@@ -6,7 +6,10 @@ side and junk on stdout all have to end in a clear outcome rather than a hang.
 
 from __future__ import annotations
 
+import os
+import signal
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -92,6 +95,51 @@ def test_closing_twice_is_harmless():
     server = open_server("normal")
     server.close()
     server.close()
+
+
+WRAPPER = '''
+import os, subprocess, sys
+
+# A stand-in for `uvx`: it starts something of its own, says which, then becomes the server. What was started
+# stays in this process's group — which is the point.
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+sys.stderr.write("child %d\\n" % child.pid)
+sys.stderr.flush()
+os.execv(sys.executable, [sys.executable, {fake!r}, "normal"])
+'''
+
+
+def test_closing_takes_the_whole_process_group(tmp_path):
+    """2026-10-14: the command is usually a wrapper — `uvx` around the server — and killing the wrapper alone
+    leaves the server holding the Soulseek ports. A client left there answers the same account, so the next
+    pass sees an empty network instead of a port conflict. The child's group goes, so its own children go."""
+    wrapper = tmp_path / "wrapper.py"
+    wrapper.write_text(WRAPPER.format(fake=FAKE), encoding="utf-8")
+    seen: list[str] = []
+
+    server = StdioServer([sys.executable, str(wrapper)], on_log=seen.append)
+    grandchild = int(next(line for line in seen if line.startswith("child ")).split()[1])
+    try:
+        server.close()
+        for _ in range(50):                         # SIGKILL is not instant, and the pid outlives the process
+            if not alive(grandchild):
+                return
+            time.sleep(0.1)
+        pytest.fail("the server outlived the wrapper that started it")
+    finally:
+        # Whether it died where it should or not, nothing here is left running.
+        try:
+            os.kill(grandchild, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 DEFERRING = '''

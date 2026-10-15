@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import library, state, tag
+from . import library, processes, state, tag
 from .config import Config
 
 
@@ -191,6 +191,10 @@ def repoint(db, record: state.Record, log) -> bool:
 def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=print) -> Summary:
     """Every tagged track into the collection, behind one backup and two commits — see the comment on the
     first commit for why the upgrades and the additions cannot share one."""
+    # A `rekordbox-mcp` another harness left running is a second writer on this file. It is that harness's
+    # child and is restarted when it is wanted, so it goes rather than being asked about.
+    processes.stop_named(("rekordbox-mcp",), log=log)
+
     if is_running():
         raise NotClosed("rekordbox is running, and pyrekordbox will not commit while it is — close it, "
                         "then run this again")

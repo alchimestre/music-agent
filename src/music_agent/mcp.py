@@ -7,7 +7,10 @@ answer each other out of order, so each answer is routed to the call that asked 
 from __future__ import annotations
 
 import json
+import os
 import queue
+import re
+import signal
 import subprocess
 import threading
 import time
@@ -22,7 +25,11 @@ _STARTUP_TIMEOUT = 60.0     # uvx may have to build the server the first time it
 _CALL_TIMEOUT = 15.0
 _GRACE = 0.5                # a server that exits when its input closes does so at once
 _KILL_GRACE = 2.0
-_STDERR_TAIL = 20           # lines kept to explain a failure
+_STDERR_TAIL = 40           # lines kept to explain a failure
+
+# What the child says when something is wrong with it. Its ordinary log is a line per peer it could not
+# reach, so without this the lines that matter are the ones least likely to still be in the tail.
+_ERRORISH = re.compile(r"ERROR|Error|Traceback|exception|Exception|critical|CRITICAL")
 
 
 class ServerError(RuntimeError):
@@ -73,9 +80,20 @@ class StdioServer:
                 bufsize=1,
                 env=env,
                 cwd=cwd,
+                start_new_session=True,
             )
         except FileNotFoundError as exc:
             raise ServerError(f"cannot run {argv[0]!r}: {exc}") from exc
+
+        # The group is remembered now and not looked up later: the wrapper is often reaped the moment its
+        # input closes, and `getpgid` on a dead pid fails — while the server it started is still in the
+        # group, still holding the ports.
+        self._pgid = self._proc.pid
+        if hasattr(os, "getpgid"):
+            try:
+                self._pgid = os.getpgid(self._proc.pid)
+            except OSError:
+                pass
 
         # stdout carries the protocol and signals its end; stderr only ever produces log lines.
         self._start_reader(self._proc.stdout, self._read_message, terminal=True)
@@ -133,6 +151,15 @@ class StdioServer:
             self._on_log(line)
 
     def _tail(self) -> str:
+        """What the child last said, with its own errors preferred over its chatter.
+
+        The child logs a line per peer it cannot reach, so a raw tail is twenty lines of the same warning and
+        the traceback that killed it scrolls away. The lines that name an error are quoted first, and the raw
+        tail follows only when there is nothing else.
+        """
+        interesting = [line for line in self._stderr if _ERRORISH.search(line)]
+        if interesting:
+            return " | ".join(interesting[-_STDERR_TAIL:])
         return " | ".join(self._stderr) or "the server said nothing"
 
     def _send(self, message: dict) -> None:
@@ -214,10 +241,11 @@ class StdioServer:
     # ── lifetime ─────────────────────────────────────────────────────────────
 
     def close(self) -> None:
-        """Close the input, then insist. Safe to call twice.
+        """Close the input, then insist — on the child's whole process group. Safe to call twice.
 
-        The command we run is a wrapper (`uvx`): closing its input and terminating it takes the server down
-        with it, so nothing here signals a process group.
+        The command we run is usually a wrapper (`uvx` around the real server), and the wrapper exiting does
+        not take the server with it. A server left behind holds the Soulseek listening ports, and the next
+        pass then logs in as a second client: every search comes back empty. So the group goes, every time.
         """
         if self._closed:
             return
@@ -230,16 +258,26 @@ class StdioServer:
             pass
         try:
             self._proc.wait(timeout=_GRACE)
+            self._signal_group(signal.SIGKILL)
             return
         except subprocess.TimeoutExpired:
             pass
 
-        self._proc.terminate()
+        self._signal_group(signal.SIGTERM)
         try:
             self._proc.wait(timeout=_KILL_GRACE)
         except subprocess.TimeoutExpired:
-            self._proc.kill()
-            self._proc.wait(timeout=_KILL_GRACE)
+            pass
+        self._signal_group(signal.SIGKILL)
+
+    def _signal_group(self, sig: int) -> None:
+        """Signal the child and everything it started. The ports belong to the process at the bottom."""
+        if not hasattr(os, "killpg"):
+            return
+        try:
+            os.killpg(self._pgid, sig)
+        except OSError:                          # every member is gone, or they are not ours to signal
+            pass
 
     def __enter__(self) -> StdioServer:
         return self
