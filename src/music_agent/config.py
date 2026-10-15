@@ -110,9 +110,14 @@ DEFAULTS = Config(
     discogs_token_env="DISCOGS_TOKEN",
     # Verified against this commit. Pinned rather than floating on a branch: the match rules read
     # specific fields, and a rebuild that moved them should fail loudly, not quietly.
+    #
+    # A fork of `voidtype/slsk_mcp`, because the server pinned there stops answering the moment aioslsk fails
+    # to deserialize a frame: the reader task dies, the child answers every search with nothing for the rest
+    # of its life, and the pass reads it as an empty network. The fork pins aioslsk 1.7.1, where that handler
+    # binds the exception instead of raising, and changes nothing else.
     soulseek_command=(
         "uvx", "--from",
-        "git+https://github.com/voidtype/slsk_mcp.git@df06ca17e2931246b1f139abf028a22e808da7a3",
+        "git+https://github.com/alchimestre/slsk-mcp.git@892a2a8aec192a1660f24a5313321adc907fafa4",
         "slsk-mcp",
     ),
     slsk_username_env="SLSK_USERNAME",

@@ -13,11 +13,13 @@ true_peak_db = -1.0
 tolerance_lu = 0.5                              # a file already inside it is left alone
 
 [soulseek]
-# Pinned to a commit: the match rules read specific fields, and a rebuild must not move them.
+# Pinned to a commit: the match rules read specific fields, and a rebuild must not move them. This is a fork
+# of `voidtype/slsk_mcp` that pins aioslsk 1.7.1: at 1.4.1 the client stops answering the moment a frame
+# fails to deserialize, and every search after that reads as an empty network.
 command = [
   "uvx",
   "--from",
-  "git+https://github.com/voidtype/slsk_mcp.git@df06ca17e2931246b1f139abf028a22e808da7a3",
+  "git+https://github.com/alchimestre/slsk-mcp.git@892a2a8aec192a1660f24a5313321adc907fafa4",
   "slsk-mcp",
 ]
 
