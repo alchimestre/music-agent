@@ -44,6 +44,13 @@ CONNECT_BUDGET = 12.0
 QUEUE_BUDGET = 45.0
 STALL_BUDGET = 45.0
 
+# One candidate may not own the pass. Every budget above is reset by a byte, so a peer that trickles never
+# trips one: 0.107 MB/s sustained on a 99 MB file held a whole pass open for 764 of its 1,772 seconds, and
+# the pool ends only when the last record does, so nothing else ran while it did. Past this ceiling the
+# candidate is rotated like any other slow peer and the track is left to a later pass, which costs nothing
+# that reaching the ceiling did not already cost: a file this slow was not arriving inside the pass.
+TRANSFER_CEILING = 600.0
+
 # A finished transfer whose file has not appeared is the `.part` rename, which is quick. Past this, the
 # file is not coming.
 FINISHED_GRACE = 5.0
@@ -60,7 +67,16 @@ _OVER = frozenset({"failed", "cancelled", "not_found", "session_expired"})
 
 class ServerStuck(RuntimeError):
     """The child stopped answering — searches timed out in a row, so the pass stopped asking rather than
-    spending a deadline each time to learn nothing."""
+    spending a deadline each time to learn nothing.
+
+    `lost_session` tells the two kinds apart for the caller that decides whether to try again. Timed-out
+    calls are the child's own problem and a fresh child is worth having; a session the server took away is
+    the account's, and a second child loses it the same way.
+    """
+
+    def __init__(self, message: str, *, lost_session: bool = False) -> None:
+        super().__init__(message)
+        self.lost_session = lost_session
 
 
 class Move(Enum):
@@ -98,10 +114,13 @@ def budget_for(transfer: Transfer, *, declared_queue: int = 0) -> float:
     return QUEUE_BUDGET if declared_queue else CONNECT_BUDGET
 
 
-def move(transfer: Transfer, *, on_disk: bool, stuck_for: float, declared_queue: int = 0) -> Move:
+def move(transfer: Transfer, *, on_disk: bool, stuck_for: float, declared_queue: int = 0,
+         elapsed: float = 0.0) -> Move:
     """What to do next, given seconds since `received_bytes` last increased.
 
-    Before anything transfers, that is simply how long the download has been running.
+    Before anything transfers, that is simply how long the download has been running. `elapsed` is how long
+    the candidate has had altogether, which is the only thing that stops a peer trickling slowly enough to
+    reset every other budget on the way.
     """
     if on_disk:
         return Move.DONE
@@ -110,6 +129,8 @@ def move(transfer: Transfer, *, on_disk: bool, stuck_for: float, declared_queue:
         return Move.WAIT if stuck_for <= FINISHED_GRACE else Move.FAILED
     if transfer.status in _OVER:
         return Move.FAILED
+    if elapsed > TRANSFER_CEILING:
+        return Move.ROTATE
     return Move.ROTATE if stuck_for > budget_for(transfer, declared_queue=declared_queue) else Move.WAIT
 
 
@@ -229,6 +250,9 @@ class QuietNetwork:
 
     limit: int = QUIET_AFTER
     stuck_after: int = STUCK_AFTER
+    # The child's stderr, when the caller has one: it is the only thing that can tell a search that came
+    # back empty from a search the child could not send at all.
+    child: "slsk.ChildLog | None" = None
     stopped: threading.Event = field(default_factory=threading.Event)
 
     def __post_init__(self) -> None:
@@ -238,8 +262,24 @@ class QuietNetwork:
         self._fails = 0
         self._hung = 0
 
+    @property
+    def session_lost(self) -> bool:
+        """Whether the child has said it has no session left.
+
+        The server drops a client, aioslsk does not reconnect, and every search from then on is an ordinary
+        success with nothing in it — which is what a rare track looks like too. Nothing else in the stack
+        can tell those apart, and the child will not recover: `ReconnectSettings.auto` is off and the
+        watchdog is cancelled when the connection closes.
+        """
+        return self.child is not None and self.child.lost_session > 0
+
     def observe(self, found: int) -> None:
         """One search's raw result count, as the child reports it."""
+        if self.session_lost:
+            # An empty answer from a child with no session is not the network's answer, and there is no
+            # streak to count: the pass is over as soon as this is known.
+            self.stopped.set()
+            return
         with self._lock:
             self._run = 0 if found else self._run + 1
             self._fails = 0
@@ -343,10 +383,12 @@ def await_transfer(
 
     last_bytes = 0
     last_change = clock()
+    started = last_change
     while True:
         stuck_for = clock() - last_change
         on_disk = bool(local_path) and Path(local_path).is_file()
-        decision = move(report, on_disk=on_disk, stuck_for=stuck_for, declared_queue=candidate.queue)
+        decision = move(report, on_disk=on_disk, stuck_for=stuck_for, declared_queue=candidate.queue,
+                        elapsed=clock() - started)
         if decision is not Move.WAIT:
             return decision, local_path
 
@@ -606,6 +648,7 @@ def run(
     clock=time.monotonic,
     retry: bool = False,
     stream=None,
+    child: "slsk.ChildLog | None" = None,
 ) -> Summary:
     """The whole pass: every record the job holds, `workers` of them at a time, writing as it goes.
 
@@ -614,7 +657,7 @@ def run(
     """
     records = job.records()
     summary = Summary()
-    quiet = QuietNetwork()
+    quiet = QuietNetwork(child=child)
     bar = progress.Bar(len(records), log=log, stream=stream)
 
     # The network's rate on searching, and ours to keep. Zero is the loop's own speed, worth having only for
@@ -657,17 +700,26 @@ def run(
         with ThreadPoolExecutor(max_workers=max(1, config.workers)) as pool:
             list(pool.map(work, records))
 
-    if quiet.hung:
+    if quiet.hung or quiet.session_lost:
         summary.failed.sort()
         summary.dropped = drop_exhausted(job, log=say)
         summary.failed = [idx for idx in summary.failed if idx not in set(summary.dropped)]
-        job.append_event("server_stuck", consecutive=quiet.hung, unsearched=len(summary.unsearched))
+        if quiet.session_lost:
+            # The child answered, and every answer was empty because it had no session to search with.
+            # Reported and named here, because from the inside this is indistinguishable from a quiet
+            # network, and a pass that stops on it while returning success is a pass that lies.
+            job.append_event("lost_session", unsearched=len(summary.unsearched))
+            reason = (f"the child lost its session — {len(summary.unsearched)} tracks were never searched. "
+                      f"The server stopped answering it and it does not reconnect, so a fresh pass with a "
+                      f"fresh child picks them up.")
+        else:
+            job.append_event("server_stuck", consecutive=quiet.hung, unsearched=len(summary.unsearched))
+            reason = (f"{quiet.hung} searches timed out in a row — {len(summary.unsearched)} tracks were "
+                      f"never searched. The child had stopped answering; the run is open, so a fresh pass "
+                      f"picks it up.")
         job.write_status(config)
         bar.close()
-        raise ServerStuck(
-            f"{quiet.hung} searches timed out in a row — {len(summary.unsearched)} tracks were never "
-            f"searched. The child had stopped answering; the run is open, so a fresh pass picks it up."
-        )
+        raise ServerStuck(reason, lost_session=quiet.session_lost)
 
     if quiet.stopped.is_set():
         job.append_event("network_quiet", consecutive=quiet.tripped_at,

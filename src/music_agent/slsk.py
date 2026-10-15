@@ -83,13 +83,22 @@ class ChildLog:
 
     NOISE = "failed to fulfill ConnectToPeer request"
     OPENING = "Traceback (most recent call last):"
+    # The child's own words for a session it no longer has. aioslsk never raises on this and never
+    # reconnects either — `ReconnectSettings.auto` is off, and the watchdog is cancelled when the server
+    # closes the connection — so every search after it answers nothing, which is exactly what a quiet
+    # network looks like. Outside is the only place that can tell the two apart.
+    LOST_SESSION = "no valid session was set"
 
     def __init__(self, log=print) -> None:
         self._log = log
         self._frames = False
         self.refused = 0
+        self.lost_session = 0
 
     def __call__(self, line: str) -> None:
+        if self.LOST_SESSION in line:
+            self.lost_session += 1
+            return
         if self.NOISE in line:
             self.refused += 1
             return
@@ -104,7 +113,12 @@ class ChildLog:
         self._log(f"slsk: {line}")
 
     def report(self) -> None:
-        """What the refusals came to, in one line, at the end of a pass."""
+        """What the child's noise came to, in one line each, at the end of a pass."""
+        if self.lost_session:
+            times = "time" if self.lost_session == 1 else "times"
+            self._log(f"slsk: the session was lost {self.lost_session} {times} — the server stopped "
+                      f"answering this client and it does not reconnect, so every search after the first "
+                      f"read as empty")
         if self.refused:
             self._log(f"slsk: {self.refused} peer connections refused — the network, not the run")
 

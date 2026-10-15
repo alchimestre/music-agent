@@ -16,7 +16,7 @@ import pytest
 
 from music_agent import acquire
 from music_agent import config as config_module
-from music_agent import library, reference, state
+from music_agent import library, reference, slsk, state
 from music_agent.mcp import StdioServer
 from music_agent.rules import Candidate
 
@@ -161,10 +161,10 @@ def tools_called(path: Path) -> list[str]:
     return [entry["tool"] for entry in calls_made(path)]
 
 
-def pass_once(config, job, server, lookup, calls: Path, shelf=None) -> tuple[acquire.Summary, Quiet]:
+def pass_once(config, job, server, lookup, calls: Path, shelf=None, child=None) -> tuple[acquire.Summary, Quiet]:
     quiet = Quiet(Clock())
     summary = acquire.run(config, job, server, lookup, library=shelf, log=quiet.log,
-                          sleep=quiet.sleep, clock=quiet.clock)
+                          sleep=quiet.sleep, clock=quiet.clock, child=child)
     return summary, quiet
 
 
@@ -694,6 +694,48 @@ def test_a_run_of_empty_searches_is_a_network_that_has_gone_quiet():
 
     assert quiet.stopped.is_set()
     assert quiet.tripped_at == 3
+
+
+def test_a_search_the_child_cannot_send_is_not_a_quiet_network():
+    """2026-10-15: the server dropped the client, aioslsk never reconnected, and every search afterwards came
+    back empty, which from the outside is what a playlist of rare tracks looks like. Fifty of those stopped
+    the pass, and the pass reported the network as the cause."""
+    child = slsk.ChildLog(log=lambda line: None)
+    quiet = acquire.QuietNetwork(child=child)
+    child("WARNING:aioslsk.search.manager:not returning search results : no valid session was set")
+
+    quiet.observe(0)
+
+    assert quiet.session_lost is True
+    assert quiet.stopped.is_set()
+    assert quiet.tripped_at == 0, "no streak was counted: those answers were never the network's"
+
+
+def test_a_lost_session_stops_the_pass_and_says_which_it_was(tmp_path):
+    """The caller restarts the pass with a fresh child on the strength of this, so the two reasons have to
+    reach it apart: a quiet network is worth waiting for, an account with another client on it is not."""
+    config, job, server, calls = setup(tmp_path, results=[], tracks=6)
+    child = slsk.ChildLog(log=lambda line: None)
+    child.lost_session = 1                      # the child's own stderr already said it
+
+    with server, pytest.raises(acquire.ServerStuck) as raised:
+        pass_once(config, job, server, Reference(), calls, child=child)
+
+    assert raised.value.lost_session is True
+    assert "session" in str(raised.value)
+    events = (config.state_root / job.id / "events.jsonl").read_text(encoding="utf-8")
+    assert "lost_session" in events
+
+
+def test_one_candidate_may_not_own_the_pass():
+    """Every other budget is reset by a byte, so a peer slow enough never trips one: 0.107 MB/s sustained on
+    a 99 MB file held a whole pass open for 764 of its 1,772 seconds, with nothing else able to run."""
+    moving = acquire.Transfer(status="downloading", connection_state="transferring")
+
+    assert acquire.move(moving, on_disk=False, stuck_for=0.5,
+                        elapsed=acquire.TRANSFER_CEILING - 1) is acquire.Move.WAIT
+    assert acquire.move(moving, on_disk=False, stuck_for=0.5,
+                        elapsed=acquire.TRANSFER_CEILING + 1) is acquire.Move.ROTATE
 
 
 def test_any_hit_resets_the_run_of_empty_searches():

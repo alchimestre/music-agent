@@ -98,7 +98,20 @@ def test_the_example_config_is_valid_and_agrees_with_the_defaults():
     assert config.lossy == DEFAULTS.lossy
     assert config.target_lufs == DEFAULTS.target_lufs
     assert config.search_interval == DEFAULTS.search_interval
+    assert config.workers == DEFAULTS.workers
+    assert config.max_downloads == DEFAULTS.max_downloads
+    assert config.max_searches == DEFAULTS.max_searches
+    assert config.max_operations == DEFAULTS.max_operations
     assert config.state_root == DEFAULTS.state_root
+
+
+def test_the_ceilings_do_not_contradict_each_other():
+    """Breaking these does not make a pass slower, it ends it: a search queued behind the socket lock reaches
+    the call deadline, and four timeouts in a row stop the pass. The example states the rule in a comment;
+    this is the rule, checked against the defaults a fresh clone runs on."""
+    assert DEFAULTS.max_searches >= DEFAULTS.workers
+    assert DEFAULTS.workers <= DEFAULTS.max_downloads
+    assert DEFAULTS.max_operations > DEFAULTS.max_searches
 
 
 def test_the_example_config_pins_the_acquisition_server_to_a_commit():
