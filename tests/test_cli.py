@@ -605,6 +605,38 @@ def test_run_stops_at_the_stage_that_failed(tmp_path, capsys, monkeypatch):
     assert "stopped at process" in capsys.readouterr().err
 
 
+def test_run_places_what_arrived_when_a_pass_dies(tmp_path, capsys, monkeypatch):
+    """Every file a pass brings in is written to the run as it goes, so a pass that dies under it does not
+    take them with it. Ending the run where the pass ended is how eighteen downloaded files sat in staging
+    with nothing pointing at them, and every one of them had been paid for."""
+    config_path = make_paths_config(tmp_path)
+    tracklist = tmp_path / "list.txt"
+    tracklist.write_text("Kiasmos - Blurred\n", encoding="utf-8")
+
+    happened: list[str] = []
+
+    def dying_pass(config, job, *, retry):
+        happened.append("acquire")
+        raise acquire.ServerStuck("the child had stopped answering")
+
+    def stage(name):
+        def run(config, args):
+            happened.append(name)
+            return 0
+        return run
+
+    monkeypatch.setattr(cli_module, "_acquire_pass", dying_pass)
+    monkeypatch.setattr(cli_module, "_process", stage("process"))
+    monkeypatch.setattr(cli_module, "_import", stage("import"))
+    monkeypatch.setattr(cli_module.sweep, "find", lambda config: sweep.Leftovers([], []))
+
+    args = Namespace(job=None, tracks=str(tracklist), name=None, no_traktor=False)
+
+    assert cli_module._run(config_module.load(config_path), args) == 1
+    assert happened == ["acquire", "process", "import"], happened
+    assert "stopped early" in capsys.readouterr().err, "and says the passes failed without pretending"
+
+
 def test_a_playlist_url_starts_the_run_a_file_would_have(tmp_path, monkeypatch):
     """2026-10-13: a playlist url is passed the same way a file is. So `--tracks` takes both, and what a
     file's stem gave the run a playlist's own name gives it."""

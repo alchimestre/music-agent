@@ -58,12 +58,17 @@ def _run(config: config_module.Config, args: argparse.Namespace) -> int:
     # network's own answer rather than a count. Nothing spins on a dead account: the guard below ends the
     # attempts, and a pass that downloads nothing would find the same peers again a minute later.
     PASSES = 6
+    failed = 0
     for number in range(1, PASSES + 1):
         try:
             summary = _acquire_pass(config, job, retry=number > 1)
         except ACQUIRE_ERRORS as error:
+            # The passes are abandoned, not the run. Every file they brought in is already written to the run
+            # as it went, so what did arrive is still worth placing — ending here is how one stage's bad
+            # minute left eighteen downloaded files in staging with nothing pointing at them.
             print(error, file=sys.stderr)
-            return 1
+            failed = 1
+            break
         _report(summary, job, len(summary.failed))
         if not summary.downloaded:
             break
@@ -86,7 +91,9 @@ def _run(config: config_module.Config, args: argparse.Namespace) -> int:
     _queue(job)
     print(f"\nrun {job.id} is in both collections. Traktor wants Check Consistency → Analyze for what it "
           f"added; rekordbox is done.")
-    return 0
+    if failed:
+        print("the passes stopped early — everything they did bring in has still been placed", file=sys.stderr)
+    return failed
 
 
 def _build_parser() -> argparse.ArgumentParser:
