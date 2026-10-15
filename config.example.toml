@@ -41,8 +41,9 @@ search_interval = 1.0
 
 [genres]
 # The vocabulary's mapping table, which lives in music-tagger: its taxonomy maps the names the rest of the
-# world uses onto the families this collection has. Empty or absent means genres stay blank.
-taxonomy = "~/projects/music-tagger/skills/music-tagger/taxonomy.json"
+# world uses onto the families this collection has. Point it at that project's own taxonomy.json; empty or
+# absent means genres stay blank, which is what a machine without music-tagger installed wants.
+taxonomy = ""
 
 [traktor]
 # Traktor's collection is another project's to write. This is how to run its tool here; a machine without it
