@@ -174,6 +174,16 @@ def test_the_child_saying_it_has_no_session_is_counted_rather_than_repeated():
     assert "session" in said[0]
 
 
+def test_a_login_that_never_completed_counts_as_the_loss_too():
+    """The shares manager says it at startup, before a single search: `attempted to report shares without
+    valid session`. That is a login that never became a session, and every search after it answers nothing."""
+    logs = slsk.ChildLog(log=lambda line: None)
+
+    logs("WARNING:aioslsk.shares.manager:attempted to report shares without valid session")
+
+    assert logs.lost_session == 1
+
+
 def test_the_reader_dying_counts_as_the_same_loss_as_the_session():
     """2026-10-15: aioslsk's message reader raised `UnboundLocalError` on a frame it could not deserialize,
     the task ended, and every search after it answered nothing while the child looked healthy. It is the
