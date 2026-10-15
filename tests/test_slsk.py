@@ -172,3 +172,19 @@ def test_the_child_saying_it_has_no_session_is_counted_rather_than_repeated():
     logs.report()
     assert len(said) == 1
     assert "session" in said[0]
+
+
+def test_the_reader_dying_counts_as_the_same_loss_as_the_session():
+    """2026-10-15: aioslsk's message reader raised `UnboundLocalError` on a frame it could not deserialize,
+    the task ended, and every search after it answered nothing while the child looked healthy. It is the
+    same loss as the server taking the session, and it needs the same answer: a fresh child."""
+    said = []
+    logs = slsk.ChildLog(log=said.append)
+
+    logs('ERROR:aioslsk.client:unhandled exception : UnboundLocalError("cannot access local variable '
+         "'message' where it is not associated with a value\")")
+    logs("aioslsk.exceptions.MessageDeserializationError: failed to deserialize message (frames suppressed)")
+    logs("INFO:aioslsk.network.network:Search complete: 0 raw results")
+
+    assert logs.lost_session == 2
+    assert said == ["slsk: INFO:aioslsk.network.network:Search complete: 0 raw results"]

@@ -83,11 +83,16 @@ class ChildLog:
 
     NOISE = "failed to fulfill ConnectToPeer request"
     OPENING = "Traceback (most recent call last):"
-    # The child's own words for a session it no longer has. aioslsk never raises on this and never
-    # reconnects either — `ReconnectSettings.auto` is off, and the watchdog is cancelled when the server
-    # closes the connection — so every search after it answers nothing, which is exactly what a quiet
-    # network looks like. Outside is the only place that can tell the two apart.
-    LOST_SESSION = "no valid session was set"
+    # The ways the child loses the ability to answer. It reports each of them and recovers from none.
+    # `no valid session` is the server taking the session away. The other is the child's own message reader
+    # dying: `DataConnection._message_reader_loop` raises `UnboundLocalError` on a frame it cannot
+    # deserialize, the task ends, and nothing says so — every search after it answers nothing, and `_connect`
+    # then short-circuits on a flag only `logout()` clears, so it cannot log in again either.
+    LOST_SESSION = (
+        "no valid session was set",
+        "MessageDeserializationError",
+        "cannot access local variable 'message'",
+    )
 
     def __init__(self, log=print) -> None:
         self._log = log
@@ -96,7 +101,7 @@ class ChildLog:
         self.lost_session = 0
 
     def __call__(self, line: str) -> None:
-        if self.LOST_SESSION in line:
+        if any(marker in line for marker in self.LOST_SESSION):
             self.lost_session += 1
             return
         if self.NOISE in line:
@@ -116,9 +121,9 @@ class ChildLog:
         """What the child's noise came to, in one line each, at the end of a pass."""
         if self.lost_session:
             times = "time" if self.lost_session == 1 else "times"
-            self._log(f"slsk: the session was lost {self.lost_session} {times} — the server stopped "
-                      f"answering this client and it does not reconnect, so every search after the first "
-                      f"read as empty")
+            self._log(f"slsk: the child lost its ability to answer {self.lost_session} {times} — the server "
+                      f"took the session, or its own message reader died on a frame it could not read. It "
+                      f"recovers from neither, so every search after the first came back empty")
         if self.refused:
             self._log(f"slsk: {self.refused} peer connections refused — the network, not the run")
 
