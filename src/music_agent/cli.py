@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 from . import acquire
@@ -340,6 +341,11 @@ ACQUIRE_ERRORS = (slsk.MissingCredential, slsk.PortBusy, mcp.ServerError, acquir
 # a restart costs the price of a login; four children in a row dying is a problem a restart will not fix.
 RESTARTS = 3
 
+# What is waited before a fresh child is worth trying, once the account's session has been taken and the child
+# that held it died without logging out. Doubling, because a session the server is holding is a matter of time,
+# and every attempt spends about forty seconds finding out that it is still there.
+SESSION_WAITS = (60.0, 180.0, 420.0)
+
 
 def _stage(name: str, detail: str = "") -> None:
     """One line saying which stage is running, and on what.
@@ -471,20 +477,28 @@ def _acquire_pass(config: config_module.Config, job: state.Job, *, retry: bool) 
     killed process, calls that stop returning. Everything it did is already written to the run as it went,
     so the pass is resumed rather than lost: a new child, the same records, and a line saying so.
 
-    A session the server has taken away is not that, and it is not the child's fault either: the account
-    had another client on it, and the next child loses the session in exactly the same way. The first loss
-    is worth one fresh child, which costs a call and settles whether the account is contended; the second
-    ends it with what to do about it, instead of four attempts' worth of deadlines to learn nothing.
+    A session the server has taken away is not that. The child that lost it could not log out either — its
+    networking is what died — so the server keeps the account until its own timeout passes, and a fresh child
+    is refused for as long as that takes. Waiting is the only thing that clears it, and every attempt spends
+    about forty seconds finding out that it has not: measured here, a login succeeds again somewhere between
+    twelve and seventeen minutes after the child died. So the wait doubles, and the four attempts cover it.
+
+    A reader that died inside one child is a third thing, and it is neither of those: the next child carries
+    on from where the run got to, at once. `ServerStuck.lost_session` is what tells them apart.
     """
     lost = 0
     for attempt in range(1, RESTARTS + 2):
         try:
             return _one_pass(config, job, retry=retry, attempt=attempt)
         except (mcp.ServerError, acquire.ServerStuck) as error:
-            if isinstance(error, acquire.ServerStuck) and error.lost_session:
-                lost += 1
-            if attempt > RESTARTS or lost > 1:
+            if attempt > RESTARTS:
                 raise
+            if isinstance(error, acquire.ServerStuck) and error.lost_session:
+                wait = SESSION_WAITS[min(lost, len(SESSION_WAITS) - 1)]
+                lost += 1
+                print(f"the account is still held by the child that died — waiting {wait:.0f}s before a fresh "
+                      f"one is worth trying", file=sys.stderr)
+                time.sleep(wait)
             print(f"the server went down mid-pass ({error}){_silence(error)}; "
                   f"{RESTARTS + 1 - attempt} more attempt(s)", file=sys.stderr)
     raise AssertionError("unreachable: the loop either returns or raises")
