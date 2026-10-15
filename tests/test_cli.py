@@ -209,6 +209,25 @@ def test_a_name_seen_on_a_few_tracks_is_reported_too(tmp_path, capsys):
     assert "Goa Trance" in capsys.readouterr().out
 
 
+def test_a_track_left_without_a_genre_is_reported_once_the_run_has_finished(tmp_path, capsys):
+    """The report cannot look only for the status a track holds half-way through: a run ends at
+    `imported`, and a real one reported five ungenred tracks while the queue said nothing."""
+    config_path = make_config(tmp_path)
+    config = config_module.load(config_path)
+    job = state.create(config, "run")
+    job.write_records([state.Record(idx=1, artist="Phara", title="Six Is A Charm", status=state.IMPORTED,
+                                    local_path="/tmp/Six Is A Charm.aiff"),
+                       state.Record(idx=2, artist="Kiasmos", title="Blurred", status=state.IMPORTED,
+                                    genre="Techno", local_path="/tmp/Blurred.aiff")])
+
+    main(["--config", str(config_path), "status", "--queue"])
+
+    out = capsys.readouterr().out
+    assert "1 without a genre" in out
+    assert "Six Is A Charm" in out
+    assert "Blurred" not in out
+
+
 def test_the_genre_report_does_not_open_the_collection(tmp_path, capsys, monkeypatch):
     """The vocabulary moved to music-tagger, so nothing here reads the collection for a genre: the report is
     the tracks that got none, and the names seen on them."""
