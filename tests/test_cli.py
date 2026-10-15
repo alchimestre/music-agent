@@ -241,6 +241,26 @@ def test_the_collection_is_not_opened_when_no_track_needs_a_genre(tmp_path, monk
     assert main(["--config", str(config_path), "status", "--queue"]) == 0
 
 
+def test_the_taxonomy_line_says_which_kind_of_absent(tmp_path, capsys, monkeypatch):
+    """Two different problems, and the line is what tells them apart: nothing configured at all, and a path
+    configured with no file behind it. An unconfigured one used to print `.`, which is what `Path("")`
+    renders as and reads as a directory that was looked in and found empty."""
+    monkeypatch.setattr(library, "open", lambda config: library.Library([], []))
+    for name in ("ACOUSTID_API_KEY", "MUSICBRAINZ_CONTACT", "DISCOGS_TOKEN"):
+        monkeypatch.setenv(name, "test")
+
+    plain = tmp_path / "plain.toml"
+    plain.write_text('[paths]\nstate = "state"\n', encoding="utf-8")
+    cli_module._tools(config_module.load(plain))
+    assert "no genre taxonomy at (unset)" in capsys.readouterr().err
+
+    missing = tmp_path / "nowhere.json"
+    configured = tmp_path / "configured.toml"
+    configured.write_text(f'[paths]\nstate = "state"\n\n[genres]\ntaxonomy = "{missing}"\n', encoding="utf-8")
+    cli_module._tools(config_module.load(configured))
+    assert f"no genre taxonomy at {missing}" in capsys.readouterr().err
+
+
 # ── the review command ───────────────────────────────────────────
 
 

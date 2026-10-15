@@ -315,7 +315,7 @@ def _tools(config: config_module.Config) -> process.Tools:
     shelf = library.open(config)
     families = genre.families(config.taxonomy)
     if not families:
-        print(f"no genre taxonomy at {str(config.taxonomy) or '(unset)'} — genres stay blank; point "
+        print(f"no genre taxonomy at {config.taxonomy or '(unset)'} — genres stay blank; point "
               f"[genres] taxonomy in config.toml at music-tagger's taxonomy.json", file=sys.stderr)
     return process.Tools.live(config, vocabulary=genre.vocabulary(shelf.genres(), families),
                               mappings=genre.table(config.taxonomy))
