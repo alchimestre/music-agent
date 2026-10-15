@@ -125,6 +125,18 @@ def test_a_finished_run_is_not_the_resume_target(tmp_path):
     assert state.newest_unfinished(config) is None
 
 
+def test_a_run_a_kill_left_behind_is_not_the_resume_target(tmp_path):
+    """A killed launch still reads as unfinished, because nothing writes its finish event. It used to
+    shadow everything that ran after it, the scan reaching back past the run that did finish."""
+    config = make_config(tmp_path)
+    state.create(config, "killed")
+    ran = state.create(config, "ran-after")     # created a moment later, so it sorts last
+    ran.finish()
+
+    assert state.newest_unfinished(config) is None
+    assert state.newest(config).id == ran.id
+
+
 def test_events_append_in_order(tmp_path):
     job = state.create(make_config(tmp_path), "run")
     job.append_event("searching", query="kiasmos blurred")

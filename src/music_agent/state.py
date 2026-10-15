@@ -349,11 +349,14 @@ def all_jobs(config: Config) -> list[Job]:
 
 
 def newest_unfinished(config: Config) -> Job | None:
-    """The resume target: the most recent run that never wrote its finish event."""
-    for job in reversed(all_jobs(config)):
-        if not job.finished():
-            return job
-    return None
+    """The resume target: the most recent run that never wrote its finish event.
+
+    Only the newest run can be it. A run older than a finished one was abandoned — its process was killed,
+    and nothing will ever write that event — so reaching back past a finished run hands every command
+    without a `--job` a run that stopped days ago.
+    """
+    job = newest(config)
+    return None if job is None or job.finished() else job
 
 
 def newest(config: Config) -> Job | None:
