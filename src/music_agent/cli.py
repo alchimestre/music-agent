@@ -49,18 +49,23 @@ def _run(config: config_module.Config, args: argparse.Namespace) -> int:
     pinned = SimpleNamespace(job=job.id, tracks=None, name=None, retry=True,
                              no_backup=False, no_traktor=args.no_traktor)
 
-    for retry in (False, True):
+    # A pass ends when the network goes quiet, and a quiet minute is not a reason to leave a hundred tracks
+    # unsearched: the next pass meets a different set of peers. Two passes was the whole budget, so the tail
+    # was left for a person to re-run by hand, and the last three runs left 126, 161 and 95 tracks open.
+    #
+    # The loop continues while a pass is still bringing files in and stops when one is not, which is the
+    # network's own answer rather than a count. Nothing spins on a dead account: the guard below ends the
+    # attempts, and a pass that downloads nothing would find the same peers again a minute later.
+    PASSES = 6
+    for number in range(1, PASSES + 1):
         try:
-            summary = _acquire_pass(config, job, retry=retry)
+            summary = _acquire_pass(config, job, retry=number > 1)
         except ACQUIRE_ERRORS as error:
             print(error, file=sys.stderr)
             return 1
         _report(summary, job, len(summary.failed))
-        if not retry:
-            # A second pass costs minutes and takes what the first one left: a peer whose queue was full at
-            # the wrong moment, a search that timed out. Past that, nothing more is worth asking for.
-            if not (summary.failed or summary.unsearched):
-                break
+        if not summary.downloaded:
+            break
 
     for stage, handler in (("process", _process), ("import", _import)):
         code = handler(config, pinned)

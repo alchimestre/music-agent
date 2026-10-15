@@ -521,11 +521,14 @@ def test_run_does_every_stage_in_order_and_asks_nothing(tmp_path, capsys, monkey
 
     happened: list[str] = []
     seen: list[str] = []
+    # Two passes that bring a file in and then one that does not: the loop ends on the first pass that finds
+    # nothing, which is the network's answer rather than a count of two. `retry` is set after the first pass.
+    rations = [acquire.Summary(downloaded=[1]), acquire.Summary(downloaded=[2]), acquire.Summary()]
 
     def pass_off(config, job, *, retry):
         happened.append(f"acquire:{int(retry)}")
         seen.append(job.id)
-        return acquire.Summary(in_review=[1], failed=[] if retry else [2])
+        return rations[min(len(happened) - 1, len(rations) - 1)]
 
     def stage(name):
         def run(config, args):
@@ -546,9 +549,9 @@ def test_run_does_every_stage_in_order_and_asks_nothing(tmp_path, capsys, monkey
     assert cli_module._run(config_module.load(config_path), args) == 0
 
     out = capsys.readouterr().out
-    # Two acquire passes — the second only because the first left something to retry — then process, then
-    # import. The sweep is the fourth stage and writes nothing here.
-    assert happened == ["acquire:0", "acquire:1", "process", "import"], happened
+    # Passes while they keep bringing files in, then process, then import. The sweep is the last stage and
+    # writes nothing here.
+    assert happened == ["acquire:0", "acquire:1", "acquire:1", "process", "import"], happened
     assert seen[0] == seen[-1], "every stage worked on the one run the tracklist started"
     assert "── run ·" in out, "the run says what it is doing before it starts"
     assert "── sweep" in out, "and each stage of its own says so"
