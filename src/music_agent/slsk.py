@@ -93,6 +93,14 @@ class ChildLog:
         # search, and the shares manager's `attempted to report shares without valid session` at startup,
         # which is a login that never completed at all.
         "valid session",
+    )
+    READER_DIED = (
+        # The other way it stops answering, and a different thing entirely: aioslsk's
+        # `DataConnection._message_reader_loop` raises on a frame it cannot deserialize — a short read gives
+        # it `struct.error: unpack_from requires a buffer of at least 293 bytes` — the task ends, and nothing
+        # says so. Told apart from the session because the answer differs: the session belongs to the
+        # account and the next child loses it the same way, while this is one child's bad luck and the next
+        # one carries on from where the pass left off.
         "MessageDeserializationError",
         "cannot access local variable 'message'",
     )
@@ -102,10 +110,19 @@ class ChildLog:
         self._frames = False
         self.refused = 0
         self.lost_session = 0
+        self.reader_died = 0
+
+    @property
+    def cannot_answer(self) -> bool:
+        """Whether the child has said it can no longer answer, either way. It recovers from neither."""
+        return bool(self.lost_session or self.reader_died)
 
     def __call__(self, line: str) -> None:
         if any(marker in line for marker in self.LOST_SESSION):
             self.lost_session += 1
+            return
+        if any(marker in line for marker in self.READER_DIED):
+            self.reader_died += 1
             return
         if self.NOISE in line:
             self.refused += 1
@@ -124,9 +141,14 @@ class ChildLog:
         """What the child's noise came to, in one line each, at the end of a pass."""
         if self.lost_session:
             times = "time" if self.lost_session == 1 else "times"
-            self._log(f"slsk: the child lost its ability to answer {self.lost_session} {times} — the server "
-                      f"took the session, or its own message reader died on a frame it could not read. It "
-                      f"recovers from neither, so every search after the first came back empty")
+            self._log(f"slsk: the child was left without a session {self.lost_session} {times} — the server "
+                      f"stopped answering it, or a login never completed. Every search after the first came "
+                      f"back empty")
+        if self.reader_died:
+            times = "time" if self.reader_died == 1 else "times"
+            self._log(f"slsk: the child's message reader died {self.reader_died} {times} on a frame it could "
+                      f"not read — a short read raises `struct.error` inside aioslsk — and it answers nothing "
+                      f"after that")
         if self.refused:
             self._log(f"slsk: {self.refused} peer connections refused — the network, not the run")
 
