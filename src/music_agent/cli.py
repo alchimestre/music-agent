@@ -525,11 +525,17 @@ def _one_pass(config: config_module.Config, job: state.Job, *, retry: bool,
     shelf = library.open(config)
     _stage("acquire", f"{len(job.records())} tracks · pass {attempt}"
                       f"{' · retry' if retry else ''}")
-    with mcp.StdioServer(list(config.soulseek_command), env=slsk.environment(config),
-                         on_log=logs) as server:
-        summary = acquire.run(config, job, server, reference.lookup(config),
-                              library=shelf, retry=retry, child=logs)
-    logs.report()
+    try:
+        with mcp.StdioServer(list(config.soulseek_command), env=slsk.environment(config),
+                             on_log=logs) as server:
+            summary = acquire.run(config, job, server, reference.lookup(config),
+                                  library=shelf, retry=retry, child=logs)
+    finally:
+        # The child's own account — a session it lost, a reader that died, the peers that refused it — is
+        # counted rather than printed as it happens, so this is the only place it is ever said. The pass that
+        # fails is the one that raises out of `acquire.run`, and until this was a `finally` that pass was the
+        # one where nothing was ever said: five of them on 2026-10-16 reported the count they had, not why.
+        logs.report()
     return summary
 
 
