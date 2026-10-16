@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,17 @@ def test_the_environment_carries_what_the_server_reads(tmp_path, creds, monkeypa
     assert env["SLSK_PASSWORD"] == "a secret"
     assert env["SLSK_DOWNLOAD_DIR"] == str(config.staging)
     assert (env["SLSK_LISTEN_PORT"], env["SLSK_OBFUSCATED_PORT"]) == ("41000", "41001")
+
+
+def test_the_child_is_told_what_to_share(tmp_path, creds):
+    """A client that reports no shared files reads as a leecher, and peers queue or ban those. The two
+    lanes are the shares; staging is not, since it holds what is still being worked on."""
+    config = make_config(tmp_path)
+
+    env = slsk.environment(config)
+
+    assert env["SLSK_SHARE_DIRS"] == os.pathsep.join([str(config.lossless), str(config.lossy)])
+    assert str(config.staging) not in env["SLSK_SHARE_DIRS"]
 
 
 def test_credentials_are_renamed_to_what_the_server_expects(tmp_path, monkeypatch):
