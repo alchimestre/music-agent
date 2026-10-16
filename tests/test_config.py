@@ -103,6 +103,10 @@ def test_the_example_config_is_valid_and_agrees_with_the_defaults():
     assert config.max_searches == DEFAULTS.max_searches
     assert config.max_operations == DEFAULTS.max_operations
     assert config.state_root == DEFAULTS.state_root
+    assert config.peers == DEFAULTS.peers
+    assert config.maxretry == DEFAULTS.maxretry
+    assert config.findtime_days == DEFAULTS.findtime_days
+    assert config.bantime_days == DEFAULTS.bantime_days
 
 
 def test_the_ceilings_do_not_contradict_each_other():

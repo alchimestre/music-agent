@@ -190,6 +190,11 @@ def _build_parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "tidy", parents=[common],
         help="what a pass left for a person: duplicates, unrowed files, staging and lane drift")
+    ignored_peers = commands.add_parser(
+        "peers", parents=[common],
+        help="the peers that advertise files and deliver nothing, and the ignore they earned")
+    ignored_peers.add_argument("--unban", default=None, metavar="USER",
+                               help="forget a peer and its failures, so the next pass asks it again")
     return parser
 
 
@@ -874,6 +879,51 @@ def _sweep(config: config_module.Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def _peers(config: config_module.Config, args: argparse.Namespace) -> int:
+    """The ignore list: who is on it, what earned the place, and how long is left.
+
+    A peer that advertises a file and then delivers nothing is what a paid mirror looks like. Failures are
+    counted per user inside a window, and enough of them earn an ignore that expires by itself.
+    `--unban` forgets a peer — failures and all — for the one that had a bad week rather than a business
+    model.
+    """
+    from .peers import Ledger, Unreadable
+
+    try:
+        ledger = Ledger.at(config)
+    except Unreadable as error:
+        print(error, file=sys.stderr)
+        return 1
+
+    if args.unban:
+        if ledger.unban(args.unban):
+            print(f"{args.unban} forgotten — the next pass asks them again")
+        else:
+            print(f"{args.unban} is not on the ledger")
+        return 0
+
+    print(f"ledger: {config.peers}")
+    rows = ledger.peers()
+    if not rows:
+        print("no peer has failed a download yet")
+        return 0
+
+    width = max(len(peer.user) for peer in rows)
+    ignored = 0
+    for peer in rows:
+        if peer.ignored:
+            ignored += 1
+            standing = f"ignored, {peer.days_left} days left"
+        else:
+            standing = "tolerated"
+        print(f"  {peer.user:<{width}}  {peer.failures}/{ledger.maxretry}  "
+              f"{peer.why or '—':<16}  {standing}")
+    print()
+    print(f"{len(rows)} peer(s), {ignored} ignored"
+          + ("  — music-agent peers --unban USER asks one again" if ignored else ""))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     config = config_module.load(getattr(args, "config", None))
@@ -901,6 +951,8 @@ def main(argv: list[str] | None = None) -> int:
         return _sweep(config, args)
     if args.command == "tidy":
         return _tidy(config, args)
+    if args.command == "peers":
+        return _peers(config, args)
     return 2                                        # unreachable: the subparser requires a command
 
 

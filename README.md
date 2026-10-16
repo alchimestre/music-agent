@@ -50,10 +50,17 @@ music-agent dedupe                              # one row per track; dry run, --
 music-agent backfill                            # a row for every file that has none; dry run, --apply adds
 music-agent sweep                               # staging's leftover .part files; --apply clears
 music-agent tidy                                # all four leftover checks at once; writes nothing
+music-agent peers                               # the peers that never deliver, and the ignore they earned
+music-agent peers --unban USER                  # ask one again: the failures go with the ban
 ```
 
 `acquire` and `process` take hours on a long tracklist. `review`, `status`, `import`, `dedupe`, `backfill`
 and `tidy` take seconds.
+
+A peer that advertises a file, accepts the transfer and hands over nothing is what a paid mirror looks like, so
+a pass counts those per user: `maxretry` of them inside `findtime_days`, across runs, earn an ignore lasting
+`bantime_days`. An ignored peer's files never enter a record, and a peer that delivers is forgiven. The counts
+live at `paths.peers`, beside the runs rather than inside one.
 
 `import` is scoped to one run's records. Two verbs keep the collection and the lanes in step, both dry runs
 until `--apply`:
@@ -99,8 +106,8 @@ Those three flags are the only writers of the decision axis (`GLOSSARY.md`).
 
 `config.toml` beside this file — copy `config.example.toml` to start — or
 `~/.config/music-agent/config.toml` for an installed copy; `--config` reads another one. It holds the staging
-and library directories, the loudness targets and tolerances, the Soulseek pace, the `[tools]` paths, and the
-names of the credential environment variables. No secrets.
+and library directories, the loudness targets and tolerances, the Soulseek pace, the peer ignore policy, the
+`[tools]` paths, and the names of the credential environment variables. No secrets.
 
 The two Soulseek listening ports are not in it: which port this machine can accept peers on is a fact about its
 network, so `SLSK_LISTEN_PORT` and `SLSK_OBFUSCATED_PORT` live in `.env` with the credentials. Forward the

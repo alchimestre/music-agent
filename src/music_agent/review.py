@@ -111,7 +111,8 @@ def accept(
         if server_factory is None:
             raise NotAccepted(f"track {record.idx} needs its file fetched, and no server was given")
         with server_factory() as server:
-            decision, path = acquire.await_transfer(server, candidate, log=log, sleep=sleep, clock=clock)
+            decision, path, _report = acquire.await_transfer(server, candidate, log=log, sleep=sleep,
+                                                             clock=clock)
         if decision is not acquire.Move.DONE:
             # The record is left exactly as it was: nothing was decided, and the candidate is marked tried
             # so the next pass moves on rather than offering the same peer again.
@@ -186,7 +187,8 @@ def accept_many(
             log(line)
 
     def fetch(server, record: state.Record, candidate: Candidate) -> Settled | str:
-        decision, path = acquire.await_transfer(server, candidate, log=say, sleep=sleep, clock=clock)
+        decision, path, _report = acquire.await_transfer(server, candidate, log=say, sleep=sleep,
+                                                         clock=clock)
         if decision is not acquire.Move.DONE:
             # The record is left as it was, and the candidate is marked tried so a later pass moves on.
             record.tried.append(acquire.identifier(candidate))

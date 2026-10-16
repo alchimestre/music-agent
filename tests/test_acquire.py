@@ -16,7 +16,7 @@ import pytest
 
 from music_agent import acquire
 from music_agent import config as config_module
-from music_agent import library, reference, slsk, state
+from music_agent import library, peers, reference, slsk, state
 from music_agent.mcp import StdioServer
 from music_agent.rules import Candidate
 
@@ -120,18 +120,23 @@ class Quiet:
         self.clock.tick(10)     # a fixed step, so a budget is crossed in a countable number of polls
 
 
-def setup(tmp_path: Path, *, results: list[dict], download: str | None = None, tracks: int = 1):
+def setup(tmp_path: Path, *, results: list[dict], download: str | None = None, tracks: int = 1,
+          soulseek: str = ""):
     """A config, a job holding `tracks` tracks, and a stand-in server wired to the scenario.
 
     Pacing is off here: these tests are about the loop and the download policy, and a pace would put sleeps
     of its own into a clock the test moves by hand. The pace has its own test, which sets one.
+
+    The ignore list is written under `tmp_path` too: a pass reads and writes it, and the default path is a
+    real one on a machine that runs this project.
     """
     config_path = tmp_path / "config.toml"
     config_path.write_text(f'[paths]\nstaging = "{tmp_path / "staging"}"\n'
                            f'lossless = "{tmp_path / "Loseless Tracks"}"\n'
                            f'lossy = "{tmp_path / "Losy Tracks"}"\n'
                            'state = "state"\n'
-                           '[soulseek]\nsearch_interval = 0.0\n',
+                           f'peers = "{tmp_path / "peers.json"}"\n'
+                           '[soulseek]\nsearch_interval = 0.0\n' + soulseek,
                            encoding="utf-8")
     (tmp_path / "staging").mkdir()
     config = config_module.load(config_path)
@@ -199,6 +204,41 @@ def pass_once(config, job, server, lookup, calls: Path, shelf=None, child=None) 
 def test_the_decision_to_wait_rotate_or_give_up(status, connection, on_disk, stuck, queue, expected):
     transfer = acquire.Transfer(status=status, connection_state=connection)
     assert acquire.move(transfer, on_disk=on_disk, stuck_for=stuck, declared_queue=queue) is expected
+
+
+@pytest.mark.parametrize(
+    "decision,status,received,queue,expected",
+    [
+        # Nothing to answer for: the file arrived.
+        (acquire.Move.DONE, "finished", 90_000, 0, None),
+        # A peer that says it cannot find a file it advertised, or fails outright, is the whole point.
+        (acquire.Move.FAILED, "not_found", 0, 0, "not_found"),
+        (acquire.Move.FAILED, "failed", 0, 0, "failed"),
+        # `finished` with no file is the peer's own claim coming to nothing.
+        (acquire.Move.FAILED, "finished", 0, 0, "finished"),
+        # Ours, not theirs: the child lost the session, and a cancel is a decision we made.
+        (acquire.Move.FAILED, "session_expired", 0, 0, None),
+        (acquire.Move.FAILED, "cancelled", 0, 0, None),
+        # A connect that never opened is theirs.
+        (acquire.Move.ROTATE, "queued", 0, 0, "nothing arrived"),
+        # A declared queue is normal Soulseek, and a peer that has sent bytes has shown it can send them.
+        (acquire.Move.ROTATE, "queued", 0, 5, None),
+        (acquire.Move.ROTATE, "downloading", 4096, 0, None),
+        # A queue in the hundreds of thousands is a paid mirror holding every request it ever gets: the
+        # declaration is the evidence, not the excuse (2026-10-16, from a real pass: DJ-Promo 10230,
+        # musicmasterrdjpool 159626, both with no free slots, neither ever delivering a byte).
+        (acquire.Move.ROTATE, "queued", 0, acquire.ABSURD_QUEUE, "nothing arrived"),
+        (acquire.Move.ROTATE, "queued", 0, 159_626, "nothing arrived"),
+    ],
+)
+def test_what_a_lost_download_says_about_the_peer(decision, status, received, queue, expected):
+    """Eating a budget is not the peer's fault, which is the difference between an ignore list and a pass
+    that bans whoever it was waiting for."""
+    candidate = Candidate(user="peer", path="M\\Kiasmos - Blurred.flac", duration=449, bitrate=855,
+                          queue=queue)
+    report = acquire.Transfer(status=status, received_bytes=received)
+
+    assert acquire.offence(decision, report, candidate) == expected
 
 
 # ── the candidate a search result becomes ────────────────────────────────────
@@ -618,7 +658,8 @@ def test_a_server_that_refuses_is_left_to_retry_rather_than_crashing(tmp_path):
     config_path.write_text(f'[paths]\nstaging = "{tmp_path / "staging"}"\n'
                            f'lossless = "{tmp_path / "Loseless Tracks"}"\n'
                            f'lossy = "{tmp_path / "Losy Tracks"}"\n'
-                           'state = "state"\n', encoding="utf-8")
+                           'state = "state"\n'
+                           f'peers = "{tmp_path / "peers.json"}"\n', encoding="utf-8")
     config = config_module.load(config_path)
     job = state.create(config, "test")
     job.write_records([state.Record(idx=1, artist="Kiasmos", title="Blurred")])
@@ -631,6 +672,87 @@ def test_a_server_that_refuses_is_left_to_retry_rather_than_crashing(tmp_path):
     assert summary.failed == [1]
     assert job.records()[0].status == state.RETRY_LATER
     assert any("refused" in line for line in quiet.lines)
+
+
+# ── the peers that never deliver (2026-10-16) ────────────────────────────────
+
+
+# Three files, three folders, one track: the identifiers differ, so all three are asked for, and the
+# basename is the same, so the rule judges all three Ready.
+THREE_FROM_ONE_MIRROR = [
+    {
+        "id": f"mirror:Vol{index}\\Kiasmos - Blurred.flac",
+        "username": "mirror",
+        "filename": f"Vol{index}\\Kiasmos - Blurred.flac",
+        "filesize": 82_000_000,
+        "extension": "flac",
+        "bitrate": 855,
+        "duration_sec": 449,
+        "queue_size": 0,
+    }
+    for index in range(3)
+]
+
+
+def test_a_mirror_that_never_delivers_is_ignored(tmp_path):
+    """A peer that advertises a file, accepts the transfer and hands over nothing is what a paid mirror looks
+    like, and three of those inside a fortnight is the count the list runs on."""
+    config, job, server, calls = setup(tmp_path, results=THREE_FROM_ONE_MIRROR,
+                                       download="not_found::0:|not_found::0:|not_found::0:",
+                                       soulseek="maxretry = 3\n")
+
+    with server:
+        summary, quiet = pass_once(config, job, server, Reference(), calls)
+
+    assert summary.ignored == {"mirror"}
+    assert peers.Ledger.at(config).ignored() == {"mirror"}
+    assert any("mirror ignored" in line for line in quiet.lines), quiet.lines
+
+
+def test_a_peer_banned_mid_pass_is_not_asked_for_the_rest_of_its_files(tmp_path):
+    """One mirror offered three files of one track. The first that delivers nothing bans it, and the other
+    two are the same peer answering the same question — asking costs a connect budget each."""
+    config, job, server, calls = setup(tmp_path, results=THREE_FROM_ONE_MIRROR,
+                                       download="not_found::0:", soulseek="maxretry = 1\n")
+
+    with server:
+        summary, quiet = pass_once(config, job, server, Reference(), calls)
+
+    assert summary.ignored == {"mirror"}
+    assert tools_called(calls).count("download") == 1
+    assert len(job.records()[0].tried) == 1
+    assert any("left from ignored" in line for line in quiet.lines), quiet.lines
+
+
+def test_a_file_from_an_ignored_peer_never_enters_the_record(tmp_path):
+    """Dropped at the search, not at the ladder: nothing downstream — the record, the queue — should be able
+    to offer a peer the account has given up on."""
+    config, job, server, calls = setup(tmp_path, results=GOOD, soulseek="maxretry = 1\n")
+    peers.Ledger.at(config).offence("peerA", "nothing arrived")
+
+    with server:
+        summary, quiet = pass_once(config, job, server, Reference(), calls)
+
+    assert job.records()[0].candidates == []
+    assert summary.nothing_usable == [1], quiet.lines
+    assert "download" not in tools_called(calls)
+
+
+def test_a_peer_that_hands_a_file_over_is_forgiven(tmp_path):
+    """The list is for peers that never deliver, so one that does has answered the question."""
+    landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
+    config, job, server, calls = setup(tmp_path, results=GOOD,
+                                       download=f"downloading:transferring:90000:{landed}")
+    landed.write_bytes(b"the file, already there when we look")
+    ledger = peers.Ledger.at(config)
+    ledger.offence("peerA", "not_found")
+    ledger.offence("peerA", "not_found")
+
+    with server:
+        summary, quiet = pass_once(config, job, server, Reference(), calls)
+
+    assert summary.downloaded == [1], quiet.lines
+    assert peers.Ledger.at(config).peers() == []
 
 
 # ── how much of it runs at once (2026-10-12) ─────────────────────────────────────────────────────

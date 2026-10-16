@@ -6,6 +6,8 @@ staging    = "~/Music/music-agent/staging"
 lossless   = "~/Music/music-agent/lossless"
 lossy      = "~/Music/music-agent/lossy"
 state      = "~/Music/music-agent/state"
+# The ignore list, beside the runs rather than inside one: it belongs to the account, not to a pass.
+peers      = "~/Music/music-agent/state/peers.json"
 
 [loudness]
 target_lufs  = -14.0
@@ -19,12 +21,15 @@ tolerance_lu = 0.5                              # a file already inside it is le
 command = [
   "uvx",
   "--from",
-  "git+https://github.com/alchimestre/slsk-mcp.git@892a2a8aec192a1660f24a5313321adc907fafa4",
+  "git+https://github.com/alchimestre/slsk-mcp.git@e37c092b1e0486ea56523769ab9d81f59ce3a085",
   "slsk-mcp",
 ]
 
 # The listening ports are in `.env`. The download directory is not here either: `paths.staging` is handed to
 # the child as SLSK_DOWNLOAD_DIR.
+
+# The two lanes under `paths` are what the client shares, handed over as SLSK_SHARE_DIRS. Staging is not one
+# of them. A client that reports no shared files reads as a leecher, and peers queue or ban those.
 
 # Ceilings handed to the child as SLSK_*. `max_operations` is the socket lock: a search holds it for its whole
 # window and a download start takes it again, so it has to clear `max_searches` with a start to spare.
@@ -40,6 +45,14 @@ workers        = 20
 # Seconds between two searches. A throttled search and a rare track read the same, so the pace is ours: the
 # one rate measured going silent was 0.9 a second.
 search_interval = 1.0
+
+# fail2ban's three numbers, for peers that list a file and then deliver nothing — paid mirrors and bots fail
+# every request, while a peer with a long queue or a bad rip is not failing at all. `maxretry` failures
+# inside `findtime_days`, counted across runs, earn an ignore lasting `bantime_days`; a delivery clears the
+# count. `music-agent peers` lists them, `music-agent peers --unban USER` asks one again.
+maxretry      = 3
+findtime_days = 14
+bantime_days  = 30
 
 [genres]
 # The vocabulary's mapping table, which lives in music-tagger: its taxonomy maps the names the rest of the
