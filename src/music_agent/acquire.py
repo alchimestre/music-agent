@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 
-from . import progress, reference, rules, slsk, state
+from . import peers, progress, reference, rules, slsk, state
 from .config import Config
 from .library import Held, Library
 from .mcp import ServerError, StdioServer
@@ -134,6 +134,33 @@ def move(transfer: Transfer, *, on_disk: bool, stuck_for: float, declared_queue:
     return Move.ROTATE if stuck_for > budget_for(transfer, declared_queue=declared_queue) else Move.WAIT
 
 
+# Length a peer can declare a queue to and still be believed. A real share's queue is in the tens; paid
+# mirrors and promo pools report five and six figures so that every request sits in them forever, and
+# "it declared a queue" must not be the thing that keeps them off the list.
+ABSURD_QUEUE = 1000
+
+
+def offence(decision: Move, report: Transfer, candidate: Candidate) -> str | None:
+    """What the peer did wrong, or None when the ending was not the peer's to answer for.
+
+    This distinction is why a peer is ignored at all. A budget we chose to stop at, a queue within reason
+    that a peer declared, and a session the child lost are endings about us, and a peer that has already
+    sent bytes has shown it can send them. What is left is a peer that advertised a file and then delivered
+    nothing — twice, three times, every pass.
+    """
+    if decision is Move.DONE:
+        return None
+    if report.status in {"session_expired", "cancelled"}:
+        return None
+    if decision is Move.FAILED:
+        return report.status or "failed"
+    if report.received_bytes:
+        return None
+    if candidate.queue and candidate.queue < ABSURD_QUEUE:
+        return None
+    return "nothing arrived"
+
+
 def transfer_of(payload: dict) -> Transfer:
     """The server's answer to `download` or `download_status`, as far as the decision needs it."""
     return Transfer(
@@ -204,6 +231,8 @@ class Summary:
     failed: list[int] = field(default_factory=list)
     unsearched: list[int] = field(default_factory=list)   # the network stopped answering
     dropped: list[int] = field(default_factory=list)      # every candidate refused, nothing left to try
+    # The peers this pass put on the ignore list, by name: a run that silences three mirrors should say so.
+    ignored: set[str] = field(default_factory=set)
 
     def report(self) -> str:
         parts = [
@@ -219,6 +248,8 @@ class Summary:
             parts.append(f"{len(self.decided)} settled by hand")
         if self.dropped:
             parts.append(f"{len(self.dropped)} dropped — every offer was refused")
+        if self.ignored:
+            parts.append(f"{len(self.ignored)} peers ignored — music-agent peers lists them")
         if self.failed:
             parts.append(f"{len(self.failed)} to retry")
         if self.unsearched:
@@ -373,8 +404,9 @@ def await_transfer(
     log,
     sleep,
     clock,
-) -> tuple[Move, str]:
-    """Take one candidate as far as it goes. Returns how it ended and where the file is."""
+) -> tuple[Move, str, Transfer]:
+    """Take one candidate as far as it goes. Returns how it ended, where the file is, and what the server
+    last said about it — the last of those is what the peer's own failure is read from."""
     payload = slsk.check(server.call("download", {"id": identifier(candidate)}, timeout=CALL_TIMEOUT),
                          "download")
     report = transfer_of(payload)
@@ -390,7 +422,7 @@ def await_transfer(
         decision = move(report, on_disk=on_disk, stuck_for=stuck_for, declared_queue=candidate.queue,
                         elapsed=clock() - started)
         if decision is not Move.WAIT:
-            return decision, local_path
+            return decision, local_path, report
 
         # The wait is what is left of the budget, never more than one poll: sleeping the interval regardless
         # would keep every budget to the poll's own grid — 36 s on a 10 s poll costs 40 — and would leave a
@@ -543,6 +575,8 @@ def one(
     later_pass: bool,
     pacer: Pacer | None = None,
     quiet: QuietNetwork | None = None,
+    ledger: peers.Ledger | None = None,
+    ignored: set[str] | None = None,
 ) -> str:
     """Acquire one track. Returns which of the summary's lists it belongs in."""
     if record.decided():
@@ -568,6 +602,13 @@ def one(
         # The raw count, not what merged: a second pass over the same record adds nothing new and would
         # otherwise look like a network answering with silence.
         quiet.observe(len(found))
+    if ledger is not None:
+        # Dropped here rather than filtered later, so nothing downstream — the ladder, the queue, the counts —
+        # ever sees a peer this account has given up on.
+        kept = [candidate for candidate in found if not ledger.ignores(candidate.user)]
+        if len(kept) != len(found):
+            log(f"[{record.idx}] {record.label}: {len(found) - len(kept)} files from ignored peers")
+        found = kept
     added = merge(record, found)
     job.append_event("searched", idx=record.idx, added=added, offered=len(record.candidates))
 
@@ -583,6 +624,13 @@ def one(
          if identifier(verdict.candidate) not in tried),
         key=rules.rank,
     )
+    silenced = 0
+    if ledger is not None:
+        # Asked again for the files already in hand: a peer banned a moment ago, by the first file of its
+        # own that it failed to deliver, must not be asked for the other five.
+        before = len(queue)
+        queue = [candidate for candidate in queue if not ledger.ignores(candidate.user)]
+        silenced = before - len(queue)
     if upgrade is not None:
         # A lossless copy is strictly better than the lossy one held; a lossy copy is not better than the
         # copy already held, so only the better lane is worth fetching.
@@ -593,11 +641,27 @@ def one(
             log(f"[{record.idx}] {record.label}: nothing lossless offered — the copy held stands")
             return "in_review"
 
+    if not queue and silenced:
+        # Nothing is left to try that the account is still willing to ask, which is not the same thing as a
+        # pass that failed: the record stays open, and a person may still take one of those offers by hand.
+        record.status = state.PENDING
+        job.append_event("only_ignored_peers", idx=record.idx, ignored=silenced)
+        log(f"[{record.idx}] {record.label}: every offer left is from an ignored peer")
+        return "in_review" if record.usable() else "nothing_usable"
+
     for candidate in queue[:MAX_CANDIDATES]:
+        if ledger is not None and ledger.ignores(candidate.user):
+            # Banned by an earlier file of its own in this same pass: the rest of its offers are the same
+            # question, already answered.
+            silenced += 1
+            continue
         record.tried.append(identifier(candidate))
-        decision, local_path = await_transfer(server, candidate, log=log, sleep=sleep, clock=clock)
+        decision, local_path, report = await_transfer(server, candidate, log=log, sleep=sleep,
+                                                      clock=clock)
 
         if decision is Move.DONE:
+            if ledger is not None:
+                ledger.delivered(candidate.user)
             record_taken(job, record, candidate, local_path, upgrade=upgrade)
             if upgrade is not None:
                 log(f"[{record.idx}] {record.label}: a lossless copy from {candidate.user} → {local_path}"
@@ -606,17 +670,28 @@ def one(
                 log(f"[{record.idx}] {record.label}: from {candidate.user} → {local_path}")
             return "downloaded"
 
+        why = offence(decision, report, candidate)
         if decision is Move.ROTATE:
             give_up(server, candidate, log)
             log(f"      {candidate.user} went nowhere; rotating ({len(record.tried)} tried)")
         else:
             log(f"      {candidate.user} failed")
         job.append_event("candidate_lost", idx=record.idx, peer=candidate.user,
-                         path=candidate.path, why=decision.value)
+                         path=candidate.path, why=decision.value, reason=why or "")
+        if ledger is not None and why is not None and ledger.offence(candidate.user, why):
+            if ignored is not None:
+                ignored.add(candidate.user)
+            job.append_event("peer_ignored", idx=record.idx, peer=candidate.user, reason=why)
+            log(f"      {candidate.user} ignored — {ledger.maxretry} failures in "
+                f"{ledger.findtime.days} days (music-agent peers --unban {candidate.user})")
 
     record.status = state.RETRY_LATER
     job.append_event("exhausted", idx=record.idx, tried=len(record.tried))
-    log(f"[{record.idx}] {record.label}: every candidate failed — left to retry")
+    if silenced:
+        log(f"[{record.idx}] {record.label}: everything asked failed, {silenced} offers left from ignored "
+            "peers — left to retry")
+    else:
+        log(f"[{record.idx}] {record.label}: every candidate failed — left to retry")
     return "failed"
 
 
@@ -660,6 +735,13 @@ def run(
     quiet = QuietNetwork(child=child)
     bar = progress.Bar(len(records), log=log, stream=stream)
 
+    # The ignore list, read once: twenty workers ask it on every search and every failure, and `offence`
+    # writes it whole from what this object holds.
+    ledger = peers.Ledger.at(config)
+    already_ignored = sorted(ledger.ignored())
+    if already_ignored:
+        log(f"{len(already_ignored)} peers ignored — music-agent peers lists them, --unban USER relents")
+
     # The network's rate on searching, and ours to keep. Zero is the loop's own speed, worth having only for
     # a tracklist too small for the rate to matter.
     pacer = (Pacer(config.search_interval, clock=clock, sleep=sleep)
@@ -680,7 +762,8 @@ def run(
         bar.begin(record.idx, record.label)
         try:
             outcome = one(job, record, server, lookup, library=library, log=say, sleep=sleep,
-                          clock=clock, later_pass=later_pass, pacer=pacer, quiet=quiet)
+                          clock=clock, later_pass=later_pass, pacer=pacer, quiet=quiet,
+                          ledger=ledger, ignored=summary.ignored)
         except (slsk.ToolError, ServerError) as error:
             record.status = state.RETRY_LATER
             outcome = "failed"

@@ -118,3 +118,14 @@ repaired automatically: a file in staging no record claims (a placement the lane
 transfer's `.part`), a file in a lane no row and no record claims (a re-download left beside the copy the
 collection kept), and a row whose file has gone. Which copy of a stem a row means to keep is not something the
 pipeline can tell.
+
+## Peer offence and the ignore list
+
+| term | what it means |
+|---|---|
+| offence | a download that ended without a byte while the ending was the peer's: it refused, it failed, or the connection never opened. A queue within reason that the peer declared, a budget the pass chose to stop at and a session the child lost are the pass's own decisions and are never counted against a peer. A queue in the five and six figures is the opposite: paid mirrors and promo pools declare those to hold every request forever, so claiming one is evidence rather than an excuse |
+| ignore list | the peers this account will not ask again. `maxretry` offences inside `findtime_days`, counted across runs, earn an ignore lasting `bantime_days`; a delivery clears the record. Written at `paths.peers`, read by every pass, listed by `music-agent peers`, lifted by `music-agent peers --unban USER` |
+
+An ignored peer's files are dropped where the search results are read, so no record, ladder or queue ever sees
+them. The list belongs to the account rather than to a run: a pass reads it when it starts and writes it as
+peers fail.

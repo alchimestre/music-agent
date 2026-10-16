@@ -416,7 +416,8 @@ def test_a_candidate_number_outside_the_offers_is_refused(tmp_path, capsys):
 def make_paths_config(tmp_path: Path) -> Path:
     path = tmp_path / "config.toml"
     path.write_text('[paths]\nstate = "state"\nstaging = "staging"\n'
-                    'lossless = "lossless"\nlossy = "lossy"\n', encoding="utf-8")
+                    'lossless = "lossless"\nlossy = "lossy"\n'
+                    f'peers = "{tmp_path / "peers.json"}"\n', encoding="utf-8")
     return path
 
 
@@ -731,3 +732,29 @@ def test_a_batch_of_skips_is_just_several_indexes():
     assert cli_module._indexes("2,17, 28") == [2, 17, 28]
     with pytest.raises(ArgumentTypeError, match="not a list"):
         cli_module._indexes("2,seventeen")
+
+
+def test_peers_lists_the_ignored_and_lifts_one(tmp_path, capsys):
+    """The list is only usable if it can be read and argued with: a peer that was having a bad week rather
+    than selling access has to be askable again, and one still banned says how long is left."""
+    from music_agent.peers import Ledger
+
+    path = make_paths_config(tmp_path)
+    path.write_text(path.read_text(encoding="utf-8")
+                    + f'[soulseek]\nmaxretry = 1\nbantime_days = 30\n', encoding="utf-8")
+    config = config_module.load(path)
+
+    assert main(["--config", str(path), "peers"]) == 0
+    assert "no peer has failed" in capsys.readouterr().out
+
+    Ledger.at(config).offence("junk", "nothing arrived")
+    assert main(["--config", str(path), "peers"]) == 0
+    out = capsys.readouterr().out
+    assert "junk" in out and "1/1" in out and "ignored, 29 days left" in out, out
+
+    assert main(["--config", str(path), "peers", "--unban", "junk"]) == 0
+    assert "junk forgotten" in capsys.readouterr().out
+    assert Ledger.at(config).peers() == [], "forgotten means the failures go with the ban"
+
+    assert main(["--config", str(path), "peers", "--unban", "nobody"]) == 0
+    assert "not on the ledger" in capsys.readouterr().out

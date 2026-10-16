@@ -45,6 +45,9 @@ class Config:
     lossless: Path
     lossy: Path
     state_root: Path
+    # The ignore list, which outlives any run: `.state/jobs/` holds runs, and this is the one file that
+    # belongs to the account rather than to a pass.
+    peers: Path
     target_lufs: float
     true_peak_db: float
     tolerance_lu: float
@@ -66,6 +69,11 @@ class Config:
     # A floor on the gap between two searches we ask for, in seconds. Ours rather than the child's:
     # nothing in the pinned build paces searches, and nothing reports one being ignored. 0 turns it off.
     search_interval: float
+    # fail2ban's triple, for peers that list a file and then deliver nothing: `maxretry` failures inside
+    # `findtime_days` earn an ignore lasting `bantime_days`, counted across runs. A delivery clears it.
+    maxretry: int
+    findtime_days: int
+    bantime_days: int
     slsk_username_env: str
     slsk_password_env: str
     # The genre vocabulary's mapping table, which lives in music-tagger: its taxonomy maps the names the
@@ -102,6 +110,7 @@ DEFAULTS = Config(
     lossless=Path("~/Music/music-agent/lossless").expanduser(),
     lossy=Path("~/Music/music-agent/lossy").expanduser(),
     state_root=Path("~/Music/music-agent/state").expanduser(),
+    peers=Path("~/Music/music-agent/state/peers.json").expanduser(),
     target_lufs=-14.0,
     true_peak_db=-1.0,
     tolerance_lu=0.5,
@@ -142,6 +151,12 @@ DEFAULTS = Config(
     # One second is 1.0 a second, and the searches that came back did so in a second or two. The threshold is
     # a guess, which is why it is a knob.
     search_interval=1.0,
+    # Three silent failures inside a fortnight, then a month off. Bots and paid mirrors fail every request,
+    # so they reach three in one pass; a peer whose queue was long, or whose one file was a bad rip, does not
+    # fail again for a fortnight and is never ignored at all.
+    maxretry=3,
+    findtime_days=14,
+    bantime_days=30,
     # No taxonomy by default: a machine without music-tagger installed assigns no genres and prints one line
     # saying so, rather than inventing a vocabulary of its own.
     taxonomy=None,
@@ -185,6 +200,7 @@ def load(path: Path | None = None) -> Config:
         lossless=_resolve(paths.get("lossless", str(DEFAULTS.lossless)), base),
         lossy=_resolve(paths.get("lossy", str(DEFAULTS.lossy)), base),
         state_root=_resolve(paths.get("state", str(DEFAULTS.state_root)), base),
+        peers=_resolve(paths.get("peers", str(DEFAULTS.peers)), base),
         target_lufs=float(loudness.get("target_lufs", DEFAULTS.target_lufs)),
         true_peak_db=float(loudness.get("true_peak_db", DEFAULTS.true_peak_db)),
         tolerance_lu=float(loudness.get("tolerance_lu", DEFAULTS.tolerance_lu)),
@@ -200,6 +216,9 @@ def load(path: Path | None = None) -> Config:
         max_operations=int(soulseek.get("max_operations", DEFAULTS.max_operations)),
         workers=int(soulseek.get("workers", DEFAULTS.workers)),
         search_interval=float(soulseek.get("search_interval", DEFAULTS.search_interval)),
+        maxretry=int(soulseek.get("maxretry", DEFAULTS.maxretry)),
+        findtime_days=int(soulseek.get("findtime_days", DEFAULTS.findtime_days)),
+        bantime_days=int(soulseek.get("bantime_days", DEFAULTS.bantime_days)),
         slsk_username_env=credentials.get("soulseek_user", DEFAULTS.slsk_username_env),
         slsk_password_env=credentials.get("soulseek_password", DEFAULTS.slsk_password_env),
         taxonomy=(_resolve(genres["taxonomy"], base) if genres.get("taxonomy") else DEFAULTS.taxonomy),

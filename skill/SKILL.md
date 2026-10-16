@@ -121,6 +121,30 @@ pass runs: it is on the same account, the server keeps one session per account, 
 moment it is killed. The symptom is a child that logs in and then answers no searches at all — its own log says
 `Login failed: expected login response from server but got : None`, or `server closed connection`.
 
+One pass at a time, and never kill one mid-session. A pass that is killed abruptly — SIGKILL, a closed terminal,
+another pass's `free_ports` — leaves the server holding that session, and every login after it gets the same
+silence until the server lets go: the child reaches the server, sends its login, and is answered with nothing.
+Nothing local fixes it and a fresh child does not; the cure is to stop asking, and it is worth knowing that a
+brand-new account still logs in and searches from the same machine while this is happening, which is what makes
+it easy to mistake for a network fault. Two passes at once cannot work for the same reason: the later one's
+first step stops the earlier one's child.
+
+While it is up the child also shares: `paths.lossless` and `paths.lossy` are handed over as
+`SLSK_SHARE_DIRS`, so peers see a client with a library rather than a leecher, and the pass answers uploads
+while it runs. Staging is not one of them, since it holds what is still being worked on.
+
+Peers that advertise a file and then deliver nothing are counted per user, across runs: `maxretry` failures
+inside `findtime_days` earn an ignore lasting `bantime_days`, and an ignored peer's files never enter a record.
+Only endings that are the peer's count — a refusal, a failure, a connection that never opened — never a queue
+it declared, a budget the pass chose to stop at, or bytes it has already sent. A declared queue in the five and
+six figures is the exception, because that is what a paid mirror reports to hold every request forever: claiming
+one counts as the failure. The pass reports the count at the end of a run:
+
+```
+music-agent peers                  # who is on the list, and how much of the ignore is left
+music-agent peers --unban USER     # forget a peer, failures and all
+```
+
 **Done when** every track in the run is accounted for: settled, in review, or already held.
 
 ## 3. Work the review queue
