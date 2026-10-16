@@ -196,6 +196,19 @@ def test_a_login_that_never_completed_counts_as_the_loss_too():
     assert logs.lost_session == 1
 
 
+def test_the_server_hanging_up_counts_as_the_session_going():
+    """2026-10-16: pass 5 of a 315-track grab logged in, answered 57 searches, and then took
+    `server closed connection, will not attempt to reconnect`, after which 69 calls went unanswered. Read as
+    the child dying, the three retries after it went out with no wait and were refused inside the same closed
+    window; read as the session going, they wait instead."""
+    logs = slsk.ChildLog(log=lambda line: None)
+
+    logs("WARNING:aioslsk.network.network:server closed connection, will not attempt to reconnect")
+
+    assert logs.lost_session == 1
+    assert logs.cannot_answer is True
+
+
 def test_the_reader_dying_is_told_apart_from_the_session_going():
     """2026-10-15: aioslsk's message reader raised on a frame it could not read — a short read gives it
     `struct.error: unpack_from requires a buffer of at least 293 bytes` — the task ended, and every search
