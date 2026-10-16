@@ -50,13 +50,9 @@ def _run(config: config_module.Config, args: argparse.Namespace) -> int:
     pinned = SimpleNamespace(job=job.id, tracks=None, name=None, retry=True,
                              no_backup=False, no_traktor=args.no_traktor)
 
-    # A pass ends when the network goes quiet, and a quiet minute is not a reason to leave a hundred tracks
-    # unsearched: the next pass meets a different set of peers. Two passes was the whole budget, so the tail
-    # was left for a person to re-run by hand, and the last three runs left 126, 161 and 95 tracks open.
-    #
-    # The loop continues while a pass is still bringing files in and stops when one is not, which is the
-    # network's own answer rather than a count. Nothing spins on a dead account: the guard below ends the
-    # attempts, and a pass that downloads nothing would find the same peers again a minute later.
+    # A pass walks the whole tracklist now: empty searches are the network's own answer, and only the child
+    # failing ends a pass early. The loop continues while a pass is still bringing files in and stops when one
+    # is not, because a pass that found nothing meets the same peers again a minute later.
     PASSES = 6
     failed = 0
     for number in range(1, PASSES + 1):
@@ -523,8 +519,8 @@ def _one_pass(config: config_module.Config, job: state.Job, *, retry: bool,
     # results` was the only thing that knew the network had stopped answering, and it was thrown away.
     # stderr keeps the pass's own report clean on stdout, and the filter keeps the walls out of stderr.
     logs = slsk.ChildLog()
-    # The ports first: a client left on them by an earlier run answers the same account, and the pass then
-    # looks like a quiet network instead of a port conflict.
+    # The ports first: a client left on them by an earlier run answers the same account, and every search
+    # then comes back empty — the pass would spend its whole tracklist learning nothing.
     slsk.free_ports(config)
     shelf = library.open(config)
     _stage("acquire", f"{len(job.records())} tracks · pass {attempt}"

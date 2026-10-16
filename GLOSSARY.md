@@ -79,9 +79,10 @@ filter can remove the only peer holding a rare track. A later pass — what `--r
 itself to peers with free slots, and asks candidates it has not asked before. A track that fails across two
 passes is not retried again.
 
-A pass stops early when the network goes quiet: a search returning nothing means a rare track, fifty in a row
-means the network has stopped answering. The tracks it never reached are reported as not searched and left as
-they were.
+A pass stops early only when the child it searches through fails: searches that never answer, or a child that
+says it has no session. A search that comes back empty never stops it — once the findable tracks are taken,
+the ones still to search are the rare ones, and their searches answer nothing one after another. The tracks a
+stopped pass never reached are reported as not searched and left as they were.
 
 ## Upgrade
 

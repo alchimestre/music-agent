@@ -253,43 +253,34 @@ class Summary:
         if self.failed:
             parts.append(f"{len(self.failed)} to retry")
         if self.unsearched:
-            parts.append(f"{len(self.unsearched)} not searched — the network had gone quiet")
+            parts.append(f"{len(self.unsearched)} not searched — the child had stopped answering")
         return " · ".join(parts)
 
 
-# This many empty searches in a row is a network that has stopped answering, not a run of rare tracks.
-#
-# Fifty, and it was lowered to fifteen for a day: on a 305-track techno playlist the pass stopped twice at
-# fifteen and left 184 tracks unsearched, because once the findable tracks are taken the ones still to search
-# are exactly the rare ones and their searches answer nothing one after another. Two hundred searches had run
-# and 179 of them had offered candidates, so the network was answering perfectly well. A streak this long is
-# the cheap signal to trust; a shorter one is the tail of a playlist.
-QUIET_AFTER = 50
+# A search that comes back with nothing is not a failure. Once the findable tracks are taken, what is left to
+# search is the rare ones, and their searches answer nothing one after another, so the tail of a tracklist and
+# a dead network look the same from inside a pass. Counting those in a row was a stop signal once, and it ended
+# passes over healthy networks. Only the child is evidence: no answer at all, or a child with no session.
 
 
 @dataclass
-class QuietNetwork:
-    """Searches in a row that came back empty, and the decision to stop asking.
+class ChildWatch:
+    """Whether the child can still search, and the decision to stop asking.
 
-    *In a row*: one hit anywhere means the network is answering, so it resets. The event is what the loop
-    watches — a thread that sees it stops starting work rather than spending a search to find out.
-
-    A search that times out instead of answering counts separately: an empty answer is the network, and no
-    answer at all is the child. A run of those stops the pass as well, because every one of them costs a
-    full deadline to learn nothing.
+    Both of the ways a pass stops are the child's own, and both are read from it rather than inferred: a search
+    that never answered, a run of which is a child that has stopped talking, and a child that reports it has no
+    session to search with. The event is what the loop watches — a thread that sees it stops starting work
+    rather than spending a search to find out.
     """
 
-    limit: int = QUIET_AFTER
     stuck_after: int = STUCK_AFTER
     # The child's stderr, when the caller has one: it is the only thing that can tell a search that came
-    # back empty from a search the child could not send at all.
+    # back empty from a child that has no session to send it on.
     child: "slsk.ChildLog | None" = None
-    stopped: threading.Event = field(default_factory=threading.Event)
+    dead: threading.Event = field(default_factory=threading.Event)
 
     def __post_init__(self) -> None:
         self._lock = threading.Lock()
-        self._run = 0
-        self._trip = 0
         self._fails = 0
         self._hung = 0
 
@@ -304,38 +295,27 @@ class QuietNetwork:
         """
         return self.child is not None and self.child.cannot_answer
 
-    def observe(self, found: int) -> None:
-        """One search's raw result count, as the child reports it."""
+    def answered(self) -> None:
+        """One search that came back, whatever it held.
+
+        An answer resets the run of timeouts, because the child is talking. What it held decides nothing: the
+        count is the network's, and a live child answering with nothing is a rare track.
+        """
         if self.session_lost:
-            # An empty answer from a child with no session is not the network's answer, and there is no
-            # streak to count: the pass is over as soon as this is known.
-            self.stopped.set()
+            # A child with no session did not send this search at all, whatever came back — the pass is over
+            # as soon as that is known.
+            self.dead.set()
             return
         with self._lock:
-            self._run = 0 if found else self._run + 1
             self._fails = 0
-            if self.limit and self._run >= self.limit and not self.stopped.is_set():
-                self._trip = self._run
-                self.stopped.set()
 
-    def failed(self) -> None:
+    def timed_out(self) -> None:
         """One search that never answered."""
         with self._lock:
             self._fails += 1
-            if self.stuck_after and self._fails >= self.stuck_after and not self.stopped.is_set():
+            if self.stuck_after and self._fails >= self.stuck_after and not self.dead.is_set():
                 self._hung = self._fails
-                self.stopped.set()
-
-    @property
-    def consecutive(self) -> int:
-        with self._lock:
-            return self._run
-
-    @property
-    def tripped_at(self) -> int:
-        """How long the run of empty searches was when the pass gave up on the network."""
-        with self._lock:
-            return self._trip
+                self.dead.set()
 
     @property
     def hung(self) -> int:
@@ -573,8 +553,8 @@ def one(
     sleep,
     clock,
     later_pass: bool,
+    watch: ChildWatch,
     pacer: Pacer | None = None,
-    quiet: QuietNetwork | None = None,
     ledger: peers.Ledger | None = None,
     ignored: set[str] | None = None,
 ) -> str:
@@ -598,10 +578,8 @@ def one(
     if pacer is not None:
         pacer.wait()
     found = search(server, record, later_pass=later_pass)
-    if quiet is not None:
-        # The raw count, not what merged: a second pass over the same record adds nothing new and would
-        # otherwise look like a network answering with silence.
-        quiet.observe(len(found))
+    # Before the peers are filtered: a search that came back at all is the child talking, whatever it held.
+    watch.answered()
     if ledger is not None:
         # Dropped here rather than filtered later, so nothing downstream — the ladder, the queue, the counts —
         # ever sees a peer this account has given up on.
@@ -732,7 +710,7 @@ def run(
     """
     records = job.records()
     summary = Summary()
-    quiet = QuietNetwork(child=child)
+    watch = ChildWatch(child=child)
     bar = progress.Bar(len(records), log=log, stream=stream)
 
     # The ignore list, read once: twenty workers ask it on every search and every failure, and `offence`
@@ -752,9 +730,9 @@ def run(
         bar.say(line)
 
     def work(record: state.Record) -> None:
-        if quiet.stopped.is_set():
-            # The network has stopped answering, so the pass stops asking; the record is left exactly as it
-            # was, and nothing is written about a search that never happened.
+        if watch.dead.is_set() or watch.session_lost:
+            # The child is gone, so the pass stops asking; the record is left exactly as it was, and nothing is
+            # written about a search that never happened.
             summary.unsearched.append(record.idx)
             bar.settle(record.idx, record.label, "unsearched")
             return
@@ -762,13 +740,12 @@ def run(
         bar.begin(record.idx, record.label)
         try:
             outcome = one(job, record, server, lookup, library=library, log=say, sleep=sleep,
-                          clock=clock, later_pass=later_pass, pacer=pacer, quiet=quiet,
+                          clock=clock, later_pass=later_pass, watch=watch, pacer=pacer,
                           ledger=ledger, ignored=summary.ignored)
         except (slsk.ToolError, ServerError) as error:
             record.status = state.RETRY_LATER
             outcome = "failed"
-            if quiet is not None:
-                quiet.failed()
+            watch.timed_out()
             say(f"[{record.idx}] {record.label}: the server refused — {error}")
             job.append_event("refused", idx=record.idx, error=str(error))
         getattr(summary, outcome).append(record.idx)
@@ -783,15 +760,15 @@ def run(
         with ThreadPoolExecutor(max_workers=max(1, config.workers)) as pool:
             list(pool.map(work, records))
 
-    if quiet.hung or quiet.session_lost:
-        account = quiet.session_lost and child is not None and child.lost_session > 0
+    if watch.hung or watch.session_lost:
+        account = watch.session_lost and child is not None and child.lost_session > 0
         summary.failed.sort()
         summary.dropped = drop_exhausted(job, log=say)
         summary.failed = [idx for idx in summary.failed if idx not in set(summary.dropped)]
-        if quiet.session_lost:
+        if watch.session_lost:
             # The child answered, and every answer was empty because it had no way to search. Named here
-            # because from the inside this is indistinguishable from a quiet network, and a pass that stops
-            # on it while returning success is a pass that lies.
+            # because from the inside this is indistinguishable from the network holding nothing, and a pass
+            # that stops on it while returning success is a pass that lies.
             job.append_event("lost_session" if account else "reader_died",
                              unsearched=len(summary.unsearched))
             reason = (
@@ -804,19 +781,13 @@ def run(
                 f"the account's, so a fresh child resumes the pass from here."
             )
         else:
-            job.append_event("server_stuck", consecutive=quiet.hung, unsearched=len(summary.unsearched))
-            reason = (f"{quiet.hung} searches timed out in a row — {len(summary.unsearched)} tracks were "
+            job.append_event("server_stuck", consecutive=watch.hung, unsearched=len(summary.unsearched))
+            reason = (f"{watch.hung} searches timed out in a row — {len(summary.unsearched)} tracks were "
                       f"never searched. The child had stopped answering; the run is open, so a fresh pass "
                       f"picks it up.")
         job.write_status(config)
         bar.close()
         raise ServerStuck(reason, lost_session=account)
-
-    if quiet.stopped.is_set():
-        job.append_event("network_quiet", consecutive=quiet.tripped_at,
-                         unsearched=len(summary.unsearched))
-        say(f"the last {quiet.tripped_at} searches came back with nothing — the network has stopped "
-            f"answering, so {len(summary.unsearched)} tracks were not searched at all")
 
     # A track whose every candidate refused is closed here rather than put to a person: there is nothing
     # left to try, and asking about it would only be asking permission to stop.

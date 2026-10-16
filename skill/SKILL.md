@@ -100,15 +100,17 @@ what the track came to, and its label.
 Searching is paced: one search every `search_interval` seconds in `config.toml`, one by default, which is the
 rate the network has answered at. The child's own log comes out on stderr with an `slsk: ` prefix.
 
-Two failures stop a pass rather than being waited out, and both say so in one line:
+Both failures that stop a pass are the child's, and each says so in one line. A search that comes back empty
+is never one of them: that is the network answering, and once the findable tracks are taken, what is left to
+search is the rare ones, whose searches come back empty one after another.
 
-- **Nothing coming back.** Fifty searches in a row with no results means the network has stopped answering, and
-  the pass stops rather than spending its allowance on silence. Tracks it never reached are reported as **not
-  searched** and left exactly as they were. The threshold is high on purpose: once the findable tracks are
-  taken, what is left to search is the rare ones, and their searches come back empty one after another without
-  anything being wrong.
 - **Nothing answering.** Four searches in a row that time out instead of returning means the child itself has
   stopped talking. The pass stops, the run stays open, and a fresh pass picks it up.
+- **No session.** The child reports that it has no session to search with — a login the server refused, or one
+  it took away. Every search after that comes back empty, and a fresh child loses the same session while
+  another client holds the account, so the passes stop there instead of asking again.
+
+Tracks a stopped pass never reached are reported as **not searched** and left exactly as they were.
 
 The other silent failure is the ports. `SLSK_LISTEN_PORT` and `SLSK_OBFUSCATED_PORT` (20000 and 20001 by
 default) must be free: a Soulseek client left on them by an earlier run is logged in on the same account, so
