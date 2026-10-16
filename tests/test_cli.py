@@ -540,6 +540,28 @@ def test_only_a_held_session_is_waited_out(tmp_path, monkeypatch, capsys):
     assert "held by the child that died" in capsys.readouterr().err
 
 
+def test_a_second_refusal_ends_the_pass_rather_than_buying_another_login(tmp_path, monkeypatch, capsys):
+    """2026-10-16: one pass spent five logins on an account that was refusing every one of them, and each
+    attempt was another connection — which is what aioslsk's own note says extends the refusal. Two, then
+    stop: the run reports what it kept and a person decides when to come back."""
+    waits: list[float] = []
+    monkeypatch.setattr(cli_module, "SESSION_WAITS", (5.0,))
+    monkeypatch.setattr(cli_module, "RESTARTS", 10)      # so only the session ladder can stop it
+    monkeypatch.setattr(cli_module.time, "sleep", waits.append)
+
+    def refused(config, job, *, retry, attempt):
+        raise acquire.ServerStuck("the child was left without a session", lost_session=True)
+
+    monkeypatch.setattr(cli_module, "_one_pass", refused)
+    config = config_module.load(make_config(tmp_path))
+    job = state.create(config, "run")
+
+    with pytest.raises(acquire.ServerStuck):
+        cli_module._acquire_pass(config, job, retry=False)
+
+    assert waits == [5.0], "one wait, then the second refusal ends it"
+
+
 def test_run_does_every_stage_in_order_and_asks_nothing(tmp_path, capsys, monkeypatch):
     """2026-10-14: one command from a tracklist to both collections.
 

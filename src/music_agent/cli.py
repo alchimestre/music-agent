@@ -350,9 +350,11 @@ ACQUIRE_ERRORS = (slsk.MissingCredential, slsk.PortBusy, mcp.ServerError, acquir
 RESTARTS = 3
 
 # What is waited before a fresh child is worth trying, once the account's session has been taken and the child
-# that held it died without logging out. Doubling, because a session the server is holding is a matter of time,
-# and every attempt spends about forty seconds finding out that it is still there.
-SESSION_WAITS = (60.0, 180.0, 420.0)
+# that held it died without logging out. One wait, and it is the measured one: a login starts working again
+# twelve to seventeen minutes after the child died. Anything shorter spends a login inside the window — and
+# every attempt is another connection to an account that is refusing them. When the second child is refused
+# too the pass stops, because a third login buys the same answer.
+SESSION_WAITS = (900.0,)
 
 
 def _stage(name: str, detail: str = "") -> None:
@@ -487,9 +489,10 @@ def _acquire_pass(config: config_module.Config, job: state.Job, *, retry: bool) 
 
     A session the server has taken away is not that. The child that lost it could not log out either — its
     networking is what died — so the server keeps the account until its own timeout passes, and a fresh child
-    is refused for as long as that takes. Waiting is the only thing that clears it, and every attempt spends
-    about forty seconds finding out that it has not: measured here, a login succeeds again somewhere between
-    twelve and seventeen minutes after the child died. So the wait doubles, and the four attempts cover it.
+    is refused for as long as that takes. Measured here, a login starts working again twelve to seventeen
+    minutes after the child died, so there is one wait and it is that long. A second refusal ends the pass:
+    2026-10-16 a pass spent five logins finding out what two would have said, and each one was another
+    connection to an account that was refusing them.
 
     A reader that died inside one child is a third thing, and it is neither of those: the next child carries
     on from where the run got to, at once. `ServerStuck.lost_session` is what tells them apart.
@@ -502,7 +505,12 @@ def _acquire_pass(config: config_module.Config, job: state.Job, *, retry: bool) 
             if attempt > RESTARTS:
                 raise
             if isinstance(error, acquire.ServerStuck) and error.lost_session:
-                wait = SESSION_WAITS[min(lost, len(SESSION_WAITS) - 1)]
+                if lost >= len(SESSION_WAITS):
+                    # The ladder is spent. Another attempt is another connection to an account that is
+                    # refusing them, which is what the child's own library says extends the refusal, so the
+                    # pass ends here and the run reports what it kept.
+                    raise
+                wait = SESSION_WAITS[lost]
                 lost += 1
                 print(f"the account is still held by the child that died — waiting {wait:.0f}s before a fresh "
                       f"one is worth trying", file=sys.stderr)
