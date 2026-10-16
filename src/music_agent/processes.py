@@ -1,7 +1,7 @@
 """Stopping the processes that hold something a stage needs.
 
 Two kinds do. A Soulseek client left on the listening ports by an earlier run is logged in on the same
-account, so the server hands it every search reply and a pass on this side looks like a quiet network. And a
+account, so the server hands it every search reply and every search this pass asks about comes back empty. And a
 `rekordbox-mcp` left holding `master.db` is a second writer on a file the import has to open on its own.
 
 Neither is this program's process, and both are another harness's children — restarted when that harness

@@ -806,36 +806,52 @@ def test_the_pass_works_on_several_tracks_at_once(tmp_path):
     assert len(job.records()) == 2
 
 
-# ── a network that stops answering (2026-10-12) ──────────────────────────
+# ── a child that stops answering ─────────────────────────────────────────
 
 
-def test_a_run_of_empty_searches_is_a_network_that_has_gone_quiet():
-    quiet = acquire.QuietNetwork(limit=3)
-    for _ in range(3):
-        quiet.observe(0)
+def test_an_empty_answer_is_not_a_failure():
+    """A search that comes back with nothing is the network answering, and nothing else in the stack can tell
+    it from a rare track. So no number of them stops anything."""
+    watch = acquire.ChildWatch()
 
-    assert quiet.stopped.is_set()
-    assert quiet.tripped_at == 3
+    for _ in range(200):
+        watch.answered()
+
+    assert not watch.dead.is_set(), "a playlist's rare tail is not a dead network"
 
 
-def test_a_search_the_child_cannot_send_is_not_a_quiet_network():
+def test_a_search_the_child_cannot_send_is_a_lost_session():
     """2026-10-15: the server dropped the client, aioslsk never reconnected, and every search afterwards came
-    back empty, which from the outside is what a playlist of rare tracks looks like. Fifty of those stopped
-    the pass, and the pass reported the network as the cause."""
+    back empty, which from the outside is what a playlist of rare tracks looks like. The child's own log is
+    the only thing that tells them apart, and it is what the pass reads."""
     child = slsk.ChildLog(log=lambda line: None)
-    quiet = acquire.QuietNetwork(child=child)
+    watch = acquire.ChildWatch(child=child)
     child("WARNING:aioslsk.search.manager:not returning search results : no valid session was set")
 
-    quiet.observe(0)
+    watch.answered()
 
-    assert quiet.session_lost is True
-    assert quiet.stopped.is_set()
-    assert quiet.tripped_at == 0, "no streak was counted: those answers were never the network's"
+    assert watch.session_lost is True
+    assert watch.dead.is_set()
+
+
+def test_a_refused_login_is_a_lost_session():
+    """2026-10-16: a pass was killed mid-session, and every pass after it logged in with
+    `Login failed: expected login response from server but got : None` and then spent its searches timing out.
+    The server keeps one session per account, so that is the account's state rather than this child's, and it
+    is read from the one line that says so rather than inferred from the silence after it."""
+    child = slsk.ChildLog(log=lambda line: None)
+    child("ERROR:slsk_mcp:Login failed: expected login response from server but got : None")
+
+    watch = acquire.ChildWatch(child=child)
+
+    assert child.lost_session == 1
+    assert watch.session_lost is True
 
 
 def test_a_lost_session_stops_the_pass_and_says_which_it_was(tmp_path):
     """The caller restarts the pass with a fresh child on the strength of this, so the two reasons have to
-    reach it apart: a quiet network is worth waiting for, an account with another client on it is not."""
+    reach it apart: a child that lost its session in one message reader is worth another child, and an account
+    with another client on it is not."""
     config, job, server, calls = setup(tmp_path, results=[], tracks=6)
     child = slsk.ChildLog(log=lambda line: None)
     child.lost_session = 1                      # the child's own stderr already said it
@@ -878,51 +894,36 @@ def test_one_candidate_may_not_own_the_pass():
                         elapsed=acquire.TRANSFER_CEILING + 1) is acquire.Move.ROTATE
 
 
-def test_any_hit_resets_the_run_of_empty_searches():
-    """The count is *in a row*: the network answering once means it is answering, so the pass keeps going."""
-    quiet = acquire.QuietNetwork(limit=3)
-    for found in (0, 0, 7, 0, 0):
-        quiet.observe(found)
+def test_a_search_that_answers_resets_the_run_of_timeouts():
+    """The run is *in a row*: a child that answers between two timeouts is talking, so nothing is stuck yet."""
+    watch = acquire.ChildWatch(stuck_after=3)
+    for _ in range(2):
+        watch.timed_out()
+    watch.answered()
+    for _ in range(2):
+        watch.timed_out()
 
-    assert not quiet.stopped.is_set()
-    assert quiet.consecutive == 2
-
-
-def test_a_tail_of_rare_tracks_does_not_look_like_a_dead_network():
-    """2026-10-14, a 305-track techno playlist: the findable tracks go first, so what is left to search is
-    exactly the rare ones, and their searches answer nothing one after another. Two passes stopped at fifteen
-    empties in a row and left 184 tracks unsearched, while 179 of the 200 searches that did run had offered
-    candidates. The threshold is the whole difference between that and a network that has gone, so it is what
-    this pins."""
-    quiet = acquire.QuietNetwork()                      # the shipped limit, not one a test chose
-
-    for _ in range(15):
-        quiet.observe(0)
-    assert not quiet.stopped.is_set(), "a playlist's rare tail is not a dead network"
-
-    for _ in range(acquire.QUIET_AFTER):
-        quiet.observe(0)
-    assert quiet.stopped.is_set()
+    assert not watch.dead.is_set()
+    assert watch.hung == 0
 
 
-def test_a_network_that_stops_answering_stops_the_pass(tmp_path):
-    """What this prevents, measured: on 2026-10-12 a pass spent 146 searches in a row against a silent network
-    and wrote 205 tracks down as *nothing usable* — a fact about the network, recorded as a fact about the
-    tracks. The invariant asserted here is the one that matters: every track is either searched or named."""
-    total = acquire.QUIET_AFTER + 12
+def test_a_silent_network_is_still_searched_to_the_end(tmp_path):
+    """2026-10-12: a pass spent 146 searches in a row against a silent network and stopped there, then wrote
+    205 tracks down as *nothing usable* — a fact about the network recorded as a fact about the tracks — and
+    left the rest unnamed. An empty answer is the network's answer about that one track and nothing more, so
+    the pass asks about every track and says which of them turned up nothing."""
+    total = 60
     config, job, server, calls = setup(tmp_path, results=[], tracks=total)
 
     with server:
-        summary, quiet = pass_once(config, job, server, Reference(), calls)
+        summary, _ = pass_once(config, job, server, Reference(), calls)
 
     searched = tools_called(calls).count("search")
-    assert acquire.QUIET_AFTER <= searched < acquire.QUIET_AFTER + config.workers, \
-        f"it stopped asking after {searched} searches"
-    assert len(summary.unsearched) + searched == total, "every track is searched or named, never dropped"
-    assert len(summary.nothing_usable) == searched, \
-        "the tracks that were searched found nothing and say so; the ones never asked say nothing at all"
-    assert any("stopped answering" in line for line in quiet.lines)
-    assert "network_quiet" in (config.state_root / job.id / "events.jsonl").read_text(encoding="utf-8")
+    assert searched == total, f"{total} tracks and {searched} searches"
+    assert len(summary.unsearched) == 0, "no track is left unnamed"
+    assert len(summary.nothing_usable) == total, "every track was asked about, and every one answered nothing"
+    events = (config.state_root / job.id / "events.jsonl").read_text(encoding="utf-8")
+    assert "network_quiet" not in events
 
 
 def test_searches_are_spaced_out_rather_than_fired_as_fast_as_the_loop_can(tmp_path):

@@ -89,10 +89,15 @@ class ChildLog:
     # deserialize, the task ends, and nothing says so — every search after it answers nothing, and `_connect`
     # then short-circuits on a flag only `logout()` clears, so it cannot log in again either.
     LOST_SESSION = (
-        # Both spellings the child has for it: the search manager's `no valid session was set`, once per
+        # Every spelling the child has for it: the search manager's `no valid session was set`, once per
         # search, and the shares manager's `attempted to report shares without valid session` at startup,
         # which is a login that never completed at all.
         "valid session",
+        # The login itself being refused, which is the same thing said once: `Login failed: expected login
+        # response from server but got : None`. The server holds one session per account, so a client that
+        # ended abruptly leaves the next login answered with nothing — it is the account's state, not this
+        # child's, and no child gets past it until the server lets go.
+        "Login failed",
     )
     READER_DIED = (
         # The other way it stops answering, and a different thing entirely: aioslsk's
