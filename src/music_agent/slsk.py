@@ -154,7 +154,7 @@ class ChildLog:
 
 
 def environment(config: Config) -> dict[str, str]:
-    """The child's environment: the credentials, our own ports, and its ceilings.
+    """The child's environment: the credentials, our own ports, what it shares, and its ceilings.
 
     Credentials arrive under whatever names this machine uses and are copied into the two the server looks
     for, so `config.toml` stays free to name them the local way. The ceilings are set here so how much of
@@ -168,6 +168,9 @@ def environment(config: Config) -> dict[str, str]:
     env["SLSK_USERNAME"] = os.environ[config.slsk_username_env]
     env["SLSK_PASSWORD"] = os.environ[config.slsk_password_env]
     env["SLSK_DOWNLOAD_DIR"] = str(config.staging)
+    # The two lanes are what we share: a client that reports no shared files is a leecher, and peers queue
+    # or ban those. `staging` is not one of them — it holds what is still being worked on.
+    env["SLSK_SHARE_DIRS"] = os.pathsep.join(str(lane) for lane in (config.lossless, config.lossy))
     env["SLSK_LISTEN_PORT"] = str(config.soulseek_listen_port)
     env["SLSK_OBFUSCATED_PORT"] = str(config.soulseek_obfuscated_port)
     env["SLSK_MAX_CONCURRENT_DL"] = str(config.max_downloads)
