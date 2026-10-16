@@ -947,6 +947,23 @@ def test_a_dead_child_does_not_race_the_bar_through_the_rest(tmp_path):
     assert printed.getvalue() == "", "a track nobody searched is not a track the pass settled"
 
 
+def test_a_pass_starts_with_the_tracks_no_pass_has_asked_about(tmp_path):
+    """2026-10-16: five passes over 315 tracks, between 20:54 and 22:28, searched the first 91 records and never
+    reached the other 224 — every pass began at track one and every child died inside the first hundred. The
+    tracks nobody has asked about go first, so each attempt makes progress on the tail instead."""
+    config, job, server, calls = setup(tmp_path, results=[], tracks=6, soulseek="workers = 1\n")
+    for idx in (1, 2, 3):
+        job.append_event(state.SEARCHED_EVENT, idx=idx, added=0, offered=0)
+    before = len(job.events())
+
+    with server:
+        pass_once(config, job, server, Reference(), calls)
+
+    asked = [event["idx"] for event in job.events()[before:]
+             if event["event"] == state.SEARCHED_EVENT]
+    assert asked == [4, 5, 6, 1, 2, 3], "the unasked tracks first, the ones already asked about after them"
+
+
 # ── the pace ─────────────────────────────────────────────────────────────
 
 
