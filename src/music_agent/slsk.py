@@ -98,6 +98,13 @@ class ChildLog:
         # ended abruptly leaves the next login answered with nothing — it is the account's state, not this
         # child's, and no child gets past it until the server lets go.
         "Login failed",
+        # And the server hanging up on a session it had already granted: `server closed connection, will not
+        # attempt to reconnect`, which the fork logs once when it happens and then never reconnects. Read as
+        # the session's loss rather than let pass as a dead child, because the child that reports it is not
+        # crashed — it is connected to nothing, and every search after the line goes unanswered. Measured
+        # 2026-10-16: pass 5 of a 315-track grab answered 57 searches, took this line, and then spent 69
+        # calls finding out; the three retries after it went out with no wait at all and were refused.
+        "server closed connection",
     )
     READER_DIED = (
         # The other way it stops answering, and a different thing entirely: aioslsk's
