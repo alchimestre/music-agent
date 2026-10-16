@@ -10,6 +10,7 @@ import json
 import os
 import queue
 import re
+import select
 import signal
 import subprocess
 import threading
@@ -23,6 +24,10 @@ PROTOCOL_VERSION = "2024-11-05"
 
 _STARTUP_TIMEOUT = 60.0     # uvx may have to build the server the first time it runs
 _CALL_TIMEOUT = 15.0
+# How long a message may wait for room on the child's stdin. A child that has stopped reading its input fills
+# the pipe, and the write holds the lock every other call needs: unbounded, that parks a whole pass with no
+# error anywhere, which is how 2026-10-16's passes spent minutes saying nothing.
+_WRITE_TIMEOUT = 10.0
 # What the group is given to shut itself down before it is signalled. The Soulseek child has a logout to
 # send on the way out, and a logout is a round trip to the server.
 _GRACE = 3.0
@@ -165,10 +170,21 @@ class StdioServer:
         return " | ".join(self._stderr) or "the server said nothing"
 
     def _send(self, message: dict) -> None:
+        """One message on the child's stdin, with a bound on how long that may take.
+
+        A child that stops reading its input fills the pipe, and the write takes the lock every other call
+        needs — so an unbounded write is one deaf child parking the whole pass. The room is waited for with a
+        deadline instead, and a child that never takes it is named.
+        """
+        line = json.dumps(message) + "\n"
         try:
             assert self._proc.stdin is not None
+            ready = self._proc.stdin.fileno()
             with self._writes:
-                self._proc.stdin.write(json.dumps(message) + "\n")
+                if not select.select([], [ready], [], _WRITE_TIMEOUT)[1]:
+                    raise ServerError(f"the child is not reading its input: nothing accepted in "
+                                      f"{_WRITE_TIMEOUT:g}s — {self._tail()}")
+                self._proc.stdin.write(line)
                 self._proc.stdin.flush()
         except (BrokenPipeError, ValueError) as exc:
             raise ServerError(f"the server closed its input: {self._tail()}") from exc
