@@ -125,6 +125,15 @@ class ChildLog:
         "MessageDeserializationError",
         "cannot access local variable 'message'",
     )
+    # Which of those it was, in the words a person reads. They call for different things: a closed connection
+    # is the server dropping a session it granted, a refused login is the account still held from the last
+    # child, and no session is the child's own state once either has happened. Counted separately because the
+    # report could otherwise only say that one of them happened.
+    LOSSES = (
+        ("server closed connection", "the server closed the connection"),
+        ("Login failed", "the server refused the login"),
+        ("valid session", "no session to search with"),
+    )
 
     def __init__(self, log=print) -> None:
         self._log = log
@@ -133,6 +142,7 @@ class ChildLog:
         self.lost_session = 0
         self.reader_died = 0
         self.chatter = 0
+        self.losses: dict[str, int] = {}
 
     @property
     def cannot_answer(self) -> bool:
@@ -142,6 +152,10 @@ class ChildLog:
     def __call__(self, line: str) -> None:
         if any(marker in line for marker in self.LOST_SESSION):
             self.lost_session += 1
+            for marker, name in self.LOSSES:
+                if marker in line:
+                    self.losses[name] = self.losses.get(name, 0) + 1
+                    break
             return
         if any(marker in line for marker in self.READER_DIED):
             self.reader_died += 1
@@ -174,9 +188,10 @@ class ChildLog:
         """What the child's noise came to, in one line each, at the end of a pass."""
         if self.lost_session:
             times = "time" if self.lost_session == 1 else "times"
-            self._log(f"slsk: the child was left without a session {self.lost_session} {times} — the server "
-                      f"stopped answering it, or a login never completed. Every search after the first came "
-                      f"back empty")
+            detail = " · ".join(f"{count} {name}" for name, count in
+                                sorted(self.losses.items(), key=lambda pair: -pair[1]))
+            self._log(f"slsk: the child was left without a session {self.lost_session} {times} — {detail}. "
+                      f"Every search after the first came back empty")
         if self.reader_died:
             times = "time" if self.reader_died == 1 else "times"
             self._log(f"slsk: the child's message reader died {self.reader_died} {times} on a frame it could "

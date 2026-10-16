@@ -221,6 +221,27 @@ def test_the_server_hanging_up_counts_as_the_session_going():
     assert logs.cannot_answer is True
 
 
+def test_the_report_names_which_loss_it_was():
+    """2026-10-16: three passes in a row said only that the child had been left without a session, and nothing
+    said which of the three ways it was — the server hanging up, a login it refused, or the child's own state
+    once either had happened. They call for different things, and this line is the only place that says so."""
+    said: list[str] = []
+    logs = slsk.ChildLog(log=said.append)
+
+    logs("WARNING:aioslsk.network.network:server closed connection, will not attempt to reconnect")
+    logs("ERROR:slsk_mcp:Login failed: expected login response from server but got : None")
+    logs("WARNING:aioslsk.search.manager:not returning search results : no valid session was set")
+
+    logs.report()
+
+    assert logs.lost_session == 3
+    line = next(text for text in said if "left without a session" in text)
+    assert "3 times" in line
+    assert "the server closed the connection" in line
+    assert "the server refused the login" in line
+    assert "no session to search with" in line
+
+
 def test_the_reader_dying_is_told_apart_from_the_session_going():
     """2026-10-15: aioslsk's message reader raised on a frame it could not read — a short read gives it
     `struct.error: unpack_from requires a buffer of at least 293 bytes` — the task ended, and every search
