@@ -7,9 +7,12 @@ protocol, with a clock the test moves by hand.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -924,6 +927,55 @@ def test_a_silent_network_is_still_searched_to_the_end(tmp_path):
     assert len(summary.nothing_usable) == total, "every track was asked about, and every one answered nothing"
     events = (config.state_root / job.id / "events.jsonl").read_text(encoding="utf-8")
     assert "network_quiet" not in events
+
+
+def test_a_dead_child_does_not_race_the_bar_through_the_rest(tmp_path):
+    """The bar counts the tracks the pass got through. When the child is gone the others were never searched,
+    and settling them one at a time raced the count from 28 to 296 in a blink — which reads as a pass that
+    finished the list, and leaves a captured stream with one line per track that was never asked about."""
+    config, job, server, calls = setup(tmp_path, results=[], tracks=5)
+    child = slsk.ChildLog(log=lambda line: None)
+    child("WARNING:aioslsk.search.manager:not returning search results : no valid session was set")
+    lines, printed = [], io.StringIO()
+
+    with server:
+        with pytest.raises(acquire.ServerStuck):
+            acquire.run(config, job, server, Reference(), library=None, log=lines.append,
+                        child=child, stream=printed)
+
+    assert "5 tracks were never searched" in " ".join(lines)
+    assert printed.getvalue() == "", "a track nobody searched is not a track the pass settled"
+
+
+# ── the pace ─────────────────────────────────────────────────────────────
+
+
+def test_a_search_in_flight_does_not_hold_the_next_one_back():
+    """Twenty searches run at once, their starts one `search_interval` apart: the gap is between starts, not a
+    limit on how many are running. `wait` gives the lock up before it sleeps, so a search still in flight — the
+    call can take ten seconds to come back — does not hold the next one back. A lock held across the sleep
+    would make the whole pass serial, and nothing would say so."""
+    holding = threading.Event()
+    naps = []
+
+    def sleep(seconds: float) -> None:
+        naps.append(seconds)
+        if len(naps) == 1:
+            holding.set()
+            time.sleep(0.2)         # the sleeper is inside its nap, with the next slot already booked
+
+    pacer = acquire.Pacer(1.0, clock=time.monotonic, sleep=sleep)
+    pacer.wait()                    # the first search starts at once and sleeps for nothing
+    napper = threading.Thread(target=pacer.wait)
+    napper.start()
+    assert holding.wait(2.0), "the second search is waiting its turn"
+
+    began = time.monotonic()
+    pacer.wait()
+    went = time.monotonic() - began
+    napper.join()
+
+    assert went < 0.05, f"the third search waited {went:.2f}s behind a sleeper: the pace is a queue"
 
 
 def test_searches_are_spaced_out_rather_than_fired_as_fast_as_the_loop_can(tmp_path):

@@ -83,6 +83,15 @@ class ChildLog:
 
     NOISE = "failed to fulfill ConnectToPeer request"
     OPENING = "Traceback (most recent call last):"
+    # Once per call, once per search and once per task cancelled, and not one of them says anything a person
+    # acts on: the pass prints the track it is asking about, and the child's last lines are quoted when a call
+    # fails. Counted and left out, so a pass over three hundred tracks does not bury its own bar in protocol.
+    CHATTER = (
+        "Processing request of type CallToolRequest",
+        "Starting search query=",
+        "cancelling task :",
+        "not sending message, connection is closing",
+    )
     # The ways the child loses the ability to answer. It reports each of them and recovers from none.
     # `no valid session` is the server taking the session away. The other is the child's own message reader
     # dying: `DataConnection._message_reader_loop` raises `UnboundLocalError` on a frame it cannot
@@ -123,6 +132,7 @@ class ChildLog:
         self.refused = 0
         self.lost_session = 0
         self.reader_died = 0
+        self.chatter = 0
 
     @property
     def cannot_answer(self) -> bool:
@@ -136,6 +146,9 @@ class ChildLog:
         if any(marker in line for marker in self.READER_DIED):
             self.reader_died += 1
             return
+        if any(marker in line for marker in self.CHATTER):
+            self.chatter += 1
+            return
         if self.NOISE in line:
             self.refused += 1
             return
@@ -148,6 +161,14 @@ class ChildLog:
             self._frames = False
             line = f"{line.strip()} (frames suppressed)"
         self._log(f"slsk: {line}")
+
+    def route(self, say) -> None:
+        """Send what this keeps through `say` instead of printing it.
+
+        A pass draws its progress on the same terminal, and a line printed beside a bar that is rewritten in
+        place leaves the bar shredded around it; `say` is the bar's own writer, which erases itself first.
+        """
+        self._log = say
 
     def report(self) -> None:
         """What the child's noise came to, in one line each, at the end of a pass."""
@@ -163,6 +184,9 @@ class ChildLog:
                       f"after that")
         if self.refused:
             self._log(f"slsk: {self.refused} peer connections refused — the network, not the run")
+        if self.chatter:
+            self._log(f"slsk: {self.chatter} lines of the child's own progress left out of the terminal — one "
+                      f"per call, one per search, one per task it cancels on the way down")
 
 
 def environment(config: Config) -> dict[str, str]:
