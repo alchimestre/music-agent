@@ -758,3 +758,47 @@ def test_peers_lists_the_ignored_and_lifts_one(tmp_path, capsys):
 
     assert main(["--config", str(path), "peers", "--unban", "nobody"]) == 0
     assert "not on the ledger" in capsys.readouterr().out
+
+
+def test_a_pass_that_ends_on_a_lost_session_still_says_what_the_child_saw(tmp_path, monkeypatch):
+    """The child's account of a failure — a session it lost, the peers that refused it, a reader that died — is
+    counted as it happens and printed once at the end, which is why nothing else prints it. The pass that ends
+    on a lost session is the pass that raises out of `acquire.run`: on 2026-10-16 five passes ended that way
+    and every one of them reported the count it had reached and not one word about why."""
+    from music_agent import slsk
+
+    config = config_module.load(make_config(tmp_path))
+    job = state.create(config, "run")
+    said = []
+
+    class Logs:
+        def __call__(self, line: str) -> None:
+            pass
+
+        def report(self) -> None:
+            said.append("the child's own account")
+
+    class Server:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __enter__(self) -> "Server":
+            return self
+
+        def __exit__(self, *exc) -> bool:
+            return False
+
+    def gone(*args, **kwargs):
+        raise acquire.ServerStuck("the child lost its session", lost_session=True)
+
+    monkeypatch.setattr(slsk, "ChildLog", Logs)
+    monkeypatch.setattr(slsk, "free_ports", lambda config: None)
+    monkeypatch.setattr(cli_module.mcp, "StdioServer", Server)
+    monkeypatch.setattr(library, "open", lambda config: None)
+    monkeypatch.setattr(acquire, "run", gone)
+
+    with pytest.raises(acquire.ServerStuck):
+        cli_module._one_pass(config, job, retry=False)
+
+    assert said == ["the child's own account"], \
+        "the pass that fails is the one whose child has something to say about it"
