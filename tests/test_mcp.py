@@ -232,3 +232,18 @@ def test_answers_are_routed_when_they_come_back_out_of_order(tmp_path):
 
     assert second == {"which": "second"}
     assert first == {"which": "first"}
+
+
+def test_a_child_that_stops_reading_its_input_is_named_rather_than_hung(monkeypatch):
+    """2026-10-16: a child stopped servicing calls and the pass went quiet for minutes with nothing to say.
+    Its own stack showed an idle loop, and the other half of it was here — the write to the child's stdin
+    holds the lock every other call needs, so a child that stops reading parks the whole pass. Bounded, the
+    child is named instead."""
+    monkeypatch.setattr("music_agent.mcp._WRITE_TIMEOUT", 0.3)
+
+    with open_server("deaf") as server:
+        with pytest.raises(ServerError) as raised:
+            for _ in range(5000):
+                server.notify("notifications/ignored")
+
+    assert "not reading its input" in str(raised.value)

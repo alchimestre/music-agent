@@ -13,6 +13,7 @@ behaviour under test, so each awkward path the network can take has a name:
   dies        exits without answering, as a killed server does
   silent      accepts the call and never answers, for the timeout path
   mute        answers nothing at all, not even the handshake
+  deaf        answers the handshake and then stops reading its input, so the pipe fills up
 
 Three environment variables let a test script a download without a network:
 
@@ -196,6 +197,9 @@ def main() -> None:
         if method == "initialize":
             reply(message["id"], {"protocolVersion": "2024-11-05", "capabilities": {},
                                   "serverInfo": {"name": "fake-soulseek", "version": "0"}})
+            if SCENARIO == "deaf":
+                # Reads nothing more: the pipe fills, and a client whose write has no bound blocks inside it.
+                time.sleep(600)
         elif method == "tools/list":
             reply(message["id"], {"tools": [{"name": "search"}, {"name": "download"}]})
         elif method == "tools/call":
