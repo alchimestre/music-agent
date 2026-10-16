@@ -212,6 +212,10 @@ def environment(config: Config) -> dict[str, str]:
     env["SLSK_MAX_CONCURRENT_DL"] = str(config.max_downloads)
     env["SLSK_MAX_CONCURRENT_SEARCH"] = str(config.max_searches)
     env["SLSK_MAX_CONCURRENT_OPS"] = str(config.max_operations)
+    # A child that goes deaf says nothing about why: no error, no exit, no further lines, and the pass ends it
+    # on four timeouts without learning anything. Armed, `kill -ABRT <pid>` writes its own Python stack into
+    # this pass's log.
+    env["PYTHONFAULTHANDLER"] = "1"
     return env
 
 

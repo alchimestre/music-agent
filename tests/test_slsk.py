@@ -52,6 +52,18 @@ def test_the_child_is_told_what_to_share(tmp_path, creds):
     assert str(config.staging) not in env["SLSK_SHARE_DIRS"]
 
 
+def test_a_child_that_goes_deaf_can_still_be_asked_where_it_stopped(tmp_path, creds):
+    """2026-10-16: a child that had answered 57 searches stopped servicing every call at once — no error, no
+    exit, no line of its own — and the pass ended it on four timeouts without ever learning why. With
+    faulthandler armed, `kill -ABRT <pid>` writes its Python stack into the pass's own log, and py-spy (which
+    needs root on macOS) names the asyncio task each unanswered call is sitting on."""
+    config = make_config(tmp_path)
+
+    env = slsk.environment(config)
+
+    assert env["PYTHONFAULTHANDLER"] == "1"
+
+
 def test_credentials_are_renamed_to_what_the_server_expects(tmp_path, monkeypatch):
     """config.toml may call them whatever this machine calls them; the child gets the real names."""
     monkeypatch.setenv("MY_SLSK_USER", "someone")

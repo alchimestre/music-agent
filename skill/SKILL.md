@@ -112,6 +112,17 @@ search is the rare ones, whose searches come back empty one after another.
 
 Tracks a stopped pass never reached are reported as **not searched** and left exactly as they were.
 
+A child can also go deaf without saying anything: the searches stop being answered, its own log stops at the
+last line it wrote, and it neither errors nor exits. The pass cannot tell that from a child that died, so it
+ends it on four timeouts — the right call, and no explanation. Two ways to ask a child where it stopped, both
+worth having ready before the next occurrence:
+
+1. `kill -ABRT <child pid>` — the child is started with `PYTHONFAULTHANDLER` armed, so it writes its own
+   Python stack into the pass's `slsk: ` log and exits. Needs no root.
+2. `sudo py-spy dump --pid <child pid>` — every asyncio task and the await each one is sitting on, which is
+   what names the culprit when the child is alive and idle rather than blocked inside a call. Needs root on
+   macOS.
+
 The other silent failure is the ports. `SLSK_LISTEN_PORT` and `SLSK_OBFUSCATED_PORT` (20000 and 20001 by
 default) must be free: a Soulseek client left on them by an earlier run is logged in on the same account, so
 the server hands it every search reply and the pass sees an empty network. A pass frees them itself, stopping
