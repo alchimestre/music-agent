@@ -712,6 +712,11 @@ def run(
     summary = Summary()
     watch = ChildWatch(child=child)
     bar = progress.Bar(len(records), log=log, stream=stream)
+    if child is not None:
+        # Its lines arrive while the bar is drawn on the same terminal, and a plain print leaves the bar's last
+        # drawing shredded around them. The bar's own writer erases first, so the child goes through it.
+        child.route(bar.say)
+    unsearched: list[int] = []
 
     # The ignore list, read once: twenty workers ask it on every search and every failure, and `offence`
     # writes it whole from what this object holds.
@@ -732,9 +737,9 @@ def run(
     def work(record: state.Record) -> None:
         if watch.dead.is_set() or watch.session_lost:
             # The child is gone, so the pass stops asking; the record is left exactly as it was, and nothing is
-            # written about a search that never happened.
-            summary.unsearched.append(record.idx)
-            bar.settle(record.idx, record.label, "unsearched")
+            # written about a search that never happened. Not settled either: the bar counts what the pass got
+            # through, and settling these one by one races it through the rest of the list as if it had.
+            unsearched.append(record.idx)
             return
         later_pass = retry or bool(record.candidates)
         bar.begin(record.idx, record.label)
@@ -759,6 +764,12 @@ def run(
                 " — the network's rate, not this loop's")
         with ThreadPoolExecutor(max_workers=max(1, config.workers)) as pool:
             list(pool.map(work, records))
+
+    if unsearched:
+        # One line for everything the child never reached, rather than one per track.
+        unsearched.sort()
+        summary.unsearched.extend(unsearched)
+        bar.say(f"{len(unsearched)} tracks were never searched — the child had stopped answering")
 
     if watch.hung or watch.session_lost:
         account = watch.session_lost and child is not None and child.lost_session > 0

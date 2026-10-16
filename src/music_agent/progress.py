@@ -54,6 +54,9 @@ class Bar:
         with self._lock:
             self._erase()
             self._stream.flush()
+            # Nothing rewrites the terminal after this: whatever is still writing lines — the child's log is
+            # one — prints them plainly rather than redrawing a bar the pass has finished with.
+            self._rewrites = False
 
     def _erase(self) -> None:
         if self._drawn:

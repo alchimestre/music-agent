@@ -228,3 +228,35 @@ def test_the_reader_dying_is_told_apart_from_the_session_going():
     assert logs.lost_session == 0
     assert logs.cannot_answer is True
     assert said == ["slsk: INFO:aioslsk.network.network:Search complete: 0 raw results"]
+
+
+def test_the_child_own_progress_is_counted_rather_than_printed():
+    """One per call, one per search, one per task cancelled on the way down. A pass over three hundred tracks
+    printed hundreds of these lines, and every one of them landed in the middle of the progress bar."""
+    said = []
+    logs = slsk.ChildLog(log=said.append)
+
+    logs("INFO:mcp.server.lowlevel.server:Processing request of type CallToolRequest")
+    logs("INFO:slsk_mcp:Starting search query='kiasmos blurred' timeout=10")
+    logs("INFO:aioslsk.tasks:cancelling task : upnp-task")
+    logs("WARNING:aioslsk.network.connection:[server.slsknet.org:2416] not sending message, connection is "
+         "closing / closed : FileSearch.Request(ticket=39, query='kiasmos blurred')")
+
+    assert said == [], "not one of these is worth a line while a pass is running"
+    assert logs.chatter == 4
+
+    logs.report()
+    assert len(said) == 1
+    assert "left out" in said[0]
+
+
+def test_a_routed_log_writes_through_the_bar_instead_of_around_it():
+    """A pass draws its bar on the same terminal and rewrites it in place, so a line printed beside it leaves
+    the bar shredded around the line. `route` is how the pass hands the child to the bar's own writer."""
+    said = []
+    logs = slsk.ChildLog(log=lambda line: said.append(f"printed: {line}"))
+
+    logs.route(said.append)
+    logs("INFO:aioslsk.shares.manager:completed scan in 1.214489 seconds")
+
+    assert said == ["slsk: INFO:aioslsk.shares.manager:completed scan in 1.214489 seconds"]
