@@ -86,6 +86,18 @@ def test_two_mixes_of_one_title_are_two_tracks():
     assert duplicates.find([original, remix]) == []
 
 
+def test_a_mix_that_names_the_original_is_no_mix():
+    """`Happy But Sad (Original Mix)` and `Happy But Sad` are one recording. The key kept them apart while
+    `rules.mix_matches` — the rule the rest of the pipeline matches candidates with — reads the two as the
+    same, so the pair survived in the collection and a device export carried it twice."""
+    plain = copy(1, "Keith Carnal - Happy But Sad.aiff", title="Happy But Sad", seconds=456)
+    named = copy(2, "Keith Carnal - Happy But Sad (Original Mix).aiff", title="Happy But Sad",
+                 mix="Original Mix", seconds=456)
+    [merged] = duplicates.find([plain, named])
+    assert merged.keep is plain
+    assert merged.drops == [named]
+
+
 def test_one_collaboration_written_two_ways_is_one_track():
     """`A x B` on one file and `A & B` on the other: the files disagree about the credit, and a key that
     spelled the credit out cannot see that these are the same track."""

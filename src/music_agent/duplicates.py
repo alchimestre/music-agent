@@ -78,7 +78,11 @@ class Copy:
         ways and the files disagree about which, so a key that spells the credit out cannot see the very
         duplicates this looks for. The credit is compared by name instead, in `find`.
         """
-        return (parsing.fold(self.title), parsing.fold(self.mix))
+        # A mix that names the original *is* no mix — `rules.mix_matches` reads a candidate that way — so a
+        # row titled `Happy But Sad (Original Mix)` is the same recording as one titled `Happy But Sad`, and
+        # keeping the two apart left that pair in the collection for a device export to carry twice.
+        mix = "" if parsing.is_original(self.mix) else self.mix
+        return (parsing.fold(self.title), parsing.fold(mix))
 
     def used(self) -> int:
         """How much of the library leans on this row."""
