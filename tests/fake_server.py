@@ -83,11 +83,13 @@ def _parse(chunk: str) -> list[dict]:
     for step in chunk.split(";"):
         status, _, rest = step.partition(":")
         connection, _, rest = rest.partition(":")
-        size, _, path = rest.partition(":")
+        size, _, rest = rest.partition(":")
+        path, _, total = rest.partition(":")
         parsed.append({
             "status": status,
             "connection_state": connection,
             "received_bytes": int(size or 0),
+            "total_bytes": int(total) if total else None,
             "progress_pct": 100.0 if status == "finished" else 0.0,
             "local_path": path or os.environ.get("FAKE_LOCAL_PATH", ""),
             "wait_before_poll_secs": 30,

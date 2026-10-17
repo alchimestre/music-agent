@@ -315,6 +315,43 @@ def test_the_file_on_disk_wins_over_a_server_that_says_not_found(tmp_path):
     assert job.records()[0].status == state.DOWNLOADED
 
 
+def test_a_rotated_peer_leaves_no_partial_in_staging(tmp_path):
+    """The child renames its `.part` only on success and never deletes it. Left behind, the next attempt at
+    the same file finds it, picks a new name, and starts from zero — and staging fills with the bytes of
+    every peer the pass rotated past."""
+    landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
+    part = landed.with_suffix(".flac.part")
+    config, job, server, calls = setup(tmp_path, results=GOOD,
+                                       download=f"downloading:transferring:0:{landed}")
+    part.parent.mkdir(parents=True, exist_ok=True)
+    part.write_bytes(b"the bytes a rotated peer left")
+
+    with server:
+        pass_once(config, job, server, Reference(), calls)
+
+    assert not part.exists(), "a transfer that will not finish leaves nothing in staging"
+
+
+def test_a_short_file_is_not_recorded_as_downloaded(tmp_path):
+    """The child calls a transfer finished on its own accounting, and ffmpeg converts whatever bytes are on
+    disk without complaint. A peer that advertised 82 MB and delivered 20 bytes has delivered nothing, and
+    the size the transfer declared is the only place that says so."""
+    landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
+    config, job, server, calls = setup(
+        tmp_path, results=GOOD, download=f"finished:complete:20:{landed}:82000000")
+    landed.parent.mkdir(parents=True, exist_ok=True)
+    landed.write_bytes(b"twenty bytes, roughly")
+
+    with server:
+        summary, quiet = pass_once(config, job, server, Reference(), calls)
+
+    assert summary.downloaded == [], quiet.lines
+    assert job.records()[0].status != state.DOWNLOADED
+    assert not landed.exists(), "a file that is not the one advertised is not kept"
+    lost = [event for event in job.events() if event["event"] == "candidate_lost"]
+    assert lost and lost[-1]["why"] == "truncated"
+
+
 def test_a_track_settled_by_hand_is_not_searched_again(tmp_path):
     """The decision axis is what a pass reads, so an answered question is not reopened."""
     config, job, server, calls = setup(tmp_path, results=GOOD)
