@@ -83,9 +83,9 @@ def environment(config: Config) -> dict[str, str]:
     env["SOULSEEK_STATE_DIR"] = str(state_dir(config))
     env["SOULSEEK_LISTENER_PORT"] = str(config.soulseek_listen_port)
     env["SOULSEEK_MAX_CONCURRENT_DOWNLOADS"] = str(config.max_downloads)
-    # The server's own default is 10s, which cuts the window short before the pass has read a slow peer's
-    # answer; the pass decides its own window and reads once, so the daemon's is set to match.
-    env["SOULSEEK_SEARCH_TIMEOUT"] = "10"
+    # The server's own default is 10s; the pass reads once after its own window, so the daemon's is set to
+    # the same length rather than left to cut the window short.
+    env["SOULSEEK_SEARCH_TIMEOUT"] = "5"
     return env
 
 
