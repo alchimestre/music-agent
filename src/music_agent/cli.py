@@ -350,11 +350,11 @@ ACQUIRE_ERRORS = (slsk.MissingCredential, slsk.PortBusy, mcp.ServerError, acquir
 RESTARTS = 3
 
 # What is waited before a fresh child is worth trying, once the account's session has been taken and the child
-# that held it died without logging out. One wait, and it is the measured one: a login starts working again
-# twelve to seventeen minutes after the child died. Anything shorter spends a login inside the window — and
-# every attempt is another connection to an account that is refusing them. When the second child is refused
-# too the pass stops, because a third login buys the same answer.
-SESSION_WAITS = (900.0,)
+# that held it died without logging out. One wait, and it is the top of the measured window: a login starts
+# working again twelve to seventeen minutes after the child died, and anything below the top spends a login
+# inside it — and every attempt is another connection to an account that is refusing them. When the second
+# child is refused too the pass stops, because a third login buys the same answer.
+SESSION_WAITS = (1020.0,)
 
 
 def _stage(name: str, detail: str = "") -> None:
@@ -490,9 +490,9 @@ def _acquire_pass(config: config_module.Config, job: state.Job, *, retry: bool) 
     A session the server has taken away is not that. The child that lost it could not log out either — its
     networking is what died — so the server keeps the account until its own timeout passes, and a fresh child
     is refused for as long as that takes. Measured here, a login starts working again twelve to seventeen
-    minutes after the child died, so there is one wait and it is that long. A second refusal ends the pass:
-    2026-10-16 a pass spent five logins finding out what two would have said, and each one was another
-    connection to an account that was refusing them.
+    minutes after the child died, so there is one wait and it is the top of that window. A second refusal ends
+    the pass: 2026-10-16 a pass spent five logins finding out what two would have said, and each one was
+    another connection to an account that was refusing them.
 
     A reader that died inside one child is a third thing, and it is neither of those: the next child carries
     on from where the run got to, at once. `ServerStuck.lost_session` is what tells them apart.
