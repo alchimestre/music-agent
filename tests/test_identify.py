@@ -341,3 +341,50 @@ def test_an_acoustid_result_becomes_recordings_with_their_release_group():
     assert recording.album == "Makaveli 3: Hit ’Em Up"
     assert recording.compilation is True
     assert recording.album_artists == ("Various Artists",)
+
+
+def test_a_lookup_that_would_wait_for_ever_is_given_a_deadline(monkeypatch):
+    """2026-10-17: the process stage sat silent for half an hour after a pass had ended. acoustid's
+    `lookup` takes a `timeout` and defaults it to `None` — no deadline at all — and musicbrainzngs never
+    sets one either, so a server that accepts the connection and then says nothing holds the whole run
+    with no error and no line. The fake below behaves like that: it answers only when it is told when to
+    give up."""
+    import sys
+    import types
+
+    seen: dict[str, object] = {}
+
+    fake = types.ModuleType("acoustid")
+
+    def lookup(key: str, fingerprint: str, duration: int, meta: str = "", timeout: float | None = None):
+        seen["timeout"] = timeout
+        if timeout is None:
+            raise TimeoutError("the server accepted the connection and never answered")
+        return {"results": []}
+
+    fake.lookup = lookup                                            # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "acoustid", fake)
+
+    assert identify.AcoustIDMatches("a-key").match("FINGERPRINT", 312) == []
+    assert seen["timeout"] == identify.NETWORK_TIMEOUT, "no deadline is a hang, not a slow answer"
+
+
+def test_every_socket_opened_while_identifying_has_a_deadline(tmp_path):
+    """The deadline reaches the sockets `urllib` opens, which is where musicbrainzngs' calls go — and it
+    is put back afterwards, because it is process-wide and the run is not only identification."""
+    import socket
+
+    seen: dict[str, float | None] = {}
+
+    class Hearing:
+        def listen(self, path: Path) -> tuple[str, int]:
+            seen["during"] = socket.getdefaulttimeout()
+            return "FINGERPRINT", 312
+
+    before = socket.getdefaulttimeout()
+    found = identify.identify(tmp_path / "x.mp3", request(), hearing=Hearing(),
+                              matches=nothing_matched(), brainz=brainz())
+
+    assert found.title == "Hit ’Em Up"          # the filename, nothing having answered
+    assert seen["during"] == identify.NETWORK_TIMEOUT
+    assert socket.getdefaulttimeout() == before

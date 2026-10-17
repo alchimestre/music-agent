@@ -512,8 +512,9 @@ def _acquire_pass(config: config_module.Config, job: state.Job, *, retry: bool) 
                     raise
                 wait = SESSION_WAITS[lost]
                 lost += 1
-                print(f"the account is still held by the child that died — waiting {wait:.0f}s before a fresh "
-                      f"one is worth trying", file=sys.stderr)
+                retry_at = time.strftime("%H:%M", time.localtime(time.time() + wait))
+                print(f"the account is still held by the child that died — waiting {wait / 60:.0f}m, "
+                      f"next login at {retry_at}", file=sys.stderr)
                 time.sleep(wait)
             print(f"the server went down mid-pass ({error}){_silence(error)}; "
                   f"{RESTARTS + 1 - attempt} more attempt(s)", file=sys.stderr)

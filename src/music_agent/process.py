@@ -425,6 +425,7 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
         if record.status != state.DOWNLOADED:
             continue
         try:
+            log(f"[{record.idx}] {record.label}: identifying")
             found[record.idx] = identify_one(record, tools, log)
             choice = apply_genre(record, found[record.idx], tools, log)
             if not choice.found and choice.considered:
