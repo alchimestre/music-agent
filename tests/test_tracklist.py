@@ -88,3 +88,17 @@ def test_reading_a_file(tmp_path):
     path = tmp_path / "tracks.txt"
     path.write_text("Kiasmos - Blurred\n", encoding="utf-8")
     assert tracklist.read(path)[0].title == "Blurred"
+
+
+def test_reading_a_lane_directory(tmp_path):
+    """The lane is already the list: `--tracks "~/Music/Losy Tracks"` asks for every lossy copy it holds,
+    named the way the pipeline named it, with nothing exported in between."""
+    (tmp_path / "Kiasmos - Blurred.mp3").write_bytes(b"")
+    (tmp_path / "Ntogn - Mines (Original Mix).flac").write_bytes(b"")
+    (tmp_path / ".DS_Store").write_bytes(b"")
+    (tmp_path / "cover.jpg").write_bytes(b"")
+
+    requests = tracklist.read(tmp_path)
+
+    assert [(r.artist, r.title, r.mix) for r in requests] == [
+        ("Kiasmos", "Blurred", ""), ("Ntogn", "Mines", "Original Mix")]

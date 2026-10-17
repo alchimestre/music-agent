@@ -12,7 +12,7 @@ so a run can be resumed or repeated.
 4. `set -a; source .env; set +a`.
 
 ```sh
-music-agent run --tracks <file|URL>
+music-agent run --tracks <file|dir|URL>
 ```
 
 That is the whole pipeline. It prints one line per stage and asks nothing.
@@ -25,7 +25,8 @@ ship here; `[tools]` in `config.toml` can point at other copies.
 | command | what it does | time |
 |---|---|---|
 | `run --tracks FILE` | acquire, process, export, sweep | hours |
-| `acquire --tracks FILE` | search and download into staging | hours |
+| `run --tracks DIR` | the same, over a lane: every file in it is a track to upgrade | hours |
+| `acquire --tracks FILE\|DIR` | search and download into staging | hours |
 | `process` | identify, genre, convert, normalize, tag | hours |
 | `import` | export to every target; rekordbox must be closed | seconds |
 | `status` | what the run did, and what needs you | seconds |

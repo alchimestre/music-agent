@@ -16,7 +16,7 @@ One command does all of it:
 
 ```sh
 set -a; source .env; set +a
-music-agent run --tracks <file|URL>
+music-agent run --tracks <file|dir|URL>
 ```
 
 It acquires, processes, exports to every `[export] targets` entry in order, and clears staging, printing a
@@ -33,8 +33,8 @@ copy `.env.example` to `.env` and fill it in — and every command that reaches 
 missing key until they are loaded.
 
 ```
-music-agent run --tracks <file|URL>             # all of it, in order, one command (see above)
-music-agent acquire --tracks <file|URL>         # the tracklist, searched and downloaded into staging
+music-agent run --tracks <file|dir|URL>             # all of it, in order, one command (see above)
+music-agent acquire --tracks <file|dir|URL>         # the tracklist, searched and downloaded into staging
 music-agent status --queue                      # what the run has not settled, by why (see 3)
 music-agent review                              # the queue as text; the flags below write a decision
 music-agent process                             # identified, genred, converted, normalized, tagged
@@ -86,7 +86,7 @@ working, not the playlist failing; a list of newer or rarer tracks does better.
 ## 2. Acquire
 
 ```
-music-agent acquire --tracks <file|URL> --name <what to call the run>
+music-agent acquire --tracks <file|dir|URL> --name <what to call the run>
 ```
 
 Read what it prints. Each track resolves a **reference** from MusicBrainz, searches Soulseek, and either
@@ -110,7 +110,7 @@ them: that is the network answering, and once the findable tracks are taken, wha
 rare ones, whose searches come back empty one after another.
 
 - **Nothing answering.** Four calls in a row that time out instead of returning means the daemon has stopped
-  talking. The pass stops, the run stays open, and a fresh pass picks it up.
+  talking. The pass stops; the stages after it still place what arrived, and a later run continues.
 - **Session displaced.** The daemon reports `session_loss: "displaced"`: another login took the account. Every
   search after that comes back empty, and a fresh daemon loses the same session while another client holds
   the account, so the passes stop there instead of asking again. `"disconnected"` is not this — the daemon
