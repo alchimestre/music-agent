@@ -116,7 +116,13 @@ class StdioServer:
 
     def _pump(self, stream: Any, sink: Callable[[str], None], terminal: bool) -> None:
         for line in stream:
-            sink(line)
+            try:
+                sink(line)
+            except Exception as error:
+                # Answering the server's own question goes through `_send`, which can now raise. Letting that
+                # out of here would end the loop before the waiters below are told, and every call in flight
+                # would report a timeout instead of the write that failed.
+                self._stderr.append(f"the reader dropped a line: {error!r}")
         if terminal:
             # End of input: the server is gone, and every call still waiting has to hear it.
             with self._state:
@@ -175,6 +181,10 @@ class StdioServer:
         A child that stops reading its input fills the pipe, and the write takes the lock every other call
         needs — so an unbounded write is one deaf child parking the whole pass. The room is waited for with a
         deadline instead, and a child that never takes it is named.
+
+        `select` promises one free byte, not room for the whole line, so what is sent has to stay far inside
+        the pipe's capacity for this to be a bound. Every call here carries a search query or a download id;
+        a call whose arguments grew past a few kilobytes would need a non-blocking write loop instead.
         """
         line = json.dumps(message) + "\n"
         try:
