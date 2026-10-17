@@ -123,11 +123,6 @@ earlier run is logged in on the same account, so the server hands it every searc
 empty network. A pass sweeps it before starting the daemon, stopping that client and saying which; anything
 else holding it is named and the pass stops rather than killing a stranger's process.
 
-That is why a harness's own Soulseek MCP server has to be **disabled or unmounted**, not just stopped, while
-a pass runs: it is on the same account, the server keeps one session per account, and it is started again the
-moment it is killed. With the daemon the symptom is `session_loss: "displaced"`, and `soulseek-rs daemon
-status` says so without a log to read.
-
 One pass at a time, and never kill one mid-session. A pass that is killed abruptly — SIGKILL, a closed
 terminal — leaves the server holding that session until its own timeout, and every login after it is refused
 for twelve to seventeen minutes. The cure is to wait, and it is worth knowing that a brand-new account still
@@ -395,6 +390,6 @@ does not have to sit through it. Hand it to a subagent where the harness has one
 stage counts, the review queue with its reasons, and the ungenred list — three things, and nothing that needs
 a conversation.
 
-Stop a tool you started. A harness's Soulseek MCP server holds the ports this pipeline needs, and a
-`rekordbox-mcp` holds the database the import writes; both are restarted by the harness when it wants them, so
-stopping them needs nobody's permission.
+Stop a tool you started. A `rekordbox-mcp` holds the database the import writes, and the harness restarts it
+when it wants it, so stopping it needs nobody's permission. Leave `soulseek-rs daemon` alone: a pass starts
+it and keeps it running on purpose.

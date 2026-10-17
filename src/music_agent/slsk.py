@@ -91,7 +91,7 @@ def environment(config: Config) -> dict[str, str]:
 
 # The clients that squat the account and the port. `soulseek-rs` is deliberately absent: the daemon is ours,
 # and this function is what clears the field *before* it is started.
-SQUATTERS = ("slsk-mcp", "slsk_mcp", "nicotine", "sldl", "soulseekqt", "soulseek-qt")
+SQUATTERS = ("nicotine", "sldl", "soulseekqt", "soulseek-qt")
 
 
 def free_ports(config: Config, *, log=print) -> list[int]:
@@ -111,22 +111,16 @@ def free_ports(config: Config, *, log=print) -> list[int]:
             log(f"stopped {name} (pid {', '.join(str(pid) for pid in pids)})")
             stopped.extend(pids)
 
-    # The obfuscated port is the plain one plus one by convention; a client that registered it before this
-    # pipeline moved off it may still hold it, so the sweep covers both.
-    ports = (config.soulseek_listen_port, config.soulseek_listen_port + 1)
-    held: list[int] = []
-    for port in ports:
-        for pid in processes.listeners(port):
-            if pid not in held and pid != os.getpid():
-                held.append(pid)
+    port = config.soulseek_listen_port
+    held = [pid for pid in processes.listeners(port) if pid != os.getpid()]
     if not held:
         return stopped
 
     stubborn = processes.stop(held)
     if stubborn:
-        raise PortBusy(f"pids {stubborn} would not stop, and they hold {ports}")
-    log(f"stopped a stale Soulseek client holding port{'s' if len(ports) > 1 else ''} "
-        f"{', '.join(str(port) for port in ports)} (pid {', '.join(str(pid) for pid in held)})")
+        raise PortBusy(f"pids {stubborn} would not stop, and they hold {port}")
+    log(f"stopped a stale Soulseek client holding port {port} "
+        f"(pid {', '.join(str(pid) for pid in held)})")
     return stopped + held
 
 
