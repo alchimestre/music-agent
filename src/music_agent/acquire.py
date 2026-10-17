@@ -726,7 +726,7 @@ def run(
     *,
     library: Library | None = None,
     log=print,
-    sleep=time.sleep,
+    sleep=None,
     clock=time.monotonic,
     retry: bool = False,
     stream=None,
@@ -736,6 +736,10 @@ def run(
     The transfers and the waiting on them overlap; the searching does not, and goes out at
     `config.search_interval`, because that rate is the network's and not this loop's.
     """
+    # Time spent waiting is time the daemon spends pushing events at us; reading them keeps its socket free
+    # while a share is being leeched. A caller that substitutes its own sleep (tests) loses that, and nothing
+    # else.
+    sleep = sleep or daemon.settle
     # The tracks no pass has asked about yet go first. A daemon that stops early leaves the rest of the list
     # unasked, and a pass that starts at the top of the file spends every attempt on the same head: on
     # 2026-10-16 five passes over 315 tracks, between 20:54 and 22:28, searched the first 91 records over and

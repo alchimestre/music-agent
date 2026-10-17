@@ -151,6 +151,34 @@ def test_a_search_is_put_on_the_wire_and_read_once(tmp_path, creds):
     assert methods == ["search.forget", "search.start", "search.results", "search.forget"]
 
 
+def test_a_search_keeps_reading_the_events_a_leeched_daemon_pushes(tmp_path, creds):
+    """The daemon sends an event per upload and per transfer change to every client. A client that sleeps
+    through its search window leaves the socket full; the daemon blocks on its write and drops the
+    connection, and the search fails on a socket closed behind it."""
+    with Running(tmp_path, results=ONE, chatter=4000) as (daemon, _fake):
+        offers = daemon.search("kiasmos blurred", timeout=1.0)
+
+    assert [offer["filename"] for offer in offers] == ["Music\\Artist - Title.flac"]
+
+
+def test_stop_connects_before_it_asks(tmp_path, creds):
+    """The stall path stops the daemon through a client that has never spoken. A stop that writes only to
+    its own closed socket leaves the stuck daemon holding the account, and every retry reuses it."""
+    running = Running(tmp_path)
+    with running as (_daemon, fake):
+        slsk.Daemon(running.config).stop()
+
+    assert ("daemon.stop", {}) in fake.calls
+
+
+def test_a_closed_socket_is_reconnected_before_the_next_call(tmp_path, creds):
+    """The daemon drops a client that stops reading. One dropped call is not the rest of the pass: the next
+    call opens the socket again instead of failing every record after the drop."""
+    with Running(tmp_path) as (daemon, _fake):
+        daemon.close()
+        assert daemon.status()["username"]
+
+
 def test_a_download_is_addressable_and_its_path_is_derived(tmp_path, creds):
     """The daemon names the directory and the peer's own path; the file is the basename of that path inside
     it, which is where the daemon writes the rename."""

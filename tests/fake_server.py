@@ -95,6 +95,9 @@ class Direct:
     def ensure(self) -> None:
         self.calls.append(("ensure", {}))
 
+    def settle(self, seconds: float) -> None:
+        """Nothing is pushed at this one, so idle time costs it nothing."""
+
     def close(self) -> None:
         pass
 
@@ -212,11 +215,13 @@ class Fake(Direct):
     """`Direct` behind a Unix socket, answering the daemon's JSON-RPC."""
 
     def __init__(self, path: Path | str, *, protocol: int = 2, username: str | None = None,
-                 **kwargs) -> None:
+                 chatter: int = 0, **kwargs) -> None:
         super().__init__(**kwargs)
         self.path = Path(path)
         self.protocol = protocol
         self.username = username or os.environ.get("SLSK_USERNAME") or "someone"
+        # Events to push at the client while a search window is open, the way a leeched daemon does.
+        self.chatter = chatter
         self._listener: socket.socket | None = None
         self._thread: threading.Thread | None = None
 
@@ -254,6 +259,26 @@ class Fake(Direct):
                     line, _, buffer = buffer.partition(b"\n")
                     message = json.loads(line)
                     connection.sendall(json.dumps(self._answer(message)).encode() + b"\n")
+                    if self.chatter and message.get("method") == "search.start":
+                        if not self._chatter(connection):
+                            return
+
+    def _chatter(self, connection: socket.socket) -> bool:
+        """Push events at a client that is waiting, and drop it if it will not read them."""
+        event = json.dumps({"jsonrpc": "2.0", "method": "event.upload",
+                            "params": {"bytes_sent": 0, "filename": "shared file"}}).encode() + b"\n"
+        connection.settimeout(0.5)
+        try:
+            for _ in range(self.chatter):
+                connection.sendall(event)
+        except OSError:
+            return False
+        finally:
+            try:
+                connection.settimeout(None)
+            except OSError:
+                pass
+        return True
 
     def _answer(self, message: dict) -> dict:
         method = message.get("method")
