@@ -12,8 +12,8 @@ import csv
 import re
 from pathlib import Path
 
-from .parsing import bare_title, extract_mix, fold
-from .rules import Request
+from .parsing import bare_title, extract_mix, fold, parse_filename
+from .rules import AUDIO_EXTENSIONS, Request
 
 _COMMENT = "#"
 
@@ -86,5 +86,24 @@ def parse(text: str) -> list[Request]:
     return [request for request in (from_line(line) for line in lines) if request is not None]
 
 
+def from_lane(directory: Path) -> list[Request]:
+    """Every audio file in a lane, named the way the pipeline named it.
+
+    `--tracks ~/Music/Losy Tracks` is the upgrade pass: the lane is already the list, and each name already
+    carries artist, title and version — reading it through `parse_filename` is the same reading the library
+    makes of the same file.
+    """
+    requests = []
+    for path in sorted(directory.iterdir()):
+        if path.is_file() and path.suffix.lower().lstrip(".") in AUDIO_EXTENSIONS:
+            named = parse_filename(path.name)
+            requests.append(Request(artist=named.artist, title=named.title, mix=named.mix))
+    return requests
+
+
 def read(path: Path) -> list[Request]:
-    return parse(Path(path).expanduser().read_text(encoding="utf-8"))
+    """A tracklist file, or a directory of audio files."""
+    path = Path(path).expanduser()
+    if path.is_dir():
+        return from_lane(path)
+    return parse(path.read_text(encoding="utf-8"))

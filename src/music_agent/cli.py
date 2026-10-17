@@ -110,8 +110,9 @@ def _build_parser() -> argparse.ArgumentParser:
     run = commands.add_parser(
         "run", parents=[common],
         help="the whole pipeline in one command: acquire, process, import, sweep")
-    run.add_argument("--tracks", default=None, metavar="FILE|URL",
-                     help="the tracklist to start from — a file, or a public Spotify playlist's URL")
+    run.add_argument("--tracks", default=None, metavar="FILE|DIR|URL",
+                     help="the tracklist to start from — a file, a directory of audio files, or a public "
+                          "Spotify playlist's URL")
     run.add_argument("--name", default=None, metavar="NAME",
                      help="what to call the run (default: the tracklist's own name)")
     run.add_argument("--passes", type=int, default=1, metavar="N",
@@ -150,9 +151,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     acquire = commands.add_parser("acquire", parents=[common],
                                   help="search Soulseek for a tracklist, into staging")
-    acquire.add_argument("--tracks", default=None, metavar="FILE|URL",
-                         help="the tracklist to start a run from — a file, or the URL of a public Spotify "
-                              "playlist; omit it to continue a run")
+    acquire.add_argument("--tracks", default=None, metavar="FILE|DIR|URL",
+                         help="the tracklist to start a run from — a file, a directory of audio files, or "
+                              "the URL of a public Spotify playlist; omit it to continue a run")
     acquire.add_argument("--name", default=None, metavar="NAME",
                          help="what to call the run (default: the tracklist's own name)")
     acquire.add_argument("--retry", action="store_true",
