@@ -22,10 +22,10 @@ from .rules import Candidate
 from .slsk import Daemon, DaemonError
 
 # The window a search is given: the query goes out, peers answer on their own connections, and the pass reads
-# once at the end. The daemon does not close it, because a client's window must not be time the daemon spends
-# not answering anyone else. Ten seconds is longer than slsk-batchdl's six because the server sorts and
-# truncates, and a short window discards good candidates before they arrive.
-SEARCH_TIMEOUT = 10.0
+# once at the end. The pace is one search every 6.47s — the network's rate — so a longer window is time the
+# pass spends asleep with nothing to do. Five seconds fills the 60 offers it keeps from the hundreds a common
+# title returns; the daemon is told the same.
+SEARCH_TIMEOUT = 5.0
 # Offers kept from one search. The daemon answers with everything it collected, and a common title can put
 # thousands in one line; the server has already sorted them, and the ladder only ever asks six peers.
 MAX_RESULTS = 60
