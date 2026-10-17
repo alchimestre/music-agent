@@ -939,11 +939,11 @@ def test_a_dead_child_does_not_race_the_bar_through_the_rest(tmp_path):
     lines, printed = [], io.StringIO()
 
     with server:
-        with pytest.raises(acquire.ServerStuck):
+        with pytest.raises(acquire.ServerStuck) as stuck:
             acquire.run(config, job, server, Reference(), library=None, log=lines.append,
                         child=child, stream=printed)
 
-    assert "5 tracks were never searched" in " ".join(lines)
+    assert "5 tracks were never searched" in str(stuck.value), "the pass says it once, where it ends"
     assert printed.getvalue() == "", "a track nobody searched is not a track the pass settled"
 
 
@@ -962,6 +962,20 @@ def test_a_pass_starts_with_the_tracks_no_pass_has_asked_about(tmp_path):
     asked = [event["idx"] for event in job.events()[before:]
              if event["event"] == state.SEARCHED_EVENT]
     assert asked == [4, 5, 6, 1, 2, 3], "the unasked tracks first, the ones already asked about after them"
+
+
+def test_the_file_keeps_its_order_while_the_pass_works_from_the_tail(tmp_path):
+    """The unasked-first order belongs to the pass, not to the file. Writing the schedule back reorders
+    `tracks.jsonl` on every pass — which changes the order `review` prints its queue in and makes a run file
+    that a person opens read out of track order, for no gain."""
+    config, job, server, calls = setup(tmp_path, results=[], tracks=4, soulseek="workers = 1\n")
+    for idx in (1, 2):
+        job.append_event(state.SEARCHED_EVENT, idx=idx, added=0, offered=0)
+
+    with server:
+        pass_once(config, job, server, Reference(), calls)
+
+    assert [record.idx for record in job.records()] == [1, 2, 3, 4]
 
 
 # ── the pace ─────────────────────────────────────────────────────────────
