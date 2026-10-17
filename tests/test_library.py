@@ -225,3 +225,13 @@ def test_a_stored_title_is_split_the_way_a_tracklist_splits_one(tmp_path, monkey
     found = shelf.held("KasbaH", "Galbi", 199)
     assert found is not None, "the row answers to the bare title a tracklist produces"
     assert (found.title, found.mix) == ("Galbi", ""), "a credit is neither the title nor a version"
+
+
+def test_a_file_in_a_folder_inside_a_lane_is_still_held(tmp_path):
+    """The README says a lane holds every file in it; one level of `iterdir` missed organised albums."""
+    config = make_config(tmp_path)
+    album = config.lossless / "Kiasmos - II"
+    album.mkdir(parents=True)
+    write_wav(album / "Kiasmos - Blurred.wav", seconds=3.0)
+
+    assert [track.title for track in library.read_directories(config)] == ["Blurred"]

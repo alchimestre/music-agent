@@ -16,6 +16,7 @@ from music_agent.parsing import (
     fold,
     mix_matches,
     parse_filename,
+    render,
     primary_artist,
     same_credit,
     search_query,
@@ -272,3 +273,14 @@ def test_a_name_off_the_convention_comes_back_without_an_artist():
 
 def test_the_artists_bracket_keeps_the_artist_intact():
     assert parse_filename("Ø [Phase] - Burden Of Proof.flac").artist == "Ø [Phase]"
+
+
+def test_a_title_that_begins_with_a_number_keeps_both_readings():
+    """`99 Luftballons` is a title, not track 99, so the unstripped reading has to survive the strip."""
+    parsed = parse_filename("Nena - 99 Luftballons.mp3")
+
+    assert (parsed.title, parsed.raw_title) == ("Luftballons", "99 Luftballons")
+
+
+def test_control_characters_a_peer_sent_are_dropped_before_printing():
+    assert render("p\x1b[31meer\x00") == "p[31meer"

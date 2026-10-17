@@ -17,6 +17,7 @@ from . import exporting
 from . import genre
 from . import importing
 from . import library
+from . import parsing
 from . import process
 from . import reference
 from . import review
@@ -581,7 +582,7 @@ def _queue(job: state.Job) -> state.Queue:
                 length = f"{hms(candidate.duration)}".strip()
                 if candidate.duration is not None and record.duration_s:
                     length += f" {candidate.duration - record.duration_s:+d}s"
-                print(f"    {number:>3}. {candidate.ext:<6}{length:<9}{candidate.user:<18}{candidate.name}")
+                print(f"    {number:>3}. {candidate.ext:<6}{length:<9}{parsing.render(candidate.user):<18}{parsing.render(candidate.name)}")
     else:
         print("the queue is empty")
 

@@ -182,8 +182,8 @@ def read_directories(config: Config) -> list[Held]:
     for folder in (config.lossless, config.lossy):
         if not folder.is_dir():
             continue
-        for path in sorted(folder.iterdir()):
-            if path.suffix.lower().lstrip(".") not in AUDIO_EXTENSIONS:
+        for path in sorted(folder.rglob("*")):
+            if not path.is_file() or path.suffix.lower().lstrip(".") not in AUDIO_EXTENSIONS:
                 continue
             parsed = parse_filename(path.name)
             found.append(Held(artist=parsed.artist, title=parsed.title, mix=parsed.mix,

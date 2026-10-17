@@ -94,7 +94,7 @@ def from_lane(directory: Path) -> list[Request]:
     makes of the same file.
     """
     requests = []
-    for path in sorted(directory.iterdir()):
+    for path in sorted(directory.rglob("*")):
         if path.is_file() and path.suffix.lower().lstrip(".") in AUDIO_EXTENSIONS:
             named = parse_filename(path.name)
             requests.append(Request(artist=named.artist, title=named.title, mix=named.mix))
@@ -106,4 +106,4 @@ def read(path: Path) -> list[Request]:
     path = Path(path).expanduser()
     if path.is_dir():
         return from_lane(path)
-    return parse(path.read_text(encoding="utf-8"))
+    return parse(path.read_text(encoding="utf-8-sig"))

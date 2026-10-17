@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-from . import acquire, state
+from . import acquire, parsing, state
 from .rules import Candidate, Verdict
 
 
@@ -44,7 +44,7 @@ class Settled:
     def report(self) -> str:
         if self.decision == state.ACCEPTED:
             where = "already in staging" if self.from_disk else "downloaded"
-            return (f"[{self.idx}] {self.label}: accepted — {self.candidate.user}'s "
+            return (f"[{self.idx}] {self.label}: accepted — {parsing.render(self.candidate.user)}'s "
                     f"{self.candidate.ext} ({where}) → {self.path}")
         if self.decision == state.SKIPPED:
             return f"[{self.idx}] {self.label}: skipped — passed over for now"

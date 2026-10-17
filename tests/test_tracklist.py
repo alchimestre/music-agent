@@ -102,3 +102,13 @@ def test_reading_a_lane_directory(tmp_path):
 
     assert [(r.artist, r.title, r.mix) for r in requests] == [
         ("Kiasmos", "Blurred", ""), ("Ntogn", "Mines", "Original Mix")]
+
+
+def test_a_tracklist_written_with_a_byte_order_mark_loses_it(tmp_path):
+    """A spreadsheet export carries `\ufeff` on the first line, and `strip()` does not remove it."""
+    path = tmp_path / "list.txt"
+    path.write_text("Kiasmos - Blurred\n", encoding="utf-8-sig")
+
+    (request,) = tracklist.read(path)
+
+    assert (request.artist, request.title) == ("Kiasmos", "Blurred")

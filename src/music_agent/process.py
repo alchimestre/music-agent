@@ -49,8 +49,16 @@ class Runner(Protocol):
     def __call__(self, argv: list[str]) -> subprocess.CompletedProcess: ...
 
 
+# A converter or normalizer that accepts the file and then says nothing holds the whole stage with no line
+# printed. Fifteen minutes is the same ceiling the Traktor import gets.
+TOOL_TIMEOUT = 900.0
+
+
 def execute(argv: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(argv, capture_output=True, text=True, check=False)
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, check=False, timeout=TOOL_TIMEOUT)
+    except subprocess.TimeoutExpired as error:
+        raise ProcessError(f"{Path(argv[0]).name} gave no answer in {int(TOOL_TIMEOUT)} s") from error
 
 
 def _failure_detail(result: subprocess.CompletedProcess) -> str:
@@ -376,7 +384,7 @@ def _in_lanes(config: Config) -> dict[str, Path]:
     for lane in (config.lossless, config.lossy):
         if not lane.is_dir():
             continue
-        for path in sorted(lane.iterdir()):
+        for path in sorted(lane.rglob("*")):
             if path.is_file() and not path.name.startswith("."):
                 on_disk.setdefault(path.stem, path)
     return on_disk
@@ -450,7 +458,9 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
             log(f"[{record.idx}] {record.label}: identifying")
             return identify_one(record, tools, log)
 
-        with ThreadPoolExecutor(max_workers=min(IDENTIFIERS, len(downloads))) as pool:
+        # The timeout is process-global, so it has to bracket the pool rather than each call: a thread
+        # restoring the previous value while three others are still waiting is the hang this prevents.
+        with identify.bounded(), ThreadPoolExecutor(max_workers=min(IDENTIFIERS, len(downloads))) as pool:
             answers = pool.map(identified, downloads)
             found = dict(zip((record.idx for record in downloads), answers))
 
@@ -481,12 +491,14 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
             # Nothing can use this copy, so it goes: a file in staging reads as work in progress, and the
             # record would otherwise carry a path to a file no stage will take. Clearing the path lets a
             # later pass ask the network again.
-            gone = Path(record.local_path).unlink(missing_ok=True) if record.local_path else None
+            removed = record.local_path
+            if removed:
+                Path(removed).unlink(missing_ok=True)
             record.local_path = ""
             record.status = state.RETRY_LATER
             record.notes = str(error)
             summary.failed.append(record.idx)
-            job.append_event("placement_failed", idx=record.idx, error=str(error), removed=gone is None)
+            job.append_event("placement_failed", idx=record.idx, error=str(error), removed=removed)
             log(f"[{record.idx}] {record.label}: {error}")
             continue
         except ProcessError as error:

@@ -87,3 +87,12 @@ def test_an_unreadable_ledger_is_an_error_rather_than_a_clean_slate(tmp_path):
 
     with pytest.raises(peers.Unreadable):
         Ledger(path)
+
+
+def test_a_ledger_whose_root_is_not_an_object_is_unreadable(tmp_path):
+    """`[].get` raised AttributeError out of `Ledger()` instead of the one-line error the CLI prints."""
+    path = tmp_path / "peers.json"
+    path.write_text("[]", encoding="utf-8")
+
+    with pytest.raises(peers.Unreadable):
+        Ledger(path, maxretry=3, findtime_days=14, bantime_days=30)

@@ -217,6 +217,9 @@ class ParsedName:
     title: str
     mix: str
     album_hint: str = ""
+    # The title before a leading track number came off. A number is not always a track number —
+    # `99 Luftballons` — so a caller that has the request title can check both readings.
+    raw_title: str = ""
 
 
 def parse_filename(path: str) -> ParsedName:
@@ -239,7 +242,16 @@ def parse_filename(path: str) -> ParsedName:
         artist, title = "", stem
     title = strip_code_tail(title.strip())
 
+    raw_title = title
     without_number = _TRACK_PREFIX.sub("", title).strip()
     if without_number:
         title = without_number
-    return ParsedName(artist.strip(), title, mix, source.parent.name)
+    return ParsedName(artist.strip(), title, mix, source.parent.name, raw_title)
+
+
+def render(text: str) -> str:
+    """What a peer sent, safe to print: control and format characters are dropped, not escaped.
+
+    A share name is untrusted. Left raw it can move the cursor or reorder the line the human is choosing from.
+    """
+    return "".join(ch for ch in text if unicodedata.category(ch) not in ("Cc", "Cf"))

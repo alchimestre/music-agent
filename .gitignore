@@ -13,3 +13,4 @@ agent/
 docs/agents/
 AGENTS.md
 config.toml
+.omp/

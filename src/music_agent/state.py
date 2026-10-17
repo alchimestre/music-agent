@@ -8,6 +8,7 @@ facts by `rules`, so a job replayed tomorrow is judged by the rule as it stands 
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 from collections.abc import Iterable
@@ -194,10 +195,24 @@ class Job:
         return found
 
     def write_records(self, records: list[Record]) -> None:
-        """Rewrite the whole file — it stays small enough that a partial write is not worth the risk."""
-        lines = [json.dumps(record.to_json(), ensure_ascii=False) for record in records]
+        """Rewrite the whole file atomically, from a snapshot taken under the lock.
+
+        Several passes write records from thread pools, so a snapshot taken outside the lock can be stale
+        by the time it lands and silently revert another thread's update.
+        """
         with self._lock:
-            self.tracks_path.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+            for attempt in range(3):
+                # Workers append to their own records without this lock, and `asdict` walking a list that
+                # grew under it raises; one retry is enough to read a quiet list.
+                try:
+                    lines = [json.dumps(record.to_json(), ensure_ascii=False) for record in records]
+                    break
+                except RuntimeError:
+                    if attempt == 2:
+                        raise
+            temporary = self.tracks_path.with_suffix(".tmp")
+            temporary.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+            os.replace(temporary, self.tracks_path)
 
     def append_event(self, event: str, **fields) -> None:
         entry = {"ts": _now(), "event": event}

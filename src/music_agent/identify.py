@@ -35,7 +35,7 @@ FPCALC_TIMEOUT = 300.0
 
 
 @contextmanager
-def _bounded():
+def bounded():
     """Every socket opened inside gets a timeout, which is the one lever both libraries expose.
 
     The setting is the process's, not this call's: the process stage identifies one track at a time, so the
@@ -206,7 +206,7 @@ def identify(
     log=lambda *_: None,
 ) -> Identified:
     """What the file at `path` is: its sound first, a text search second, its filename last."""
-    with _bounded():
+    with bounded():
         return _identify(path, request, hearing=hearing, matches=matches, brainz=brainz,
                          discogs=discogs, log=log)
 
