@@ -21,7 +21,7 @@ def test_a_missing_file_is_not_an_error(monkeypatch):
     """The defaults are a working configuration, so the CLI runs before anyone writes a file. The two
     listening ports are read from the environment rather than the file, so they are cleared to compare."""
     monkeypatch.delenv("SLSK_LISTEN_PORT", raising=False)
-    monkeypatch.delenv("SLSK_OBFUSCATED_PORT", raising=False)
+
     assert load(Path("/nonexistent/config.toml")) == DEFAULTS
 
 
@@ -100,8 +100,6 @@ def test_the_example_config_is_valid_and_agrees_with_the_defaults():
     assert config.search_interval == DEFAULTS.search_interval
     assert config.workers == DEFAULTS.workers
     assert config.max_downloads == DEFAULTS.max_downloads
-    assert config.max_searches == DEFAULTS.max_searches
-    assert config.max_operations == DEFAULTS.max_operations
     assert config.state_root == DEFAULTS.state_root
     assert config.peers == DEFAULTS.peers
     assert config.maxretry == DEFAULTS.maxretry
@@ -110,30 +108,25 @@ def test_the_example_config_is_valid_and_agrees_with_the_defaults():
 
 
 def test_the_ceilings_do_not_contradict_each_other():
-    """Breaking these does not make a pass slower, it ends it: a search queued behind the socket lock reaches
-    the call deadline, and four timeouts in a row stop the pass. The example states the rule in a comment;
-    this is the rule, checked against the defaults a fresh clone runs on."""
-    assert DEFAULTS.max_searches >= DEFAULTS.workers
+    """The daemon runs the transfers and the pass works on tracks: a pass with more workers than transfer
+    slots would block its own download starts behind the daemon's ceiling."""
     assert DEFAULTS.workers <= DEFAULTS.max_downloads
-    assert DEFAULTS.max_operations > DEFAULTS.max_searches
 
 
-def test_the_example_config_pins_the_acquisition_server_to_a_commit():
-    """Floating the pin on a branch would let a rebuild move the fields the match rules read."""
+def test_the_example_config_points_at_the_daemon():
+    """The client speaks the daemon's control protocol, which is bumped on any shape change: the binary and
+    the client have to be one version, so the command is the installed one and never a floating build."""
     config = load(config_module.EXAMPLE_CONFIG_PATH)
 
-    assert config.soulseek_command[0] == "uvx"
-    assert any(part.startswith("git+") and "@" in part for part in config.soulseek_command), \
-        "the acquisition server is not pinned to a commit"
+    assert config.soulseek_command == ("soulseek-rs", "daemon")
 
 
 def test_the_listening_ports_come_from_the_environment_rather_than_the_config_file(monkeypatch):
     """A port is a fact about the machine's network, so it sits with the credentials in `.env` — and the
-    shipped default must not be aioslsk's own, which a second local slsk client may already hold."""
+    shipped default must be the port this machine forwards, not the client's own default."""
     monkeypatch.setenv("SLSK_LISTEN_PORT", "41000")
-    monkeypatch.setenv("SLSK_OBFUSCATED_PORT", "41001")
 
     config = load(config_module.EXAMPLE_CONFIG_PATH)
 
-    assert (config.soulseek_listen_port, config.soulseek_obfuscated_port) == (41000, 41001)
-    assert (DEFAULTS.soulseek_listen_port, DEFAULTS.soulseek_obfuscated_port) != (60000, 60001)
+    assert config.soulseek_listen_port == 41000
+    assert DEFAULTS.soulseek_listen_port == 20000, "the port this machine forwards"

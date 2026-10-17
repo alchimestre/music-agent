@@ -362,24 +362,26 @@ def test_lossless_beats_lossy():
 
 def test_the_higher_bitrate_wins_among_lossy_files():
     track = Track(REQUEST, [
-        candidate("Artist - Title (Original Mix).mp3", duration=300, bitrate=320, queue=0),
-        candidate("Artist - Title (Original Mix).mp3", duration=300, bitrate=256, queue=5),
+        candidate("Artist - Title (Original Mix).mp3", duration=300, bitrate=320, speed=10_000),
+        candidate("Artist - Title (Original Mix).mp3", duration=300, bitrate=256, speed=900_000),
     ])
     assert pick(track).candidate.bitrate == 320
 
 
-def test_the_shorter_queue_breaks_an_otherwise_equal_tie():
+def test_the_faster_peer_breaks_an_otherwise_equal_tie():
+    """The search answer carries the peer's advertised speed and not its queue depth, so speed is the last
+    rung: the file that arrives is the only thing a pass was waiting for."""
     track = Track(REQUEST, [
-        candidate("Artist - Title (Original Mix).flac", duration=300, queue=7),
-        candidate("Artist - Title (Original Mix).flac", duration=300, queue=1),
+        candidate("Artist - Title (Original Mix).flac", duration=300, speed=50_000),
+        candidate("Artist - Title (Original Mix).flac", duration=300, speed=800_000),
     ])
-    assert pick(track).candidate.queue == 1
+    assert pick(track).candidate.speed == 800_000
 
 
 def test_when_the_ladder_itself_ties_the_first_offered_wins():
     """Named, not hidden: the log is what makes this arbitrary choice visible afterwards."""
-    first, second = (candidate("Artist - Title (Original Mix).flac", duration=300, queue=0),
-                     candidate("Artist - Title (Original Mix).flac", duration=300, queue=0))
+    first, second = (candidate("Artist - Title (Original Mix).flac", duration=300, speed=0),
+                     candidate("Artist - Title (Original Mix).flac", duration=300, speed=0))
     assert pick(Track(REQUEST, [first, second])).candidate is first
 
 
@@ -469,7 +471,7 @@ def test_the_grilled_fixture_still_settles_and_queues_the_same_way():
         )
         ported = Track(request, [
             Candidate(user=c["user"], path=c["file"], duration=c["duration"],
-                      bitrate=c["bitrate"], queue=c["queue"])
+                      bitrate=c["bitrate"], speed=c.get("speed"))
             for c in fixture_track["candidates"]
         ])
 
@@ -491,14 +493,10 @@ def test_the_fixture_still_settles_and_queues_the_same_four_and_none():
     assert "1 with nothing usable" in summary
 
 
-def test_a_peer_that_cannot_serve_is_ranked_last():
-    """`online` and `speed` are the server's cache of the peer, not the offer. A peer it calls offline
-    cannot answer an offer it made a minute ago, and a peer reporting no upload speed is usually firewalled
-    — both cost a connect budget to find out, so quality comes after them rather than before."""
-    offline = candidate("Kiasmos - Blurred.flac", bitrate=1411, online=False)
-    online = candidate("Kiasmos - Blurred.aiff", bitrate=320, online=True)
-    silent = candidate("Kiasmos - Blurred.aiff", bitrate=1411, speed=0, online=True)
-    fast = candidate("Kiasmos - Blurred.aiff", bitrate=1411, speed=800_000, online=True)
+def test_a_peer_that_reports_no_speed_is_ranked_last_among_equals():
+    """A peer reporting no upload speed is usually firewalled or a paid mirror, and costs a connect budget
+    to prove it. The ladder puts it behind a peer that advertises a speed, after losslessness and bitrate."""
+    silent = candidate("Kiasmos - Blurred.aiff", bitrate=1411, speed=0)
+    fast = candidate("Kiasmos - Blurred.aiff", bitrate=1411, speed=800_000)
 
-    assert sorted([offline, online], key=rank) == [online, offline]
-    assert sorted([silent, fast], key=rank)[0] is fast, "bitrate ties are broken by the faster peer"
+    assert sorted([silent, fast], key=rank) == [fast, silent]

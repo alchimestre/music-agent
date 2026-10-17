@@ -83,13 +83,10 @@ class Candidate:
     path: str
     duration: int | None = None
     bitrate: int | None = None
-    queue: int = 0
     slots: bool = True
     size_bytes: int | None = None
-    # What the server last cached about the peer. A peer it calls offline cannot serve, and a peer
-    # advertising no upload speed usually cannot either — both are worth ordering last rather than spending
-    # a connect budget to find out.
-    online: bool | None = None
+    # The peer's advertised upload speed, from the search answer. A peer reporting none is usually firewalled
+    # or a paid mirror, and is ordered last rather than spending a connect budget to prove it.
     speed: int | None = None
 
     @property
@@ -269,19 +266,14 @@ def taken(track: Track) -> bool:
     return bool(takeable(track))
 
 
-def rank(candidate: Candidate) -> tuple[int, int, int, int, int]:
-    """The ladder when several candidates are takeable: a peer that can serve, then lossless, then the
-    higher bitrate, the shorter queue, and the faster peer.
+def rank(candidate: Candidate) -> tuple[int, int, int]:
+    """The ladder when several candidates are takeable: lossless, then the higher bitrate, then the faster
+    peer.
 
-    `online` and `speed` come from the server's own cache of the peer, not from the offer. A peer it calls
-    offline cannot answer whatever it advertised, and one reporting no upload speed is usually firewalled or
-    a paid mirror; either costs a connect budget to prove.
+    `slots` is not in the ladder: a peer with no free slot is a wait rather than a failure, and the search
+    answer does not say how deep its queue is.
     """
-    return (0 if candidate.online is not False else 1,
-            0 if candidate.lossless else 1,
-            -(candidate.bitrate or 0),
-            candidate.queue or 0,
-            -(candidate.speed or 0))
+    return (0 if candidate.lossless else 1, -(candidate.bitrate or 0), -(candidate.speed or 0))
 
 
 def pick(track: Track) -> Verdict | None:

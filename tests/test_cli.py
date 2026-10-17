@@ -13,9 +13,9 @@ from audio_files import aiff
 from music_agent import acquire
 from music_agent import cli as cli_module
 from music_agent import config as config_module
-from music_agent import library, spotify, state, sweep
+from music_agent import library, slsk, spotify, state, sweep
 from music_agent.cli import main
-from music_agent.mcp import StdioServer
+from fake_server import Direct
 from music_agent.rules import Candidate
 
 FAKE = str(Path(__file__).parent / "fake_server.py")
@@ -489,15 +489,13 @@ def test_accepting_carries_the_record_on_to_process(tmp_path, capsys, monkeypatc
     `test_acquire` drives the pass."""
     config_path = make_paths_config(tmp_path)
     job = seed(config_path, [WAITING])
-    landed = tmp_path / "staging" / "Ntogn - Mines.aiff"
+    landed = tmp_path / "staging" / "Ntogn - .aiff"
     landed.parent.mkdir()
     landed.write_bytes(b"the file, there when we look")
 
-    fake = {"FAKE_RESULTS": "[]", "FAKE_DOWNLOAD": f"downloading:transferring:90000:{landed}"}
-    monkeypatch.setattr(cli_module.slsk, "environment", lambda config: {})
-    monkeypatch.setattr(cli_module.mcp, "StdioServer",
-                        lambda command, env=None, on_log=None:
-                        StdioServer([sys.executable, FAKE], env=fake, on_log=on_log))
+    monkeypatch.setattr(cli_module.slsk, "Daemon",
+                        lambda config: Direct(results=[],
+                                              download=f"downloading:transferring:90000:{landed}"))
 
     assert main(["--config", str(config_path), "review", "--accept", "2"]) == 0
 
@@ -518,6 +516,7 @@ def test_only_a_held_session_is_waited_out(tmp_path, monkeypatch, capsys):
     waits: list[float] = []
     monkeypatch.setattr(cli_module, "SESSION_WAITS", (5.0,))
     monkeypatch.setattr(cli_module.time, "sleep", waits.append)
+    monkeypatch.setattr(cli_module.slsk, "Daemon", lambda config: Direct())
 
     answers: list[object] = [
         acquire.ServerStuck("the child's message reader died", lost_session=False),
@@ -537,12 +536,12 @@ def test_only_a_held_session_is_waited_out(tmp_path, monkeypatch, capsys):
 
     assert cli_module._acquire_pass(config, job, retry=False).downloaded == [1]
     assert waits == [5.0], "the reader death waited for nothing; the held session did"
-    assert "held by the child that died" in capsys.readouterr().err
+    assert "held by the daemon that died" in capsys.readouterr().err
 
 
 def test_a_second_refusal_ends_the_pass_rather_than_buying_another_login(tmp_path, monkeypatch, capsys):
     """2026-10-16: one pass spent five logins on an account that was refusing every one of them, and each
-    attempt was another connection — which is what aioslsk's own note says extends the refusal. Two, then
+    attempt was another connection — which is what the server's own note says extends the refusal. Two, then
     stop: the run reports what it kept and a person decides when to come back."""
     waits: list[float] = []
     monkeypatch.setattr(cli_module, "SESSION_WAITS", (5.0,))
@@ -560,6 +559,26 @@ def test_a_second_refusal_ends_the_pass_rather_than_buying_another_login(tmp_pat
         cli_module._acquire_pass(config, job, retry=False)
 
     assert waits == [5.0], "one wait, then the second refusal ends it"
+
+
+def test_a_daemon_that_cannot_be_authenticated_is_not_retried(tmp_path, monkeypatch):
+    """A protocol mismatch, another account on the daemon, or a binary that will not run is the same answer
+    every time; retrying it spends a startup timeout per attempt to learn nothing."""
+    config = config_module.load(make_config(tmp_path))
+    job = state.create(config, "run")
+    tries: list[int] = []
+
+    def refused(*args, **kwargs):
+        tries.append(1)
+        raise slsk.DaemonError("auth", "the daemon speaks protocol 9")
+
+    monkeypatch.setattr(cli_module, "_one_pass", refused)
+    monkeypatch.setattr(cli_module.slsk, "Daemon", lambda config: Direct())
+
+    with pytest.raises(slsk.DaemonError):
+        cli_module._acquire_pass(config, job, retry=False)
+
+    assert len(tries) == 1, "one attempt, not one per restart"
 
 
 def test_run_does_every_stage_in_order_and_asks_nothing(tmp_path, capsys, monkeypatch):
@@ -728,11 +747,8 @@ def test_a_tracklist_on_the_command_line_runs_the_pass_on_the_run_it_started(tmp
     tracklist = tmp_path / "Kiasmos - Blurred.txt"
     tracklist.write_text("Kiasmos - Blurred\n", encoding="utf-8")
 
-    monkeypatch.setattr(cli_module.slsk, "environment", lambda config: {})
     monkeypatch.setattr(cli_module.reference, "lookup", lambda config, limit=25: NoReference())
-    monkeypatch.setattr(cli_module.mcp, "StdioServer",
-                        lambda command, env=None, on_log=None:
-                        StdioServer([sys.executable, FAKE], env={"FAKE_RESULTS": "[]"}, on_log=on_log))
+    monkeypatch.setattr(cli_module.slsk, "Daemon", lambda config: Direct(results=[]))
 
     assert main(["--config", str(config_path), "acquire", "--tracks", str(tracklist)]) == 0
 
@@ -782,45 +798,20 @@ def test_peers_lists_the_ignored_and_lifts_one(tmp_path, capsys):
     assert "not on the ledger" in capsys.readouterr().out
 
 
-def test_a_pass_that_ends_on_a_lost_session_still_says_what_the_child_saw(tmp_path, monkeypatch):
-    """The child's account of a failure — a session it lost, the peers that refused it, a reader that died — is
-    counted as it happens and printed once at the end, which is why nothing else prints it. The pass that ends
-    on a lost session is the pass that raises out of `acquire.run`: on 2026-10-16 five passes ended that way
-    and every one of them reported the count it had reached and not one word about why."""
-    from music_agent import slsk
-
+def test_a_pass_points_the_daemon_at_staging_and_shares_both_lanes(tmp_path, monkeypatch, capsys):
+    """The daemon owns the files and the shares, so the pass sets both before it asks anything: staging where
+    this run's downloads land, and the two lanes peers can browse. A daemon with no shared files reads as a
+    leecher, and peers queue or ban it."""
     config = config_module.load(make_config(tmp_path))
     job = state.create(config, "run")
-    said = []
+    daemon = Direct(results=[], shared_files=0)
 
-    class Logs:
-        def __call__(self, line: str) -> None:
-            pass
-
-        def report(self) -> None:
-            said.append("the child's own account")
-
-    class Server:
-        def __init__(self, *args, **kwargs) -> None:
-            pass
-
-        def __enter__(self) -> "Server":
-            return self
-
-        def __exit__(self, *exc) -> bool:
-            return False
-
-    def gone(*args, **kwargs):
-        raise acquire.ServerStuck("the child lost its session", lost_session=True)
-
-    monkeypatch.setattr(slsk, "ChildLog", Logs)
-    monkeypatch.setattr(slsk, "free_ports", lambda config: None)
-    monkeypatch.setattr(cli_module.mcp, "StdioServer", Server)
+    monkeypatch.setattr(cli_module.slsk, "Daemon", lambda config: daemon)
     monkeypatch.setattr(library, "open", lambda config: None)
-    monkeypatch.setattr(acquire, "run", gone)
+    monkeypatch.setattr(acquire, "run", lambda *a, **k: acquire.Summary())
 
-    with pytest.raises(acquire.ServerStuck):
-        cli_module._one_pass(config, job, retry=False)
+    cli_module._one_pass(config, job, retry=False)
 
-    assert said == ["the child's own account"], \
-        "the pass that fails is the one whose child has something to say about it"
+    assert daemon.directory == str(config.staging)
+    assert daemon.shares == [str(config.lossless), str(config.lossy)]
+    assert "no shared files" in capsys.readouterr().err

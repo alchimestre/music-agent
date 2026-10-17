@@ -16,7 +16,6 @@ from . import config as config_module
 from . import genre
 from . import importing
 from . import library
-from . import mcp
 from . import process
 from . import reference
 from . import review
@@ -50,7 +49,7 @@ def _run(config: config_module.Config, args: argparse.Namespace) -> int:
     pinned = SimpleNamespace(job=job.id, tracks=None, name=None, retry=True,
                              no_backup=False, no_traktor=args.no_traktor)
 
-    # A pass walks the whole tracklist now: empty searches are the network's own answer, and only the child
+    # A pass walks the whole tracklist now: empty searches are the network's own answer, and only the daemon
     # failing ends a pass early. The loop continues while a pass is still bringing files in and stops when one
     # is not, because a pass that found nothing meets the same peers again a minute later.
     PASSES = 6
@@ -341,19 +340,19 @@ def _tools(config: config_module.Config) -> process.Tools:
 
 
 # Everything a pass can fail on that is worth one line and a stop: credentials, a port someone else holds,
-# a child that will not answer, a child that stopped answering, an unreadable collection.
-ACQUIRE_ERRORS = (slsk.MissingCredential, slsk.PortBusy, mcp.ServerError, acquire.ServerStuck,
+# a daemon that will not answer, a daemon that stopped answering, an unreadable collection.
+ACQUIRE_ERRORS = (slsk.MissingCredential, slsk.PortBusy, slsk.DaemonError, acquire.ServerStuck,
                   library.Unreadable)
 
-# A pass is resumed this many times when the child dies under it. Everything it did is already in the run, so
-# a restart costs the price of a login; four children in a row dying is a problem a restart will not fix.
+# A pass is resumed this many times when the daemon dies under it. Everything it did is already in the run,
+# so a restart costs the price of a login; four daemons in a row dying is a problem a restart will not fix.
 RESTARTS = 3
 
-# What is waited before a fresh child is worth trying, once the account's session has been taken and the child
-# that held it died without logging out. One wait, and it is the top of the measured window: a login starts
-# working again twelve to seventeen minutes after the child died, and anything below the top spends a login
+# What is waited before a fresh daemon is worth trying, once the account's session has been taken and the
+# daemon that held it died without logging out. One wait, and it is the top of the measured window: a login starts
+# working again twelve to seventeen minutes after the daemon died, and anything below the top spends a login
 # inside it — and every attempt is another connection to an account that is refusing them. When the second
-# child is refused too the pass stops, because a third login buys the same answer.
+# daemon is refused too the pass stops, because a third login buys the same answer.
 SESSION_WAITS = (1020.0,)
 
 
@@ -464,88 +463,94 @@ def _start(config: config_module.Config, args: argparse.Namespace) -> state.Job 
 
 
 def _silence(error: Exception) -> str:
-    """What a child that stops answering usually means, when its own log says the login was refused.
+    """What a pass that stopped on its session usually means.
 
-    A second Soulseek client on the same account is the usual cause and it is not this program's process: the
-    server keeps one session per account, closes the other one's connection, and every search then goes
-    unanswered while the client itself stays up. A harness's own Soulseek MCP server is the one that does it,
-    and killing it does not settle the question — it is started again on demand.
+    A second Soulseek client on the same account is the usual cause, and it is not this program's process:
+    the server keeps one session per account and closes the other one's connection. A harness's own Soulseek
+    MCP server is the one that does it, and killing it does not settle the question — a harness restarts it.
     """
-    said = str(error)
-    refused = ("Login failed" in said or "closed connection" in said
-               or "expected login response" in said)
-    if not refused:
+    said = str(error).lower()
+    if "session" not in said and "login" not in said:
         return ""
-    return ("\n  its own log says the login was refused: another client is using this account — "
-            "an MCP server a harness starts is the usual one, and it has to be disabled for a pass, not killed")
+    return ("\n  the account's session is held elsewhere: stop the other client, or let the daemon wait it out")
 
 
 def _acquire_pass(config: config_module.Config, job: state.Job, *, retry: bool) -> acquire.Summary:
-    """Resume a pass through a fresh child whenever the child dies under it.
+    """Resume a pass through a fresh daemon whenever the daemon dies under it.
 
-    The child is somebody else's server and it can go down mid-pass — a crash in its own asyncio loop, a
-    killed process, calls that stop returning. Everything it did is already written to the run as it went,
-    so the pass is resumed rather than lost: a new child, the same records, and a line saying so.
+    The daemon is somebody else's program and it can go down mid-pass — a crash, a killed process, calls that
+    stop returning. Everything it did is already written to the run as it went, so the pass is resumed rather
+    than lost: a new daemon, the same records, and a line saying so.
 
-    A session the server has taken away is not that. The child that lost it could not log out either — its
-    networking is what died — so the server keeps the account until its own timeout passes, and a fresh child
-    is refused for as long as that takes. Measured here, a login starts working again twelve to seventeen
-    minutes after the child died, so there is one wait and it is the top of that window. A second refusal ends
-    the pass: 2026-10-16 a pass spent five logins finding out what two would have said, and each one was
-    another connection to an account that was refusing them.
+    A session the server has taken away is not that. The daemon that lost it could not log out either — its
+    networking is what died — so the server keeps the account until its own timeout passes, and a fresh
+    daemon is refused for as long as that takes. Measured here, a login starts working again twelve to
+    seventeen minutes after the daemon died, so there is one wait and it is the top of that window. A second
+    refusal ends the pass: 2026-10-16 a pass spent five logins finding out what two would have said, and each
+    one was another connection to an account that was refusing them.
 
-    A reader that died inside one child is a third thing, and it is neither of those: the next child carries
-    on from where the run got to, at once. `ServerStuck.lost_session` is what tells them apart.
+    A daemon that merely stopped answering is the other kind: it is restarted at once, and the next pass
+    carries on from where the run got to. `ServerStuck.lost_session` is what tells them apart.
     """
     lost = 0
     for attempt in range(1, RESTARTS + 2):
         try:
             return _one_pass(config, job, retry=retry, attempt=attempt)
-        except (mcp.ServerError, acquire.ServerStuck) as error:
+        except (slsk.DaemonError, acquire.ServerStuck) as error:
+            if isinstance(error, slsk.DaemonError) and error.method in {"auth", "start"}:
+                # A protocol mismatch, another account on the daemon, or a binary that will not run is not
+                # mended by trying again: every attempt spends a startup timeout to reach the same answer.
+                raise
             if attempt > RESTARTS:
                 raise
             if isinstance(error, acquire.ServerStuck) and error.lost_session:
                 if lost >= len(SESSION_WAITS):
                     # The ladder is spent. Another attempt is another connection to an account that is
-                    # refusing them, which is what the child's own library says extends the refusal, so the
+                    # refusing them, which is what the server's own note says extends the refusal, so the
                     # pass ends here and the run reports what it kept.
                     raise
+                # The daemon that lost the session cannot get it back; a fresh process is the only thing
+                # worth trying, and not before the server has had time to let go.
+                slsk.Daemon(config).stop()
                 wait = SESSION_WAITS[lost]
                 lost += 1
                 retry_at = time.strftime("%H:%M", time.localtime(time.time() + wait))
-                print(f"the account is still held by the child that died — waiting {wait / 60:.0f}m, "
+                print(f"the account is still held by the daemon that died — waiting {wait / 60:.0f}m, "
                       f"next login at {retry_at}", file=sys.stderr)
                 time.sleep(wait)
-            print(f"the server went down mid-pass ({error}){_silence(error)}; "
+            else:
+                slsk.Daemon(config).stop()
+            print(f"the daemon stopped mid-pass ({error}){_silence(error)}; "
                   f"{RESTARTS + 1 - attempt} more attempt(s)", file=sys.stderr)
     raise AssertionError("unreachable: the loop either returns or raises")
 
 
 def _one_pass(config: config_module.Config, job: state.Job, *, retry: bool,
               attempt: int = 1) -> acquire.Summary:
-    """One pass, everything it needs and nothing else: the ports, the server, the records."""
-    # The child logs what each search came to, one line per track — `Search complete: 0 raw
-    # results` was the only thing that knew the network had stopped answering, and it was thrown away.
-    # stderr keeps the pass's own report clean on stdout, and the filter keeps the walls out of stderr.
-    logs = slsk.ChildLog()
-    # The ports first: a client left on them by an earlier run answers the same account, and every search
-    # then comes back empty — the pass would spend its whole tracklist learning nothing.
-    slsk.free_ports(config)
+    """One pass, everything it needs and nothing else: the daemon, the shares, the records."""
+    daemon = slsk.Daemon(config)
+    # The daemon is started only when nothing answers on the socket, and the port sweep is part of starting
+    # it: a client left on the port by an earlier run answers the same account, and every search then comes
+    # back empty — the pass would spend its whole tracklist learning nothing.
+    daemon.ensure()
+    _ready(daemon, config)
     shelf = library.open(config)
     _stage("acquire", f"{len(job.records())} tracks · pass {attempt}"
                       f"{' · retry' if retry else ''}")
-    try:
-        with mcp.StdioServer(list(config.soulseek_command), env=slsk.environment(config),
-                             on_log=logs) as server:
-            summary = acquire.run(config, job, server, reference.lookup(config),
-                                  library=shelf, retry=retry, child=logs)
-    finally:
-        # The child's own account — a session it lost, a reader that died, the peers that refused it — is
-        # counted rather than printed as it happens, so this is the only place it is ever said. The pass that
-        # fails is the one that raises out of `acquire.run`, and until this was a `finally` that pass was the
-        # one where nothing was ever said: five of them on 2026-10-16 reported the count they had, not why.
-        logs.report()
-    return summary
+    return acquire.run(config, job, daemon, reference.lookup(config),
+                       library=shelf, retry=retry)
+
+
+def _ready(daemon: slsk.Daemon, config: config_module.Config) -> None:
+    """Point the daemon at this pass: staging, the two shared lanes, and a session to search with."""
+    config.staging.mkdir(parents=True, exist_ok=True)
+    daemon.set_dir(config.staging)
+    shared = daemon.share([config.lossless, config.lossy])
+    if int(shared.get("files") or 0) == 0:
+        # Without shared files peers read the account as a leecher and queue or ban it. The two lanes are
+        # handed over above; this says when the daemon did not take them.
+        print("the daemon reports no shared files — peers read that as a leecher and may queue or ban",
+              file=sys.stderr)
 
 
 def _acquire(config: config_module.Config, args: argparse.Namespace) -> int:
@@ -700,18 +705,19 @@ def _review(config: config_module.Config, args: argparse.Namespace) -> int:
                           file=sys.stderr)
                     return 1
                 picks = [(picks[0][0], args.candidate)]
-            logs = slsk.ChildLog()
-            slsk.free_ports(config)
-            server = lambda: mcp.StdioServer(list(config.soulseek_command),      # noqa: E731
-                                             env=slsk.environment(config), on_log=logs)
+            def connect():                    # noqa: E731
+                daemon = slsk.Daemon(config)
+                daemon.ensure()
+                daemon.set_dir(config.staging)
+                daemon.share([config.lossless, config.lossy])
+                return daemon
+
             if len(picks) == 1:
-                settled = review.accept(job, picks[0][0], number=picks[0][1], server_factory=server)
-                logs.report()
+                settled = review.accept(job, picks[0][0], number=picks[0][1], daemon_factory=connect)
                 print(settled.report())
                 print(f"music-agent process --job {job.id}   # convert, place and normalize it")
                 return 0
-            batch = review.accept_many(job, picks, workers=config.workers, server_factory=server)
-            logs.report()
+            batch = review.accept_many(job, picks, workers=config.workers, daemon_factory=connect)
             for settled in batch.settled:
                 print(settled.report())
             for line in batch.refused:
@@ -731,7 +737,7 @@ def _review(config: config_module.Config, args: argparse.Namespace) -> int:
     except (review.NotInTheQueue, review.NoSuchCandidate, review.NotAccepted) as error:
         print(error, file=sys.stderr)
         return 1
-    except (slsk.MissingCredential, mcp.ServerError) as error:
+    except (slsk.MissingCredential, slsk.DaemonError) as error:
         print(error, file=sys.stderr)
         return 1
 

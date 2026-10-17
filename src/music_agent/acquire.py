@@ -16,15 +16,18 @@ from pathlib import Path
 from . import peers, progress, reference, rules, slsk, state
 from .config import Config
 from .library import Held, Library
-from .mcp import ServerError, StdioServer
 from .parsing import mix_matches, search_query
 from .reference import Lookup
 from .rules import Candidate
+from .slsk import Daemon, DaemonError
 
-# The child sleeps exactly this long after a query goes out, so this is how long a peer has to answer at
-# all. The server sorts and truncates results, so a small cap discards good candidates before we see them.
-SEARCH_TIMEOUT = 10
-CALL_TIMEOUT = 8.0
+# The window a search is given: the query goes out, peers answer on their own connections, and the pass reads
+# once at the end. The daemon does not close it, because a client's window must not be time the daemon spends
+# not answering anyone else. Ten seconds is longer than slsk-batchdl's six because the server sorts and
+# truncates, and a short window discards good candidates before they arrive.
+SEARCH_TIMEOUT = 10.0
+# Offers kept from one search. The daemon answers with everything it collected, and a common title can put
+# thousands in one line; the server has already sorted them, and the ladder only ever asks six peers.
 MAX_RESULTS = 60
 
 # Candidates attempted per track, per pass. Enough to work past a peer or two who never opens the
@@ -32,7 +35,7 @@ MAX_RESULTS = 60
 MAX_CANDIDATES = 6
 
 # Search calls in a row that timed out instead of answering. One costs a full deadline to learn nothing; a
-# run of them is a child that has stopped talking, and the pass stops rather than spending twenty more.
+# run of them is a daemon that has stopped talking, and the pass stops rather than spending twenty more.
 STUCK_AFTER = 4
 
 # A connection that never transferred a byte is rotated after this long. A peer either opens the connection
@@ -61,17 +64,16 @@ FINISHED_GRACE = 5.0
 # already landed goes unnoticed, holding its worker.
 POLL_INTERVAL = 3.0
 
-# Statuses after which the server will never change its mind.
-_OVER = frozenset({"failed", "cancelled", "not_found", "session_expired"})
+# Statuses after which the daemon will never change its mind.
+_OVER = frozenset({"failed", "cancelled", "timed_out"})
 
 
 class ServerStuck(RuntimeError):
-    """The child stopped answering — searches timed out in a row, so the pass stopped asking rather than
-    spending a deadline each time to learn nothing.
+    """The network stopped answering — searches timed out in a row, or the daemon recorded a lost session.
 
-    `lost_session` tells the two kinds apart for the caller that decides whether to try again. Timed-out
-    calls are the child's own problem and a fresh child is worth having; a session the server took away is
-    the account's, and a second child loses it the same way.
+    `lost_session` tells the two kinds apart for the caller that decides whether to try again. A daemon that
+    stopped answering is worth restarting; a session the server took away is the account's, and a second
+    daemon loses it the same way.
     """
 
     def __init__(self, message: str, *, lost_session: bool = False) -> None:
@@ -80,7 +82,7 @@ class ServerStuck(RuntimeError):
 
 
 class Move(Enum):
-    """What to do with the candidate the server is holding."""
+    """What to do with the candidate the daemon is holding."""
 
     WAIT = "wait"
     ROTATE = "rotate"       # give up on this candidate; another may be better
@@ -90,33 +92,41 @@ class Move(Enum):
 
 @dataclass(frozen=True)
 class Transfer:
-    """What the server last said about a download."""
+    """What the daemon last said about a download."""
 
     status: str = ""
-    connection_state: str = ""
-    progress_pct: float = 0.0
     received_bytes: int = 0
     total_bytes: int | None = None
+    queue: int = 0
     local_path: str = ""
     message: str = ""
 
 
-def budget_for(transfer: Transfer, *, declared_queue: int = 0) -> float:
-    """How long a candidate the server still believes in may sit without a byte before it is let go.
+# A queue a peer can declare and still be believed. A real share's is in the tens; paid mirrors and promo
+# pools report five and six figures so that every request sits in them forever.
+ABSURD_QUEUE = 1000
 
-    A transfer that has started and stopped moving is dead whatever the server says; a peer that declared a
-    queue is behaving normally and gets a budget worth waiting for; anything else is a connection that either
-    opens quickly or never will.
+
+def budget_for(transfer: Transfer) -> float:
+    """How long a candidate the daemon still believes in may sit without a byte before it is let go.
+
+    A transfer that has started and stopped moving is dead whatever the daemon says; a peer whose queue is a
+    real queue is behaving normally and gets a budget worth waiting for; anything else is a connection that
+    either opens quickly or never will.
     """
-    if transfer.status == "finished":
+    if transfer.status == "completed":
         return FINISHED_GRACE
-    if transfer.status == "downloading" or transfer.connection_state == "transferring":
+    if transfer.status in {"in_progress", "paused"}:
         return STALL_BUDGET
-    return QUEUE_BUDGET if declared_queue else CONNECT_BUDGET
+    if transfer.status == "queued":
+        # A queued transfer is one the peer accepted and put in its queue, which is normal Soulseek. A
+        # position in the five and six figures is a paid mirror holding every request it ever gets, and the
+        # position is the evidence rather than the excuse.
+        return CONNECT_BUDGET if transfer.queue >= ABSURD_QUEUE else QUEUE_BUDGET
+    return CONNECT_BUDGET
 
 
-def move(transfer: Transfer, *, on_disk: bool, stuck_for: float, declared_queue: int = 0,
-         elapsed: float = 0.0) -> Move:
+def move(transfer: Transfer, *, on_disk: bool, stuck_for: float, elapsed: float = 0.0) -> Move:
     """What to do next, given seconds since `received_bytes` last increased.
 
     Before anything transfers, that is simply how long the download has been running. `elapsed` is how long
@@ -125,88 +135,53 @@ def move(transfer: Transfer, *, on_disk: bool, stuck_for: float, declared_queue:
     """
     if on_disk:
         return Move.DONE
-    if transfer.status == "finished":
-        # The `.part` rename may not have landed yet; the next poll settles it either way.
+    if transfer.status == "completed":
+        # The daemon's own `.part` rename has not landed yet; the next poll settles it either way.
         return Move.WAIT if stuck_for <= FINISHED_GRACE else Move.FAILED
     if transfer.status in _OVER:
         return Move.FAILED
     if elapsed > TRANSFER_CEILING:
         return Move.ROTATE
-    return Move.ROTATE if stuck_for > budget_for(transfer, declared_queue=declared_queue) else Move.WAIT
+    return Move.ROTATE if stuck_for > budget_for(transfer) else Move.WAIT
 
 
-# Length a peer can declare a queue to and still be believed. A real share's queue is in the tens; paid
-# mirrors and promo pools report five and six figures so that every request sits in them forever, and
-# "it declared a queue" must not be the thing that keeps them off the list.
-ABSURD_QUEUE = 1000
-
-
-def offence(decision: Move, report: Transfer, candidate: Candidate) -> str | None:
+def offence(decision: Move, report: Transfer) -> str | None:
     """What the peer did wrong, or None when the ending was not the peer's to answer for.
 
     This distinction is why a peer is ignored at all. A budget we chose to stop at, a queue within reason
-    that a peer declared, and a session the child lost are endings about us, and a peer that has already
-    sent bytes has shown it can send them. What is left is a peer that advertised a file and then delivered
+    that a peer declared, and a transfer we cancelled are endings about us, and a peer that has already sent
+    bytes has shown it can send them. What is left is a peer that advertised a file and then delivered
     nothing — twice, three times, every pass.
     """
     if decision is Move.DONE:
         return None
-    if report.status in {"session_expired", "cancelled"}:
+    if report.status in {"cancelled", "completed"}:
         return None
     if decision is Move.FAILED:
         return report.status or "failed"
     if report.received_bytes:
         return None
-    if candidate.queue and candidate.queue < ABSURD_QUEUE:
+    if report.queue and report.queue < ABSURD_QUEUE:
         return None
     return "nothing arrived"
 
 
-def transfer_of(payload: dict) -> Transfer:
-    """The server's answer to `download` or `download_status`, as far as the decision needs it."""
-    total = payload.get("total_bytes") or payload.get("filesize")
+def transfer_of(download: dict) -> Transfer:
+    """One `DownloadDto`, as far as the decision needs it.
+
+    The daemon reports the state as a tagged union: only the in-progress and paused kinds carry byte counts,
+    and only a queued one carries a position.
+    """
+    status = download.get("status") or {}
+    total = status.get("total_bytes")
     return Transfer(
-        status=str(payload.get("status") or ""),
-        connection_state=str(payload.get("connection_state") or ""),
-        progress_pct=float(payload.get("progress_pct") or 0.0),
-        received_bytes=int(payload.get("received_bytes") or 0),
+        status=str(status.get("state") or ""),
+        received_bytes=int(status.get("bytes_downloaded") or 0),
         total_bytes=int(total) if total else None,
-        local_path=str(payload.get("local_path") or ""),
-        message=str(payload.get("message") or ""),
+        queue=int(download.get("queue_position") or 0),
+        local_path=slsk.local_path(download),
+        message=str(status.get("reason") or ""),
     )
-
-
-def short_file(local_path: str, report: Transfer) -> int | None:
-    """The landed size when the file is not the one the peer advertised, else None.
-
-    `total_bytes` is what the transfer was started for, and the child renames the part file on nothing but
-    its own idea of finished. A peer that sends fewer bytes than it advertised leaves a file ffmpeg converts
-    without complaint, so the size is the only place that says the difference.
-    """
-    expected = report.total_bytes
-    if not expected or expected <= 0:
-        return None
-    try:
-        actual = Path(local_path).stat().st_size
-    except OSError:
-        return None
-    return actual if actual != expected else None
-
-
-def discard_partial(local_path: str) -> None:
-    """Remove the `.part` the child wrote for a transfer that will not finish.
-
-    The child renames `<name><ext>.part` only on success and never deletes it otherwise, so a rotated peer
-    leaves its bytes in staging for ever — and the next attempt at the same file finds the partial, picks a
-    new name, and starts from zero under it.
-    """
-    if not local_path:
-        return
-    path = Path(local_path)
-    try:
-        path.with_suffix(path.suffix + ".part").unlink(missing_ok=True)
-    except OSError:
-        pass
 
 
 def length_from_size(candidate: Candidate) -> int | None:
@@ -236,14 +211,12 @@ def candidate_of(item: dict) -> Candidate | None:
     candidate = Candidate(
         user=user,
         path=path,
-        duration=int(duration) if duration is not None else None,
+        duration=int(duration) if duration else None,
         bitrate=item.get("bitrate"),
-        queue=int(item.get("queue_size") or 0),
         # Carried through from the search result rather than dropped: a peer that answered with no free slot
         # is a wait, not a failure, and the fact belongs to the candidate rather than to the moment.
         slots=bool(item.get("has_free_slots", True)),
         size_bytes=item.get("filesize"),
-        online=item.get("online_now"),
         speed=item.get("avg_speed"),
     )
     if candidate.duration is None:
@@ -291,57 +264,58 @@ class Summary:
         if self.failed:
             parts.append(f"{len(self.failed)} to retry")
         if self.unsearched:
-            parts.append(f"{len(self.unsearched)} not searched — the child had stopped answering")
+            parts.append(f"{len(self.unsearched)} not searched — the daemon had stopped answering")
         return " · ".join(parts)
 
 
 # A search that comes back with nothing is not a failure. Once the findable tracks are taken, what is left to
 # search is the rare ones, and their searches answer nothing one after another, so the tail of a tracklist and
 # a dead network look the same from inside a pass. Counting those in a row was a stop signal once, and it ended
-# passes over healthy networks. Only the child is evidence: no answer at all, or a child with no session.
+# passes over healthy networks. Only the daemon is evidence: no answer at all, or a session it reports lost.
 
 
 @dataclass
-class ChildWatch:
-    """Whether the child can still search, and the decision to stop asking.
+class Watch:
+    """Whether the daemon can still search, and the decision to stop asking.
 
-    Both of the ways a pass stops are the child's own, and both are read from it rather than inferred: a search
-    that never answered, a run of which is a child that has stopped talking, and a child that reports it has no
-    session to search with. The event is what the loop watches — a thread that sees it stops starting work
-    rather than spending a search to find out.
+    Both ways a pass stops are read from the daemon rather than inferred from empty answers. A run of calls
+    that never answered is a daemon that has stopped talking; `daemon.status` records a session the server
+    took away, and from inside a search that is indistinguishable from a rare track — every answer after it
+    is an ordinary success with nothing in it. The event is what the loop watches: a thread that sees it
+    stops starting work rather than spending a search to find out.
     """
 
+    daemon: "slsk.Daemon | None" = None
     stuck_after: int = STUCK_AFTER
-    # The child's stderr, when the caller has one: it is the only thing that can tell a search that came
-    # back empty from a child that has no session to send it on.
-    child: "slsk.ChildLog | None" = None
     dead: threading.Event = field(default_factory=threading.Event)
 
     def __post_init__(self) -> None:
         self._lock = threading.Lock()
         self._fails = 0
         self._hung = 0
+        self._lost = False
 
     @property
     def session_lost(self) -> bool:
-        """Whether the child has said it can no longer answer — a session it does not have, or a message
-        reader that died on a frame it could not read.
-
-        The server drops a client, aioslsk does not reconnect, and every search from then on is an ordinary
-        success with nothing in it — which is what a rare track looks like too. Nothing else in the stack can
-        tell those apart, and the child recovers from neither.
-        """
-        return self.child is not None and self.child.cannot_answer
+        return self._lost
 
     def answered(self) -> None:
         """One search that came back, whatever it held.
 
-        An answer resets the run of timeouts, because the child is talking. What it held decides nothing: the
-        count is the network's, and a live child answering with nothing is a rare track.
+        An answer resets the run of timeouts, because the daemon is talking. What it held decides nothing:
+        the count is the network's, and a live daemon answering with nothing is a rare track. The daemon's own
+        status is asked here because a lost session is not visible in a search answer at all.
         """
-        if self.session_lost:
-            # A child with no session did not send this search at all, whatever came back — the pass is over
-            # as soon as that is known.
+        if self._lost:
+            return
+        lost = False
+        if self.daemon is not None:
+            try:
+                lost = self.daemon.session_lost()
+            except DaemonError:
+                lost = False          # the timeout path stops the pass if the daemon has gone
+        if lost:
+            self._lost = True
             self.dead.set()
             return
         with self._lock:
@@ -365,8 +339,8 @@ class ChildWatch:
 class Pacer:
     """Let searches start no more often than `interval` seconds apart.
 
-    Nothing between this loop and the network keeps to the network's rate, and neither the child nor aioslsk
-    reports a search being ignored, so the pace is kept here. A gap between two searches rather than a cap
+    Nothing between this loop and the network keeps to the network's rate, and neither the daemon nor the
+    server reports a search being ignored, so the pace is kept here. A gap between two searches rather than a cap
     on how many run at once, because the open searches are only a consequence of the rate.
     """
 
@@ -388,23 +362,21 @@ class Pacer:
             self._sleep(delay)
 
 
-def search(server: StdioServer, record: state.Record, *, later_pass: bool) -> list[Candidate]:
-    """Ask the server, and read back what it offered.
+def search(daemon: Daemon, record: state.Record, *, later_pass: bool) -> list[Candidate]:
+    """Ask the daemon, and read back what it offered.
 
-    Peer attributes may scope a retry pass and never the first one, because a filter can eliminate the only
-    peer who has the track.
+    A retry pass prefers peers with a free slot, and never the first one, because a filter can eliminate the
+    only peer who has the track. When no peer has a free slot the rest are kept: an offer is worth a later
+    pass, and dropping them would close the track instead.
     """
-    arguments: dict = {
-        "query": search_query(record.artist, record.title),
-        "timeout": SEARCH_TIMEOUT,
-        "max_results": MAX_RESULTS,
-    }
+    offered = daemon.search(search_query(record.artist, record.title), timeout=SEARCH_TIMEOUT)
+    found = [candidate for candidate in (candidate_of(item) for item in offered) if candidate is not None]
+    found = found[:MAX_RESULTS]
     if later_pass:
-        arguments["free_slots_only"] = True
-    payload = slsk.check(server.call("search", arguments, timeout=SEARCH_TIMEOUT + CALL_TIMEOUT),
-                         "search")
-    offered = payload.get("results") or []
-    return [candidate for candidate in (candidate_of(item) for item in offered) if candidate is not None]
+        free = [candidate for candidate in found if candidate.slots]
+        if free:
+            return free
+    return found
 
 
 def merge(record: state.Record, found: list[Candidate]) -> int:
@@ -416,20 +388,30 @@ def merge(record: state.Record, found: list[Candidate]) -> int:
 
 
 def await_transfer(
-    server: StdioServer,
+    daemon: Daemon,
     candidate: Candidate,
     *,
     log,
     sleep,
     clock,
 ) -> tuple[Move, str, Transfer]:
-    """Take one candidate as far as it goes. Returns how it ended, where the file is, and what the server
+    """Take one candidate as far as it goes. Returns how it ended, where the file is, and what the daemon
     last said about it — the last of those is what the peer's own failure is read from."""
-    payload = slsk.check(server.call("download", {"id": identifier(candidate)}, timeout=CALL_TIMEOUT),
-                         "download")
+    payload = daemon.download(
+        candidate.user,
+        candidate.path,
+        size=candidate.size_bytes or 0,
+        metadata={
+            "bitrate": candidate.bitrate,
+            "length_seconds": candidate.duration,
+            "peer_free_slots": 1 if candidate.slots else 0,
+            "peer_upload_speed": candidate.speed,
+        },
+    )
     report = transfer_of(payload)
     local_path = report.local_path
     log(f"      asking {candidate.user} for {candidate.name}")
+    key = (candidate.user, candidate.path)
 
     last_bytes = 0
     last_change = clock()
@@ -437,32 +419,30 @@ def await_transfer(
     while True:
         stuck_for = clock() - last_change
         on_disk = bool(local_path) and Path(local_path).is_file()
-        decision = move(report, on_disk=on_disk, stuck_for=stuck_for, declared_queue=candidate.queue,
-                        elapsed=clock() - started)
+        decision = move(report, on_disk=on_disk, stuck_for=stuck_for, elapsed=clock() - started)
         if decision is not Move.WAIT:
             return decision, local_path, report
 
         # The wait is what is left of the budget, never more than one poll: sleeping the interval regardless
         # would keep every budget to the poll's own grid — 36 s on a 10 s poll costs 40 — and would leave a
         # file that landed mid-interval unnoticed for the rest of it.
-        budget = budget_for(report, declared_queue=candidate.queue)
+        budget = budget_for(report)
         sleep(max(0.0, min(POLL_INTERVAL, budget - stuck_for)))
-        report = transfer_of(
-            slsk.check(
-                server.call("download_status", {"id": identifier(candidate)}, timeout=CALL_TIMEOUT),
-                "download_status",
-            )
-        )
+        current = daemon.downloads().get(key)
+        if current is None:
+            # The daemon has forgotten the transfer and the file is not on disk: nothing is coming.
+            return Move.FAILED, local_path, Transfer(status="missing", local_path=local_path)
+        report = transfer_of(current)
         local_path = report.local_path or local_path
         if report.received_bytes > last_bytes:
             last_bytes = report.received_bytes
             last_change = clock()
 
 
-def give_up(server: StdioServer, candidate: Candidate, log) -> None:
+def give_up(daemon: Daemon, candidate: Candidate, log) -> None:
     """Stop the transfer, because the next candidate cannot start while the slots are full."""
     try:
-        server.call("cancel_download", {"id": identifier(candidate)}, timeout=30)
+        daemon.cancel(candidate.user, candidate.path)
     except Exception as error:                  # a courtesy, never a reason to fail the track
         log(f"      could not cancel {candidate.user}: {error}")
 
@@ -583,7 +563,7 @@ def _prepare(
 def one(
     job: state.Job,
     record: state.Record,
-    server: StdioServer,
+    daemon: Daemon,
     lookup: Lookup,
     *,
     library: Library | None,
@@ -591,7 +571,7 @@ def one(
     sleep,
     clock,
     later_pass: bool,
-    watch: ChildWatch,
+    watch: Watch,
     pacer: Pacer | None = None,
     ledger: peers.Ledger | None = None,
     ignored: set[str] | None = None,
@@ -615,8 +595,8 @@ def one(
 
     if pacer is not None:
         pacer.wait()
-    found = search(server, record, later_pass=later_pass)
-    # Before the peers are filtered: a search that came back at all is the child talking, whatever it held.
+    found = search(daemon, record, later_pass=later_pass)
+    # Before the peers are filtered: a search that came back at all is the daemon talking, whatever it held.
     watch.answered()
     if ledger is not None:
         # Dropped here rather than filtered later, so nothing downstream — the ladder, the queue, the counts —
@@ -672,16 +652,8 @@ def one(
             silenced += 1
             continue
         record.tried.append(identifier(candidate))
-        decision, local_path, report = await_transfer(server, candidate, log=log, sleep=sleep,
+        decision, local_path, report = await_transfer(daemon, candidate, log=log, sleep=sleep,
                                                       clock=clock)
-
-        short = short_file(local_path, report) if decision is Move.DONE else None
-        if short is not None:
-            # A file that is not the one advertised is not a download: ffmpeg converts what it is given, and
-            # nothing downstream would ever look at the size again.
-            Path(local_path).unlink(missing_ok=True)
-            decision = Move.FAILED
-            log(f"      {candidate.user} sent {short} of {report.total_bytes} bytes — the file was dropped")
 
         if decision is Move.DONE:
             if ledger is not None:
@@ -694,16 +666,14 @@ def one(
                 log(f"[{record.idx}] {record.label}: from {candidate.user} → {local_path}")
             return "downloaded"
 
-        why = "truncated" if short is not None else offence(decision, report, candidate)
+        why = offence(decision, report)
         if decision is Move.ROTATE:
-            give_up(server, candidate, log)
+            give_up(daemon, candidate, log)
             log(f"      {candidate.user} went nowhere; rotating ({len(record.tried)} tried)")
         else:
             log(f"      {candidate.user} failed")
-        discard_partial(local_path)
         job.append_event("candidate_lost", idx=record.idx, peer=candidate.user,
-                         path=candidate.path, why="truncated" if short is not None else decision.value,
-                         reason=why or "")
+                         path=candidate.path, why=decision.value, reason=why or "")
         if ledger is not None and why is not None and ledger.offence(candidate.user, why):
             if ignored is not None:
                 ignored.add(candidate.user)
@@ -740,7 +710,7 @@ def one_at_a_time(lookup: Lookup) -> Lookup:
 def run(
     config: Config,
     job: state.Job,
-    server: StdioServer,
+    daemon: Daemon,
     lookup: Lookup,
     *,
     library: Library | None = None,
@@ -749,14 +719,13 @@ def run(
     clock=time.monotonic,
     retry: bool = False,
     stream=None,
-    child: "slsk.ChildLog | None" = None,
 ) -> Summary:
     """The whole pass: every record the job holds, `workers` of them at a time, writing as it goes.
 
     The transfers and the waiting on them overlap; the searching does not, and goes out at
     `config.search_interval`, because that rate is the network's and not this loop's.
     """
-    # The tracks no pass has asked about yet go first. A child that dies early leaves the rest of the list
+    # The tracks no pass has asked about yet go first. A daemon that stops early leaves the rest of the list
     # unasked, and a pass that starts at the top of the file spends every attempt on the same head: on
     # 2026-10-16 five passes over 315 tracks, between 20:54 and 22:28, searched the first 91 records over and
     # over and never reached the other 224.
@@ -766,12 +735,11 @@ def run(
     # file a person opens stays in track order and a run does not churn it every pass.
     schedule = sorted(records, key=lambda record: (record.idx in asked, record.idx))
     summary = Summary()
-    watch = ChildWatch(child=child)
+    watch = Watch(daemon=daemon)
+    # A daemon that lost its session before this pass started is not worth one search: every answer would be
+    # an ordinary success with nothing in it, which is what a tracklist of rare tracks looks like.
+    watch.answered()
     bar = progress.Bar(len(schedule), log=log, stream=stream)
-    if child is not None:
-        # Its lines arrive while the bar is drawn on the same terminal, and a plain print leaves the bar's last
-        # drawing shredded around them. The bar's own writer erases first, so the child goes through it.
-        child.route(bar.say)
     unsearched: list[int] = []
 
     # The ignore list, read once: twenty workers ask it on every search and every failure, and `offence`
@@ -792,18 +760,18 @@ def run(
 
     def work(record: state.Record) -> None:
         if watch.dead.is_set() or watch.session_lost:
-            # The child is gone, so the pass stops asking; the record is left exactly as it was, and nothing is
-            # written about a search that never happened. Not settled either: the bar counts what the pass got
-            # through, and settling these one by one races it through the rest of the list as if it had.
+            # The daemon is gone, so the pass stops asking; the record is left exactly as it was, and nothing
+            # is written about a search that never happened. Not settled either: the bar counts what the pass
+            # got through, and settling these one by one races it through the rest of the list as if it had.
             unsearched.append(record.idx)
             return
         later_pass = retry or bool(record.candidates)
         bar.begin(record.idx, record.label)
         try:
-            outcome = one(job, record, server, lookup, library=library, log=say, sleep=sleep,
+            outcome = one(job, record, daemon, lookup, library=library, log=say, sleep=sleep,
                           clock=clock, later_pass=later_pass, watch=watch, pacer=pacer,
                           ledger=ledger, ignored=summary.ignored)
-        except (slsk.ToolError, ServerError) as error:
+        except DaemonError as error:
             record.status = state.RETRY_LATER
             outcome = "failed"
             watch.timed_out()
@@ -831,33 +799,27 @@ def run(
         summary.unsearched.extend(unsearched)
 
     if watch.hung or watch.session_lost:
-        account = watch.session_lost and child is not None and child.lost_session > 0
         summary.failed.sort()
         summary.dropped = drop_exhausted(job, log=say)
         summary.failed = [idx for idx in summary.failed if idx not in set(summary.dropped)]
         if watch.session_lost:
-            # The child answered, and every answer was empty because it had no way to search. Named here
-            # because from the inside this is indistinguishable from the network holding nothing, and a pass
-            # that stops on it while returning success is a pass that lies.
-            job.append_event("lost_session" if account else "reader_died",
-                             unsearched=len(summary.unsearched))
+            # The daemon answered, and every answer was empty because it had no session to search with.
+            # Named here because from the inside this is indistinguishable from the network holding nothing,
+            # and a pass that stops on it while returning success is a pass that lies.
+            job.append_event("lost_session", unsearched=len(summary.unsearched))
             reason = (
-                f"the child was left without a session — {len(summary.unsearched)} tracks were never "
+                f"the daemon was left without a session — {len(summary.unsearched)} tracks were never "
                 f"searched. Another client has the account, or the server has stopped answering this one, "
-                f"and a fresh child loses it the same way, so the passes stop here."
-                if account else
-                f"the child's message reader died on a frame it could not read — "
-                f"{len(summary.unsearched)} tracks were never searched. That is one child's bad luck, not "
-                f"the account's, so a fresh child resumes the pass from here."
+                f"and a fresh daemon loses it the same way until the server lets go."
             )
         else:
             job.append_event("server_stuck", consecutive=watch.hung, unsearched=len(summary.unsearched))
             reason = (f"{watch.hung} searches timed out in a row — {len(summary.unsearched)} tracks were "
-                      f"never searched. The child had stopped answering; the run is open, so a fresh pass "
+                      f"never searched. The daemon had stopped answering; the run is open, so a fresh pass "
                       f"picks it up.")
         job.write_status(config)
         bar.close()
-        raise ServerStuck(reason, lost_session=account)
+        raise ServerStuck(reason, lost_session=watch.session_lost)
 
     # A track whose every candidate refused is closed here rather than put to a person: there is nothing
     # left to try, and asking about it would only be asking permission to stop.
