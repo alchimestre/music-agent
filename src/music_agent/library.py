@@ -191,15 +191,32 @@ def read_directories(config: Config) -> list[Held]:
     return found
 
 
+def _target_rows(config: Config) -> tuple[list[Held], list[str], bool]:
+    """Every configured target that can read a collection, asked in order, and whether any answered.
+
+    A target that cannot be read is not a reason to stop the pipeline: the directories are still a library,
+    and a config with no reading target is a complete config. `Rekordbox` raises `Unreadable` itself when a
+    configured database is there but broken, which is the case that must not be mistaken for an empty one.
+    The flag separates "no collection was read" from "the collection held nothing".
+    """
+    from . import exporting
+
+    rows: list[Held] = []
+    genres: list[str] = []
+    read = False
+    for target in exporting.configured(config):
+        if not target.reads or not target.available(config):
+            continue
+        found, vocabulary = target.rows(config)
+        rows.extend(found)
+        genres.extend(vocabulary)
+        read = True
+    return rows, genres, read
+
+
 def open(config: Config) -> Library:
-    """The collection as it stands: the database's rows, and the files beside them."""
-    try:
-        rows, genres = read_database()
-    except Exception as error:              # pyrekordbox raises its own types, and its own messages
-        raise Unreadable(
-            f"cannot read the rekordbox collection ({error}) — is rekordbox installed, and is the "
-            "database where pyrekordbox expects it?"
-        ) from error
+    """The collection as it stands: the targets' rows, and the files beside them."""
+    rows, genres, _read = _target_rows(config)
     return Library(rows + read_directories(config), genres)
 
 
@@ -226,14 +243,16 @@ def unpointed(config: Config, *, claimed: Iterable[str] = ()) -> Unpointed:
     leftover, however long the run has held it.
     """
     owned = {path_key(path) for path in claimed}
-    rows, _genres = read_database()
+    rows, _genres, read = _target_rows(config)
     row_paths = {path_key(row.path) for row in rows if row.path}
 
     leftovers = Unpointed()
-    for held in sorted(read_directories(config), key=lambda entry: entry.path):
-        key = path_key(held.path)
-        if key not in row_paths and key not in owned:
-            leftovers.lane.append(Path(held.path))
+    if read:
+        # Without a collection to compare against, a lane file is not evidence of anything.
+        for held in sorted(read_directories(config), key=lambda entry: entry.path):
+            key = path_key(held.path)
+            if key not in row_paths and key not in owned:
+                leftovers.lane.append(Path(held.path))
     if config.staging.is_dir():
         for path in sorted(config.staging.iterdir()):
             # A cancelled transfer leaves the client's own `.part` file here, which is as much a leftover as

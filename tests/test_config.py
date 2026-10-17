@@ -105,6 +105,12 @@ def test_the_example_config_is_valid_and_agrees_with_the_defaults():
     assert config.maxretry == DEFAULTS.maxretry
     assert config.findtime_days == DEFAULTS.findtime_days
     assert config.bantime_days == DEFAULTS.bantime_days
+    assert config.export_targets == DEFAULTS.export_targets
+
+
+def test_export_targets_are_read_from_the_file(tmp_path):
+    config = load(write(tmp_path, '[export]\ntargets = ["one"]\n'))
+    assert config.export_targets == ("one",)
 
 
 def test_the_ceilings_do_not_contradict_each_other():

@@ -50,6 +50,11 @@ bantime_days  = 30
 # absent means genres stay blank, which is what a machine without music-tagger installed wants.
 taxonomy = ""
 
+[export]
+# The collections a run writes to, in this order. `rekordbox` and `traktor` ship; a target that is not
+# installed here is reported and skipped, and naming only one is a complete config.
+targets = ["rekordbox", "traktor"]
+
 [traktor]
 # Traktor's collection is another project's to write. This is how to run its tool here; a machine without it
 # leaves the collection alone.

@@ -230,15 +230,15 @@ def test_a_track_with_no_genre_is_imported_without_one(tmp_path):
     assert database.existing["genre"] == [], "and no genre row is minted for a blank"
 
 
-def test_the_run_is_finished_here_and_nowhere_else(tmp_path):
-    """The pipeline ends at the import, so acquire and process leave the run open for the next command."""
+def test_importing_leaves_the_run_open_for_the_next_target(tmp_path):
+    """One target cannot finish the run: another collection may still have to receive it."""
     config = make_config(tmp_path)
     job = job_with(config, [tagged(tmp_path)])
     assert not job.finished()
 
     importing.run(config, job, db=FakeDatabase(), backup_first=False, log=quiet)
 
-    assert job.finished()
+    assert not job.finished()
 
 
 def test_nothing_tagged_means_nothing_written(tmp_path):

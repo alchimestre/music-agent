@@ -13,6 +13,7 @@ from pathlib import Path
 
 from . import acquire
 from . import config as config_module
+from . import exporting
 from . import genre
 from . import importing
 from . import library
@@ -29,7 +30,7 @@ from . import traktor
 
 
 def _run(config: config_module.Config, args: argparse.Namespace) -> int:
-    """A tracklist in, files in both collections out: every stage, in order, in one command.
+    """A tracklist in, files in every configured collection out: every stage, in order, in one command.
 
     This is the same code the stage commands run — nothing is decided differently here — so a run needs
     nobody driving between the steps. Nothing is asked along the way: what the rules would not settle is
@@ -37,7 +38,7 @@ def _run(config: config_module.Config, args: argparse.Namespace) -> int:
     """
     from types import SimpleNamespace
 
-    _stage("run", f"one tracklist, all the way to both collections")
+    _stage("run", "one tracklist, all the way to the configured collections")
 
     job = _start(config, args) if args.tracks is not None else _job(config, args)
     if job is None:
@@ -46,8 +47,8 @@ def _run(config: config_module.Config, args: argparse.Namespace) -> int:
         return 1
 
     # Pinned by id from here on: "the newest unfinished run" is not this run once another one starts.
-    pinned = SimpleNamespace(job=job.id, tracks=None, name=None, retry=True,
-                             no_backup=False, no_traktor=args.no_traktor)
+    pinned = SimpleNamespace(job=job.id, tracks=None, name=None, retry=True, no_backup=False,
+                             target=getattr(args, "target", None), without=getattr(args, "without", None))
 
     # One pass is the run. A later pass meets the same peers again, and the ones that answered with nothing
     # an hour ago are the ones that will answer with nothing now; asking is what `--passes` is for, and a
@@ -83,8 +84,10 @@ def _run(config: config_module.Config, args: argparse.Namespace) -> int:
     _tidy(config, pinned)
 
     _queue(job)
-    print(f"\nrun {job.id} is in both collections. Traktor wants Check Consistency → Analyze for what it "
-          f"added; rekordbox is done.")
+    exported = ", ".join(target.name for target in exporting.configured(
+        config, only=getattr(args, "target", None), without=getattr(args, "without", None))
+        if target.available(config))
+    print(f"\nrun {job.id} is exported to {exported or 'no configured target'}.")
     if failed:
         print("the passes stopped early — everything they did bring in has still been placed", file=sys.stderr)
     return failed
@@ -114,8 +117,10 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--passes", type=int, default=1, metavar="N",
                      help="how many search passes over the tracklist (default: 1; a pass that brings nothing "
                           "in ends the loop early)")
-    run.add_argument("--no-traktor", action="store_true",
-                     help="rekordbox only: leave Traktor's collection alone")
+    run.add_argument("--target", action="append", default=None, metavar="NAME",
+                     help="export to this target only; repeat for several (default: every [export] target)")
+    run.add_argument("--without", action="append", default=None, metavar="NAME",
+                     help="leave this target alone; repeat for several")
 
     status = commands.add_parser("status", parents=[common],
                                  help="what the current run has done, and what needs you")
@@ -157,11 +162,13 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="convert, place and normalize what was downloaded")
 
     importing = commands.add_parser("import", parents=[common],
-                                    help="add what was tagged to the rekordbox collection, then to Traktor's")
+                                    help="add what was tagged to every configured collection")
     importing.add_argument("--no-backup", action="store_true",
-                           help="skip copying the collection first (not recommended)")
-    importing.add_argument("--no-traktor", action="store_true",
-                           help="rekordbox only: leave Traktor's collection alone")
+                           help="skip copying a collection first (not recommended)")
+    importing.add_argument("--target", action="append", default=None, metavar="NAME",
+                           help="export to this target only; repeat for several")
+    importing.add_argument("--without", action="append", default=None, metavar="NAME",
+                           help="leave this target alone; repeat for several")
 
     commands.add_parser("retag", parents=[common],
                         help="re-derive the genre on files already placed, replacing what they carry")
@@ -196,38 +203,69 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _import(config: config_module.Config, args: argparse.Namespace) -> int:
-    """Both collections: rekordbox first, then Traktor through the project that owns it.
+    """Every configured collection, in the order the config names them.
 
-    Every stage before this one has to be run in order, so this is also the stage that ends a run — hence
-    both halves here rather than a separate command to remember.
+    Every stage before this one has to be run in order, so this is also the stage that ends a run. A target
+    that is not installed is reported and skipped; the others still receive the tracks.
     """
     job = _target(config, args, "import")
     if job is None:
         return 1
 
-    from pyrekordbox import Rekordbox6Database
-
-    _stage("import", f"rekordbox · run {job.id}")
     try:
-        database = Rekordbox6Database()
-    except Exception as error:
-        print(f"cannot open the collection ({error})", file=sys.stderr)
+        targets = exporting.configured(config, only=getattr(args, "target", None),
+                                        without=getattr(args, "without", None))
+    except exporting.UnknownTarget as error:
+        print(error, file=sys.stderr)
+        return 1
+    if not targets:
+        print("no export target selected — check [export] targets, --target and --without",
+              file=sys.stderr)
         return 1
 
+    _stage("import", f"{' → '.join(target.name for target in targets)} · run {job.id}")
     try:
-        summary = importing.run(config, job, db=database, backup_first=not args.no_backup)
+        results = exporting.run(config, job, targets=targets, backup_first=not args.no_backup)
     except importing.NotClosed as error:
         print(error, file=sys.stderr)
         return 1
-    finally:
-        database.close()
+    except Exception as error:              # a collection's own failure, at the CLI boundary
+        print(f"the import stopped: {error}", file=sys.stderr)
+        return 1
 
-    _report(summary, job, len(summary.failed))
+    failed = 0
+    for target, result in zip(targets, results):
+        line = (result.report() or "nothing to do").replace("\n", "\n" + " " * 13)
+        print(f"  {target.name:<11}{line}")
+        failed += result.failed
+    print()
+    if not any(result.ran for result in results):
+        print(f"nothing received the run — it stays open: music-agent status --job {job.id}",
+              file=sys.stderr)
+        return 1
+    if failed:
+        print(f"music-agent status --job {job.id}")
+    return 1 if failed else 0
 
-    if not args.no_traktor:
-        _stage("import", "traktor")
-        traktor.sync(config)
-    return 0
+
+def _rekordbox(config: config_module.Config):
+    """The rekordbox target when this config exports to it and this machine has it."""
+    for target in exporting.configured(config):
+        if target.name == "rekordbox" and target.available(config):
+            return target
+    return None
+
+
+def _rekordbox_or_say(config: config_module.Config, why: str):
+    """The rekordbox target, or None with the reason already printed."""
+    try:
+        target = _rekordbox(config)
+    except exporting.UnknownTarget as error:
+        print(error, file=sys.stderr)
+        return None
+    if target is None:
+        print(why, file=sys.stderr)
+    return target
 
 
 def _dedupe(config: config_module.Config, args: argparse.Namespace) -> int:
@@ -241,6 +279,9 @@ def _dedupe(config: config_module.Config, args: argparse.Namespace) -> int:
 
     from . import duplicates
 
+    if _rekordbox_or_say(config, "dedupe reads rekordbox's collection: name it in [export] targets "
+                                 "first") is None:
+        return 1
     try:
         database = Rekordbox6Database()
     except Exception as error:                      # pyrekordbox raises its own types and its own messages
@@ -278,6 +319,10 @@ def _backfill(config: config_module.Config, args: argparse.Namespace) -> int:
     from pyrekordbox import Rekordbox6Database
 
     from . import backfill
+
+    if _rekordbox_or_say(config, "backfill writes rekordbox rows: name rekordbox in [export] targets "
+                                 "first") is None:
+        return 1
 
     try:
         database = Rekordbox6Database()
@@ -344,7 +389,7 @@ def _tools(config: config_module.Config) -> process.Tools:
 # Everything a pass can fail on that is worth one line and a stop: credentials, a port someone else holds,
 # a daemon that will not answer, a daemon that stopped answering, an unreadable collection.
 ACQUIRE_ERRORS = (slsk.MissingCredential, slsk.PortBusy, slsk.DaemonError, acquire.ServerStuck,
-                  library.Unreadable)
+                  library.Unreadable, exporting.UnknownTarget)
 
 # A pass is resumed this many times when the daemon dies under it. Everything it did is already in the run,
 # so a restart costs the price of a login; four daemons in a row dying is a problem a restart will not fix.
@@ -382,7 +427,7 @@ def _process(config: config_module.Config, args: argparse.Namespace) -> int:
 
     try:
         tools = _tools(config)
-    except (slsk.MissingCredential, library.Unreadable) as error:
+    except (slsk.MissingCredential, library.Unreadable, exporting.UnknownTarget) as error:
         print(error, file=sys.stderr)
         return 1
 
@@ -403,7 +448,7 @@ def _retag(config: config_module.Config, args: argparse.Namespace) -> int:
 
     try:
         tools = _tools(config)
-    except (slsk.MissingCredential, library.Unreadable) as error:
+    except (slsk.MissingCredential, library.Unreadable, exporting.UnknownTarget) as error:
         print(error, file=sys.stderr)
         return 1
 
@@ -633,7 +678,7 @@ def _files(config: config_module.Config, job: state.Job) -> int:
     try:
         leftovers = library.unpointed(
             config, claimed=[record.local_path for record in job.records() if record.local_path])
-    except library.Unreadable as error:
+    except (library.Unreadable, exporting.UnknownTarget) as error:
         print(error, file=sys.stderr)
         return 1
 
@@ -835,10 +880,19 @@ def _tidy(config: config_module.Config, args: argparse.Namespace) -> int:
 
     database = None
     try:
-        database = Rekordbox6Database()
-    except Exception as error:                      # pyrekordbox raises its own types and its own messages
-        print(f"  {'rekordbox':<11} cannot read the collection ({error})", file=sys.stderr)
+        rekordbox = _rekordbox(config)
+    except exporting.UnknownTarget as error:
+        print(f"  {'rekordbox':<11} {error}", file=sys.stderr)
         trouble += 1
+    else:
+        if rekordbox is None:
+            print(f"  {'rekordbox':<11} not a configured target — its rows are not read")
+        else:
+            try:
+                database = Rekordbox6Database()
+            except Exception as error:              # pyrekordbox raises its own types and its own messages
+                print(f"  {'rekordbox':<11} cannot read the collection ({error})", file=sys.stderr)
+                trouble += 1
 
     if database is not None:
         try:
@@ -871,7 +925,7 @@ def _tidy(config: config_module.Config, args: argparse.Namespace) -> int:
             counted = (f"{len(drift.lane)} in a lane, {len(drift.gone)} rows whose file has gone")
             trouble += _say("lanes", "" if not (drift.lane or drift.gone) else counted,
                             "music-agent status --files")
-        except library.Unreadable as error:
+        except (library.Unreadable, exporting.UnknownTarget) as error:
             print(f"  {'lanes':<11} {error}", file=sys.stderr)
             trouble += 1
 

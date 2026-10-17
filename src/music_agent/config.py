@@ -61,6 +61,9 @@ class Config:
     # Traktor's collection belongs to another project, which owns it and its own config. This is how to run
     # that tool here; empty means the machine has no Traktor tool and its half is skipped.
     traktor_command: tuple[str, ...]
+    # The collections a run exports to, in order. `rekordbox` and `traktor` ship; a new target is a module
+    # beside this file and an entry in `exporting.REGISTRY`, not a branch in the pipeline.
+    export_targets: tuple[str, ...]
     soulseek_listen_port: int
     # How much of the acquisition runs at once: `max_downloads` is the daemon's own transfer ceiling and
     # `workers` is how many tracks a pass works on at a time.
@@ -123,6 +126,8 @@ DEFAULTS = Config(
     slsk_password_env="SLSK_PASSWORD",
     # The tool's own name on PATH. A machine that runs it out of a checkout sets this to its own argv.
     traktor_command=("traktor-nml",),
+    # Both collections this machine has. A config that names one target only is a complete configuration.
+    export_targets=("rekordbox", "traktor"),
     # The port the server hands to peers, and the one forwarded here. The daemon registers exactly this one;
     # its neighbour is only ever swept in case a client that used both is still alive.
     soulseek_listen_port=20000,
@@ -175,6 +180,7 @@ def load(path: Path | None = None) -> Config:
     credentials = data.get("credentials", {})
     soulseek = data.get("soulseek", {})
     traktor = data.get("traktor", {})
+    export = data.get("export", {})
     genres = data.get("genres", {})
     tools = data.get("tools", {})
 
@@ -194,6 +200,7 @@ def load(path: Path | None = None) -> Config:
         soulseek_command=tuple(soulseek.get("command", DEFAULTS.soulseek_command)),
         soulseek_state_dir=str(soulseek.get("state_dir", DEFAULTS.soulseek_state_dir)),
         traktor_command=tuple(traktor.get("command", DEFAULTS.traktor_command)),
+        export_targets=tuple(export.get("targets", DEFAULTS.export_targets)),
         **_listening_ports(),
         max_downloads=int(soulseek.get("max_downloads", DEFAULTS.max_downloads)),
         workers=int(soulseek.get("workers", DEFAULTS.workers)),

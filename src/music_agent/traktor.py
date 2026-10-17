@@ -21,6 +21,10 @@ class Missing(RuntimeError):
     """Traktor's tool is not installed on this machine, so its collection is not this pipeline's business."""
 
 
+class Failed(RuntimeError):
+    """The tool ran and would not do what it was asked; its collection is untouched."""
+
+
 def command(config: Config) -> list[str] | None:
     """The tool's argv, or None when it is not installed here."""
     argv = list(config.traktor_command)
@@ -29,13 +33,13 @@ def command(config: Config) -> list[str] | None:
     return argv
 
 
-def _run(argv: list[str], verb: str, timeout: float = 900.0) -> str:
+def _run(argv: list[str], verb: str, timeout: float = 900.0) -> tuple[bool, str]:
     try:
         done = subprocess.run(argv + [verb], capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as error:
-        return f"{verb} did not run: {error}"
+        return False, f"{verb} did not run: {error}"
     said = "\n".join(part for part in (done.stdout, done.stderr) if part and part.strip())
-    return said.strip() or f"{verb} said nothing"
+    return done.returncode == 0, said.strip() or f"{verb} said nothing"
 
 
 # The tool's plan counts in its own words: `0 to repoint · 0 to add`. Which of those it prints depends on what
@@ -53,19 +57,25 @@ def _nothing_to_do(plan: str) -> bool:
 def sync(config: Config, *, log=print) -> str | None:
     """Plan, apply if the plan changes anything, and report both.
 
-    Returns what the tool said about the plan, or None when it is not installed. Traktor's own step is left
-    to the person: the tracks it added have not been analyzed yet.
+    Returns what the tool said about the plan, or None when it is not installed. Raises `Failed` when the
+    tool exits nonzero, which is how it refuses — Traktor being open, a missing collection. Traktor's own
+    step is left to the person: the tracks it added have not been analyzed yet.
     """
     argv = command(config)
     if argv is None:
         log("traktor: not installed on this machine — its collection is untouched")
         return None
 
-    plan = _run(argv, "plan")
+    ok, plan = _run(argv, "plan")
     log("traktor: " + plan.replace("\n", "\n         "))
+    if not ok:
+        raise Failed(f"plan failed · {plan}")
     if _nothing_to_do(plan):
         return plan
 
-    log("traktor: " + _run(argv, "apply").replace("\n", "\n         "))
+    ok, said = _run(argv, "apply")
+    log("traktor: " + said.replace("\n", "\n         "))
+    if not ok:
+        raise Failed(f"apply failed · {said}")
     log("traktor: open Traktor and run Check Consistency → Analyze for the tracks it added")
     return plan
