@@ -125,18 +125,25 @@ def free_ports(config: Config, *, log=print) -> list[int]:
     # caller has already tried to connect twice. It is named apart, because the log otherwise reads like a
     # stranger was killed.
     ours = Path(config.soulseek_command[0]).name
-    mine = [pid for pid in held if ours in processes.command_of(pid)]
+
+    def is_ours(pid: int) -> bool:
+        # The executable, not the command line: `tail -f sldl.log` mentions the client without being it.
+        command = processes.command_of(pid)
+        return bool(command) and Path(command.split()[0]).name == ours
+
+    mine = [pid for pid in held if is_ours(pid)]
     others = [pid for pid in held if pid not in mine]
-    stubborn = processes.stop(held)
+    stubborn = processes.stop(mine)
     if stubborn:
         raise PortBusy(f"pids {stubborn} would not stop, and they hold {port}")
     if mine:
         log(f"stopped the Soulseek daemon that stopped answering port {port} "
             f"(pid {', '.join(str(pid) for pid in mine)})")
     if others:
-        log(f"stopped a stale Soulseek client holding port {port} "
-            f"(pid {', '.join(str(pid) for pid in others)})")
-    return stopped + held
+        # Named and left alone: this process knows the port is taken and not by a client it may kill.
+        log(f"port {port} is held by another process (pid {', '.join(str(pid) for pid in others)}) "
+            f"— left alone")
+    return stopped + mine
 
 
 class Daemon:
@@ -296,7 +303,7 @@ class Daemon:
                     raise DaemonError(method, f"no answer within {timeout:g}s")
                 try:
                     self._sock.settimeout(remaining)
-                    message = json.loads(self._readline())
+                    message = json.loads(self._readline(deadline))
                 except socket.timeout:
                     raise DaemonError(method, f"no answer within {timeout:g}s") from None
                 except OSError as error:
@@ -360,9 +367,13 @@ class Daemon:
             if "id" in message:
                 self._replies[message["id"]] = message
 
-    def _readline(self) -> str:
+    def _readline(self, deadline: float | None = None) -> str:
         assert self._sock is not None
         while b"\n" not in self._buffer:
+            if deadline is not None:
+                # The socket timeout is per `recv`: leaving it at the call's total lets a daemon that
+                # dribbles one byte at a time hold the client lock forever.
+                self._sock.settimeout(max(0.001, deadline - time.monotonic()))
             chunk = self._sock.recv(65536)
             if not chunk:
                 raise OSError("end of file")

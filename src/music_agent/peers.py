@@ -116,6 +116,8 @@ class Ledger:
             return {}
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("the ledger is not a JSON object")
             peers = data.get("peers", {})
         except (OSError, ValueError) as error:
             raise Unreadable(f"cannot read the peer ledger at {self.path} ({error})") from error

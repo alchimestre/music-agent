@@ -538,7 +538,8 @@ def _prepare(
         # name and the version are then the evidence there is, and a bare request takes only an original —
         # so the collection's copy is the same track and fetching it again duplicates the library.
         for row in library.rows_for(record.artist, record.title):
-            if mix_matches(record.mix, row.mix) and (record.duration_s is None or not row.lossless):
+            if mix_matches(record.mix, row.mix) and (
+                    record.duration_s is None or row.seconds is None):
                 held = row
                 break
     if held is None:
@@ -792,6 +793,11 @@ def run(
             watch.timed_out()
             say(f"[{record.idx}] {record.label}: the server refused — {error}")
             job.append_event("refused", idx=record.idx, error=str(error))
+        except Exception as error:          # noqa: BLE001 — one malformed reply must not end the pass
+            record.status = state.RETRY_LATER
+            outcome = "failed"
+            say(f"[{record.idx}] {record.label}: {type(error).__name__} — {error}")
+            job.append_event("failed", idx=record.idx, error=f"{type(error).__name__}: {error}")
         getattr(summary, outcome).append(record.idx)
         bar.settle(record.idx, record.label, outcome)
         job.write_records(records)          # a crash costs the tracks in flight and nothing else

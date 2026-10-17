@@ -154,6 +154,20 @@ DEFAULTS = Config(
 )
 
 
+def _command(value) -> tuple[str, ...]:
+    """A TOML author writes `command = "soulseek-rs daemon"`; `tuple()` of that is one letter per argv."""
+    if isinstance(value, str):
+        return tuple(value.split())
+    return tuple(value)
+
+
+def _names(value) -> tuple[str, ...]:
+    """A single target written as a bare string stays one name, never one character per name."""
+    if isinstance(value, str):
+        return (value,)
+    return tuple(value)
+
+
 def load(path: Path | None = None) -> Config:
     """Read the config, falling back to the defaults for anything it does not set.
 
@@ -197,10 +211,10 @@ def load(path: Path | None = None) -> Config:
                                                 DEFAULTS.musicbrainz_contact_env),
         acoustid_key_env=credentials.get("acoustid_key", DEFAULTS.acoustid_key_env),
         discogs_token_env=credentials.get("discogs_token", DEFAULTS.discogs_token_env),
-        soulseek_command=tuple(soulseek.get("command", DEFAULTS.soulseek_command)),
+        soulseek_command=_command(soulseek.get("command", DEFAULTS.soulseek_command)),
         soulseek_state_dir=str(soulseek.get("state_dir", DEFAULTS.soulseek_state_dir)),
-        traktor_command=tuple(traktor.get("command", DEFAULTS.traktor_command)),
-        export_targets=tuple(export.get("targets", DEFAULTS.export_targets)),
+        traktor_command=_command(traktor.get("command", DEFAULTS.traktor_command)),
+        export_targets=_names(export.get("targets", DEFAULTS.export_targets)),
         **_listening_ports(),
         max_downloads=int(soulseek.get("max_downloads", DEFAULTS.max_downloads)),
         workers=int(soulseek.get("workers", DEFAULTS.workers)),

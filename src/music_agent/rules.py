@@ -177,7 +177,8 @@ def _judged_by_name(candidate: Candidate, request: Request) -> Verdict | None:
     if not artists_appear(request.artist, candidate.path):
         return Verdict(candidate, Label.REJECTED, "a different artist")
 
-    if not appears_in(request.title, parsed.title):
+    if not appears_in(request.title, parsed.title) and not (
+            parsed.raw_title and appears_in(request.title, parsed.raw_title)):
         return Verdict(candidate, Label.REJECTED, "a different track")
 
     # Below the floor a lossy file is ruled out rather than offered: 2026-10-12, these went to review

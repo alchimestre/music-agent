@@ -136,3 +136,22 @@ def test_the_listening_ports_come_from_the_environment_rather_than_the_config_fi
 
     assert config.soulseek_listen_port == 41000
     assert DEFAULTS.soulseek_listen_port == 20000, "the port this machine forwards"
+
+
+def test_a_command_written_as_one_string_becomes_argv(tmp_path):
+    """`tuple()` of the string gave one character per argument, and `Popen` looked for `s`."""
+    config = load(write(tmp_path, """
+[soulseek]
+command = "soulseek-rs daemon"
+"""))
+
+    assert config.soulseek_command == ("soulseek-rs", "daemon")
+
+
+def test_one_export_target_written_as_a_string_stays_one_name(tmp_path):
+    config = load(write(tmp_path, """
+[export]
+targets = "rekordbox"
+"""))
+
+    assert config.export_targets == ("rekordbox",)

@@ -252,6 +252,7 @@ def merge(config: Config, summary: Summary, *, db, remove_files: bool = True, lo
 
     session = db.session
     rest = followers(db)
+    doomed: list[Path] = []
     for merge in summary.merges:
         keep = merge.keep.content_id
         for drop in merge.drops:
@@ -265,12 +266,17 @@ def merge(config: Config, summary: Summary, *, db, remove_files: bool = True, lo
                 session.execute(text(f"delete from {table} where ContentID = :i"), {"i": drop.content_id})
             session.execute(text("delete from djmdContent where ID = :i"), {"i": drop.content_id})
             log(f"merged {drop.path.name} into {merge.keep.path.name}")
-            if remove_files and path_key(drop.path) != path_key(merge.keep.path) and drop.path.is_file():
-                # Nothing keeps a second copy: the row that named it is gone, so the file is debris.
-                drop.path.unlink()
-                summary.files.append(drop.path)
-                log(f"      {drop.path.name} removed from the lanes")
+            if remove_files and path_key(drop.path) != path_key(merge.keep.path):
+                doomed.append(drop.path)
     db.session.commit()
+    # The file goes only after the commit: a failed commit must not leave the collection pointing at a
+    # path this removed, the way `importing.run` orders it.
+    for path in doomed:
+        if not path.is_file():
+            continue
+        path.unlink()
+        summary.files.append(path)
+        log(f"      {path.name} removed from the lanes")
     return summary
 
 

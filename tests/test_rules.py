@@ -500,3 +500,12 @@ def test_a_peer_that_reports_no_speed_is_ranked_last_among_equals():
     fast = candidate("Kiasmos - Blurred.aiff", bitrate=1411, speed=800_000)
 
     assert sorted([silent, fast], key=rank) == [fast, silent]
+
+
+def test_a_track_whose_title_starts_with_a_number_is_not_a_different_track():
+    """The filename is `99 Luftballons`, parsed as title `Luftballons`: rejecting it made the track
+    unacquirable, so the unstripped reading is checked too."""
+    verdict = classify(candidate("Nena - 99 Luftballons.mp3", duration=230),
+                       Request(artist="Nena", title="99 Luftballons"))
+
+    assert verdict.label is not Label.REJECTED
