@@ -621,6 +621,32 @@ def test_a_track_the_library_already_holds_is_not_even_searched(tmp_path):
     assert not job.finished(), "the import finishes a run, not this stage"
 
 
+def test_a_track_with_no_reference_length_is_held_by_its_name(tmp_path):
+    """MusicBrainz has nothing for a white label, so there is no length to compare — that is not a mismatch.
+    The name and the version are then the evidence there is, and a bare request takes only an original, so
+    the collection's copy is the same track and fetching it again would duplicate the library."""
+    config, job, daemon, calls = setup(tmp_path, results=GOOD)
+    shelf = library.Library([library.Held("Kiasmos", "Blurred", 449, path="/Library/Kiasmos.aiff")], [])
+
+    summary, quiet = pass_once(config, job, daemon, Nothing(), calls, shelf=shelf)
+
+    assert summary.already_held == [1], quiet.lines
+    assert job.records()[0].status == state.FOUND_IN_LIBRARY
+    assert tools_called(calls) == [], "no reference, no search, and no second copy"
+
+
+def test_a_named_version_held_is_not_the_original_asked_for(tmp_path):
+    """A bare request means the original. The collection holding the extended mix is not the track asked
+    for, and with no length to say so the version is what says it."""
+    config, job, daemon, calls = setup(tmp_path, results=GOOD)
+    shelf = library.Library([library.Held("Kiasmos", "Blurred", 449, mix="Extended Mix")], [])
+
+    summary, quiet = pass_once(config, job, daemon, Nothing(), calls, shelf=shelf)
+
+    assert summary.already_held == []
+    assert "search" in tools_called(calls)
+
+
 def test_a_track_the_library_holds_at_another_length_is_still_fetched(tmp_path):
     config, job, daemon, calls = setup(tmp_path, results=GOOD)
     shelf = library.Library([library.Held("Kiasmos", "Blurred", 520)], [])
