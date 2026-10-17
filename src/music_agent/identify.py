@@ -8,6 +8,8 @@ filename is the last resort: either way the track is imported and queued for rev
 
 from __future__ import annotations
 
+import socket
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
@@ -22,6 +24,22 @@ SCORE_FLOOR = 0.9
 
 # How many recordings to ask MusicBrainz's text search for.
 SEARCH_LIMIT = 10
+
+# `urllib` opens sockets with no timeout by default, and musicbrainzngs never sets one, so a server that
+# accepts the connection and then says nothing holds the whole pass — no error, no line, nothing. The
+# process stage was silent for half an hour on 2026-10-17 for exactly that reason.
+NETWORK_TIMEOUT = 25.0
+
+
+@contextmanager
+def _bounded():
+    """Every socket opened inside gets a timeout, which is the one lever both libraries expose."""
+    previous = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(NETWORK_TIMEOUT)
+    try:
+        yield
+    finally:
+        socket.setdefaulttimeout(previous)
 
 
 class IdentifyError(RuntimeError):
@@ -180,6 +198,13 @@ def identify(
     log=lambda *_: None,
 ) -> Identified:
     """What the file at `path` is: its sound first, a text search second, its filename last."""
+    with _bounded():
+        return _identify(path, request, hearing=hearing, matches=matches, brainz=brainz,
+                         discogs=discogs, log=log)
+
+
+def _identify(path: Path, request: Request, *, hearing: Hearing, matches: Matches, brainz: Brainz,
+              discogs: Discogs | None, log) -> Identified:
     seconds: int | None = None
     try:
         fingerprint, seconds = hearing.listen(path)
@@ -240,7 +265,8 @@ class Fingerprints:
         import json
         import subprocess
 
-        result = subprocess.run(["fpcalc", "-json", str(path)], capture_output=True, text=True)
+        result = subprocess.run(["fpcalc", "-json", str(path)], capture_output=True, text=True,
+                                timeout=300)
         if result.returncode != 0:
             detail = (result.stderr or "").strip().splitlines()
             raise IdentifyError(detail[-1] if detail else "fpcalc failed")
@@ -261,7 +287,8 @@ class AcoustIDMatches:
     def match(self, fingerprint: str, seconds: int) -> list[Match]:
         import acoustid
 
-        response = acoustid.lookup(self._key, fingerprint, seconds, meta="recordings releasegroups")
+        response = acoustid.lookup(self._key, fingerprint, seconds, meta="recordings releasegroups",
+                                   timeout=NETWORK_TIMEOUT)
         return [_match_of(result) for result in response.get("results", [])]
 
 
