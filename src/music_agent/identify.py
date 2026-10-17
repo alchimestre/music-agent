@@ -29,11 +29,18 @@ SEARCH_LIMIT = 10
 # accepts the connection and then says nothing holds the whole pass — no error, no line, nothing. The
 # process stage was silent for half an hour on 2026-10-17 for exactly that reason.
 NETWORK_TIMEOUT = 25.0
+# A fingerprint of a whole set is seconds of work; five minutes is a stuck process, not a slow file.
+FPCALC_TIMEOUT = 300.0
 
 
 @contextmanager
 def _bounded():
-    """Every socket opened inside gets a timeout, which is the one lever both libraries expose."""
+    """Every socket opened inside gets a timeout, which is the one lever both libraries expose.
+
+    The setting is the process's, not this call's: the process stage identifies one track at a time, so the
+    window belongs to one identification. Running these in threads would have each one restore a value the
+    others are still using.
+    """
     previous = socket.getdefaulttimeout()
     socket.setdefaulttimeout(NETWORK_TIMEOUT)
     try:
@@ -265,8 +272,11 @@ class Fingerprints:
         import json
         import subprocess
 
-        result = subprocess.run(["fpcalc", "-json", str(path)], capture_output=True, text=True,
-                                timeout=300)
+        try:
+            result = subprocess.run(["fpcalc", "-json", str(path)], capture_output=True, text=True,
+                                    timeout=FPCALC_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            raise IdentifyError(f"fpcalc did not finish in {FPCALC_TIMEOUT:g}s") from None
         if result.returncode != 0:
             detail = (result.stderr or "").strip().splitlines()
             raise IdentifyError(detail[-1] if detail else "fpcalc failed")
