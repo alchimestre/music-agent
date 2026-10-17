@@ -621,6 +621,23 @@ def test_a_track_the_library_already_holds_is_not_even_searched(tmp_path):
     assert not job.finished(), "the import finishes a run, not this stage"
 
 
+def test_a_track_already_in_the_collection_is_not_resolved_again(tmp_path):
+    """The collection does not change under a pass, so the second pass has the first pass's answer. Asking
+    again costs a MusicBrainz reference per held track per pass, which on a 305-track run was five minutes of
+    the pass spent re-confirming what it already knew."""
+    config, job, daemon, calls = setup(tmp_path, results=GOOD)
+    shelf = library.Library([library.Held("Kiasmos", "Blurred", 449, path="/Library/Kiasmos.aiff")], [])
+    lookup = Reference()
+
+    first, _ = pass_once(config, job, daemon, lookup, calls, shelf=shelf)
+    asked = len(lookup.asked)
+    second, _ = pass_once(config, job, daemon, lookup, calls, shelf=shelf)
+
+    assert first.already_held == second.already_held == [1]
+    assert len(lookup.asked) == asked, "the second pass asks the reference nothing"
+    assert tools_called(calls).count("search") == 0
+
+
 def test_a_track_with_no_reference_length_is_held_by_its_name(tmp_path):
     """MusicBrainz has nothing for a white label, so there is no length to compare — that is not a mismatch.
     The name and the version are then the evidence there is, and a bare request takes only an original, so

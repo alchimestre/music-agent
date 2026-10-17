@@ -593,6 +593,13 @@ def one(
         if record.status in {state.DOWNLOADED, state.NORMALIZED, state.TAGGED, state.IMPORTED}:
             return "already_downloaded"
 
+    if record.status == state.FOUND_IN_LIBRARY:
+        # The collection check already answered this track, and the collection does not change under a pass.
+        # Asking again costs a MusicBrainz reference per track per pass: 130 of the 305 tracks in a run on
+        # 2026-10-17 were already held, and every pass spent five minutes re-resolving them to reach the same
+        # answer before it searched anything.
+        return "already_held"
+
     outcome, upgrade = _prepare(job, record, lookup, library, log)
     if outcome is not None:
         return outcome
