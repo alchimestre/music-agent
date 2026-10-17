@@ -132,6 +132,7 @@ class Daemon:
         self._log = log
         self._sock: socket.socket | None = None
         self._buffer = b""
+        self._replies: dict[int, dict[str, Any]] = {}
         # Re-entrant: `call` closes the socket on a read error while holding it, and `close` takes it again.
         self._lock = threading.RLock()         # one request in flight, so replies cannot cross
         self._searches: dict[str, threading.Lock] = {}
@@ -177,9 +178,14 @@ class Daemon:
         self._log(f"started the Soulseek daemon — its log is {log}")
 
     def stop(self) -> None:
-        """Ask the daemon to shut down, then let go of the socket."""
+        """Ask the daemon to shut down, then let go of the socket.
+
+        Connected first, because the stall path calls this on a client that never spoke: without the
+        connection the call only raised against a closed socket and the stuck daemon kept its session.
+        """
         try:
-            self.call("daemon.stop", {})
+            if self._sock is not None or self._open():
+                self.call("daemon.stop", {})
         except (DaemonError, OSError):
             pass
         finally:
@@ -193,6 +199,7 @@ class Daemon:
                 finally:
                     self._sock = None
                     self._buffer = b""
+                    self._replies.clear()
 
     def __enter__(self) -> "Daemon":
         self.ensure()
@@ -239,8 +246,14 @@ class Daemon:
 
     def call(self, method: str, params: dict | None = None,
              timeout: float = CALL_TIMEOUT) -> dict[str, Any]:
-        """One call, its answer, and any notification the daemon pushed meanwhile."""
+        """One call, its answer, and any notification the daemon pushed meanwhile.
+
+        A socket that went away is reconnected before the call rather than raised on: the daemon drops a
+        client that stops reading, and one dropped call is no reason for the rest of the pass to fail.
+        """
         with self._lock:
+            if self._sock is None:
+                self.ensure()
             if self._sock is None:
                 raise DaemonError(method, "the daemon's socket is closed")
             message_id = next(self._ids)
@@ -253,6 +266,9 @@ class Daemon:
                 raise DaemonError(method, f"the socket closed on the write: {error}") from error
             deadline = time.monotonic() + timeout
             while True:
+                stashed = self._replies.pop(message_id, None)
+                if stashed is not None:
+                    return self._answer(stashed, method)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise DaemonError(method, f"no answer within {timeout:g}s")
@@ -267,12 +283,60 @@ class Daemon:
                 except json.JSONDecodeError:
                     continue                     # a line that is not ours is not an answer either way
                 if message.get("id") != message_id:
-                    continue                     # an event, or an answer to a call already given up on
-                error = message.get("error")
-                if error is not None:
-                    data = error.get("data") or {}
-                    raise DaemonError(method, str(error.get("message") or "refused"), data.get("exit"))
-                return message.get("result") or {}
+                    # An event, or the answer to a call another thread is waiting on: kept, not dropped.
+                    if "id" in message:
+                        self._replies[message["id"]] = message
+                    continue
+                return self._answer(message, method)
+
+    @staticmethod
+    def _answer(message: dict[str, Any], method: str) -> dict[str, Any]:
+        error = message.get("error")
+        if error is not None:
+            data = error.get("data") or {}
+            raise DaemonError(method, str(error.get("message") or "refused"), data.get("exit"))
+        return message.get("result") or {}
+
+    def settle(self, seconds: float) -> None:
+        """Read and drop what the daemon pushes while the client has nothing to ask.
+
+        The daemon sends an event per upload and per transfer change, to every client. A share being leeched
+        produces hundreds a second, and a client that only reads while one of its own calls is in flight
+        leaves the socket buffer full: the daemon blocks on its write and then drops the connection, and
+        every later call fails. Idle time is spent here instead of in `sleep`.
+        """
+        deadline = time.monotonic() + seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            with self._lock:
+                if self._sock is None:
+                    return
+                try:
+                    self._sock.settimeout(min(remaining, 0.25))
+                    chunk = self._sock.recv(65536)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    self.close()
+                    return
+                if not chunk:
+                    self.close()
+                    return
+                self._buffer += chunk
+                self._take_replies()
+
+    def _take_replies(self) -> None:
+        """Keep every complete answer, drop the events. Called with the lock held."""
+        while b"\n" in self._buffer:
+            line, _, self._buffer = self._buffer.partition(b"\n")
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if "id" in message:
+                self._replies[message["id"]] = message
 
     def _readline(self) -> str:
         assert self._sock is not None
@@ -323,7 +387,7 @@ class Daemon:
             self._forget(query)
             try:
                 self.call("search.start", {"query": query})
-                time.sleep(timeout)
+                self.settle(timeout)
                 payload = self.call("search.results", {"query": query})
             finally:
                 self._forget(query)
