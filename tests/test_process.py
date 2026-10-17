@@ -48,13 +48,19 @@ class FakeRunner:
     this does too. A failure leaves the input where it is, which is how the real one behaves as well.
     """
 
-    def __init__(self, *, fails_conversion: bool = False, fails_normalize: bool = False) -> None:
+    def __init__(self, *, fails_conversion: bool = False, fails_normalize: bool = False,
+                 unreadable: bool = False) -> None:
         self.commands: list[list[str]] = []
         self.fails_conversion = fails_conversion
         self.fails_normalize = fails_normalize
+        self.unreadable = unreadable
 
     def __call__(self, argv: list[str]) -> subprocess.CompletedProcess:
         self.commands.append(argv)
+        if Path(argv[0]).name == "ffprobe":
+            if self.unreadable:
+                return subprocess.CompletedProcess(argv, 1, "", "Invalid data found")
+            return subprocess.CompletedProcess(argv, 0, "flac\n", "")
         if any("fake-convert" in part for part in argv):
             if self.fails_conversion:
                 return subprocess.CompletedProcess(argv, 1, "", "ffmpeg: no such codec")
@@ -239,6 +245,26 @@ def test_a_failed_conversion_puts_the_file_back(tmp_path):
     assert source.is_file(), "the download must survive a failed conversion"
     assert "conversion failed" in job.records()[0].notes
     assert not list(tmp_path.glob("music-agent-convert-*")), "the pen is cleaned up"
+
+
+def test_a_corrupt_download_is_removed_and_the_record_released(tmp_path):
+    """A peer can deliver bytes that are not audio of the advertised size. The converter would reject it, but
+    a failed conversion keeps its download — so the file stayed in staging with a path on the record and no
+    stage that would ever look at it again."""
+    config = make_config(tmp_path)
+    source = Path(staged(tmp_path, "Kiasmos - Blurred.flac"))
+    record = state.Record(idx=1, artist="Kiasmos", title="Blurred", local_path=str(source),
+                          status=state.DOWNLOADED, format="flac")
+    job = job_with(config, [record])
+
+    summary = process.run(config, job, tools=process.Tools(
+        runner=FakeRunner(unreadable=True)), log=lambda *_: None)
+
+    assert summary.failed == [1]
+    assert not source.exists(), "a file nothing can decode is not kept"
+    assert job.records()[0].local_path == ""
+    assert job.records()[0].status == state.RETRY_LATER
+    assert "ffmpeg can read" in job.records()[0].notes
 
 
 def test_only_downloaded_records_are_processed(tmp_path):

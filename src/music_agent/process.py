@@ -25,6 +25,10 @@ class ProcessError(RuntimeError):
     """A file could not be taken from staging to the collection."""
 
 
+class Unreadable(ProcessError):
+    """The file is not audio this machine can decode — a download the peer delivered damaged."""
+
+
 class NameTaken(ProcessError):
     """The lane already holds a file of that name, so this copy cannot be placed there."""
 
@@ -197,11 +201,24 @@ def discard(record: state.Record) -> Path:
     return source
 
 
+def decodable(source: Path, *, run: Runner) -> bool:
+    """Whether ffmpeg can open the file at all, before anything is spent converting it."""
+    result = run(["ffprobe", "-v", "error", "-show_entries", "format=format_name",
+                  "-of", "csv=p=0", str(source)])
+    return result.returncode == 0 and bool((result.stdout or "").strip())
+
+
 def place(config: Config, record: state.Record, *, run: Runner, log) -> Path:
     """Get one file into the lane it belongs in, under the name the collection uses."""
     source = Path(record.local_path)
     if not source.is_file():
         raise ProcessError(f"the staged file is gone: {source}")
+    if not decodable(source, run=run):
+        # A peer that delivers something the decoder cannot open has delivered nothing. Caught before the
+        # converter so the failure is the file's, not the tool's: a failed conversion keeps its download
+        # (the converter deletes its input), which left a corrupt .flac in staging with a record pointing at
+        # it and no pass that would ever look again.
+        raise Unreadable(f"the file is not audio ffmpeg can read: {source.name}")
 
     suffix = source.suffix.lower()
     lossless = suffix.lstrip(".") in LOSSLESS_EXTENSIONS
@@ -447,6 +464,18 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
             log(f"[{record.idx}] {record.label}: the collection already holds that name — "
                 f"{gone.name} removed")
             job.write_records(records)
+            continue
+        except Unreadable as error:
+            # Nothing can use this copy, so it goes: a file in staging reads as work in progress, and the
+            # record would otherwise carry a path to a file no stage will take. Clearing the path lets a
+            # later pass ask the network again.
+            gone = Path(record.local_path).unlink(missing_ok=True) if record.local_path else None
+            record.local_path = ""
+            record.status = state.RETRY_LATER
+            record.notes = str(error)
+            summary.failed.append(record.idx)
+            job.append_event("placement_failed", idx=record.idx, error=str(error), removed=gone is None)
+            log(f"[{record.idx}] {record.label}: {error}")
             continue
         except ProcessError as error:
             record.status = state.RETRY_LATER
