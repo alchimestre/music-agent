@@ -9,6 +9,7 @@ filename is the last resort: either way the track is imported and queued for rev
 from __future__ import annotations
 
 import socket
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -357,6 +358,10 @@ def _match_of(result: dict) -> Match:
 class MusicBrainz:
     """MusicBrainz, serialized at the one request a second their policy asks for."""
 
+    # The limit is the account's, and musicbrainzngs' own sleep is per call: identification runs several
+    # files at a time, so the sleep has to be behind a lock shared by every client in this process.
+    _lock = threading.Lock()
+
     def __init__(self, contact: str) -> None:
         import musicbrainzngs
 
@@ -364,6 +369,10 @@ class MusicBrainz:
         self._mb.set_useragent("music-agent", "0.1", contact)
         self._mb.set_rate_limit(1.0, 1)
         self._contact = contact
+
+    def _ask(self, call, *args, **kwargs):
+        with self._lock:
+            return call(*args, **kwargs)
 
     @classmethod
     def from_environment(cls, config: Config) -> MusicBrainz:
@@ -375,7 +384,7 @@ class MusicBrainz:
         `release-groups` is not a valid include on a recording, which is why the group is fetched by a
         separate release call.
         """
-        got = self._mb.get_recording_by_id(recording_id, includes=["artists", "releases"])
+        got = self._ask(self._mb.get_recording_by_id, recording_id, includes=["artists", "releases"])
         recording = got.get("recording") or {}
         candidate = self._as_candidate(recording)
         if candidate is None:
@@ -385,7 +394,7 @@ class MusicBrainz:
 
     def search(self, request: Request) -> list[Match]:
         """The same query the reference is resolved with, scored by MusicBrainz."""
-        found = self._mb.search_recordings(query=reference.query_for(request), limit=SEARCH_LIMIT)
+        found = self._ask(self._mb.search_recordings, query=reference.query_for(request), limit=SEARCH_LIMIT)
         listed = found.get("recording-list", [])
         recordings = tuple(candidate for candidate in
                            (self._as_candidate(recording) for recording in listed)
@@ -396,8 +405,8 @@ class MusicBrainz:
         return [Match(score=top / 100.0, recordings=recordings)]
 
     def release(self, release_id: str) -> Release:
-        got = self._mb.get_release_by_id(
-            release_id, includes=["labels", "release-groups", "artist-credits"])
+        got = self._ask(self._mb.get_release_by_id,
+                        release_id, includes=["labels", "release-groups", "artist-credits"])
         return self._as_release(got.get("release") or {})
 
     def genres(self, release_group_id: str) -> tuple[str, ...]:
@@ -411,8 +420,9 @@ class MusicBrainz:
             # Their policy wants the contact in the User-Agent.
             headers={"User-Agent": f"music-agent/0.1 ( {self._contact} )"},
         )
-        with urllib.request.urlopen(request, timeout=25) as handle:
-            body = json.load(handle)
+        with self._lock:
+            with urllib.request.urlopen(request, timeout=25) as handle:
+                body = json.load(handle)
         return tuple(genre["name"] for genre in body.get("genres", []) if genre.get("name"))
 
     def _as_candidate(self, recording: dict) -> Candidate | None:

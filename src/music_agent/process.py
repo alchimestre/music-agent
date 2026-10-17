@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Protocol
@@ -27,6 +28,11 @@ class ProcessError(RuntimeError):
 
 class Unreadable(ProcessError):
     """The file is not audio this machine can decode — a download the peer delivered damaged."""
+
+
+# Identification is a fingerprint, an AcoustID lookup and a MusicBrainz lookup per file: network waits, not
+# CPU. MusicBrainz keeps its one request a second behind its own lock, so more here only queues there.
+IDENTIFIERS = 4
 
 
 class NameTaken(ProcessError):
@@ -438,12 +444,18 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
     placed: list[state.Record] = []
     found: dict[int, identify.Identified] = {}
 
-    for record in records:
-        if record.status != state.DOWNLOADED:
-            continue
-        try:
+    downloads = [record for record in records if record.status == state.DOWNLOADED]
+    if downloads:
+        def identified(record: state.Record) -> identify.Identified:
             log(f"[{record.idx}] {record.label}: identifying")
-            found[record.idx] = identify_one(record, tools, log)
+            return identify_one(record, tools, log)
+
+        with ThreadPoolExecutor(max_workers=min(IDENTIFIERS, len(downloads))) as pool:
+            answers = pool.map(identified, downloads)
+            found = dict(zip((record.idx for record in downloads), answers))
+
+    for record in downloads:
+        try:
             choice = apply_genre(record, found[record.idx], tools, log)
             if not choice.found and choice.considered:
                 # Counted so that a name fitting nothing on enough tracks can be proposed as a genre rather
