@@ -287,6 +287,9 @@ class Watch:
 
     daemon: "slsk.Daemon | None" = None
     stuck_after: int = STUCK_AFTER
+    # Timeouts a daemon that reports itself reconnecting may burn before they count. Each one costs a full
+    # search timeout, so this is minutes of grace, not attempts.
+    RECONNECTS: int = 8
     dead: threading.Event = field(default_factory=threading.Event)
 
     def __post_init__(self) -> None:
@@ -294,6 +297,7 @@ class Watch:
         self._fails = 0
         self._hung = 0
         self._lost = False
+        self._reconnects = 0
 
     @property
     def session_lost(self) -> bool:
@@ -320,10 +324,27 @@ class Watch:
             return
         with self._lock:
             self._fails = 0
+            self._reconnects = 0
 
     def timed_out(self) -> None:
-        """One search that never answered."""
+        """One search that never answered.
+
+        A daemon that reports its server link down is reconnecting on its own, and a search that cannot be
+        forwarded times out exactly like a dead network does. Those are not counted until the daemon has had
+        `RECONNECTS` timeouts to come back, because four in a row were ending passes while the account was
+        still logged in.
+        """
+        reconnecting = False
+        if self.daemon is not None:
+            try:
+                reconnecting = self.daemon.disconnected()
+            except DaemonError:
+                reconnecting = False      # an unanswering daemon is not evidence either way
         with self._lock:
+            if reconnecting:
+                self._reconnects += 1
+                if self._reconnects <= self.RECONNECTS:
+                    return
             self._fails += 1
             if self.stuck_after and self._fails >= self.stuck_after and not self.dead.is_set():
                 self._hung = self._fails

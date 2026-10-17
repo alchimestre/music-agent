@@ -1031,3 +1031,30 @@ def test_the_musicbrainz_lookup_is_asked_one_at_a_time():
         thread.join()
 
     assert most == 1
+
+
+def test_a_reconnecting_daemon_is_not_a_dead_network():
+    """The daemon reports its server link down and logs back in on its own. A search that cannot be forwarded
+    times out exactly like a dead network, and four of those were ending passes while the account was fine."""
+    daemon = Direct(results=[])
+    daemon.session_loss = "disconnected"
+    watch = acquire.Watch(daemon=daemon, stuck_after=4)
+
+    for _ in range(watch.RECONNECTS + 3):
+        watch.timed_out()
+
+    assert not watch.dead.is_set()
+    assert watch.hung == 0
+
+
+def test_a_daemon_that_stays_disconnected_still_stops_the_pass():
+    """Grace is bounded: a daemon that never comes back is a dead pass, not an open one."""
+    daemon = Direct(results=[])
+    daemon.session_loss = "disconnected"
+    watch = acquire.Watch(daemon=daemon, stuck_after=4)
+
+    for _ in range(watch.RECONNECTS + 4):
+        watch.timed_out()
+
+    assert watch.dead.is_set()
+    assert watch.hung >= 4
