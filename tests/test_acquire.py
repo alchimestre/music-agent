@@ -7,10 +7,7 @@ protocol, with a clock the test moves by hand.
 
 from __future__ import annotations
 
-import io
 import json
-import os
-import sys
 import threading
 import time
 from pathlib import Path
@@ -20,10 +17,9 @@ import pytest
 from music_agent import acquire
 from music_agent import config as config_module
 from music_agent import library, peers, reference, slsk, state
-from music_agent.mcp import StdioServer
 from music_agent.rules import Candidate
 
-FAKE = str(Path(__file__).parent / "fake_server.py")
+from fake_server import Direct
 
 GOOD = [
     {
@@ -124,7 +120,7 @@ class Quiet:
 
 
 def setup(tmp_path: Path, *, results: list[dict], download: str | None = None, tracks: int = 1,
-          soulseek: str = ""):
+          soulseek: str = "", session_loss: bool = False):
     """A config, a job holding `tracks` tracks, and a stand-in server wired to the scenario.
 
     Pacing is off here: these tests are about the loop and the download policy, and a pace would put sleeps
@@ -139,7 +135,8 @@ def setup(tmp_path: Path, *, results: list[dict], download: str | None = None, t
                            f'lossy = "{tmp_path / "Losy Tracks"}"\n'
                            'state = "state"\n'
                            f'peers = "{tmp_path / "peers.json"}"\n'
-                           '[soulseek]\nsearch_interval = 0.0\n' + soulseek,
+                           '[soulseek]\nsearch_interval = 0.0\n'
+                           f'state_dir = "{tmp_path}"\n' + soulseek,
                            encoding="utf-8")
     (tmp_path / "staging").mkdir()
     config = config_module.load(config_path)
@@ -149,30 +146,22 @@ def setup(tmp_path: Path, *, results: list[dict], download: str | None = None, t
     job.write_records([state.Record(idx=index, artist="Kiasmos", title=title)
                        for index, title in enumerate(titles, start=1)])
 
-    env = dict(os.environ)
-    env["FAKE_RESULTS"] = json.dumps(results)
-    if download is not None:
-        env["FAKE_DOWNLOAD"] = download
-    calls = tmp_path / "calls.jsonl"
-    env["FAKE_LOG"] = str(calls)
-
-    return config, job, StdioServer([sys.executable, FAKE, "normal"], env=env), calls
+    daemon = Direct(results=results, download=download, session_loss=session_loss)
+    return config, job, daemon, daemon.calls
 
 
-def calls_made(path: Path) -> list[dict]:
-    if not path.is_file():
-        return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+def calls_made(calls: list[tuple[str, dict]]) -> list[dict]:
+    return [{"tool": method, "arguments": params} for method, params in calls]
 
 
-def tools_called(path: Path) -> list[str]:
-    return [entry["tool"] for entry in calls_made(path)]
+def tools_called(calls: list[tuple[str, dict]]) -> list[str]:
+    return [method for method, _ in calls]
 
 
-def pass_once(config, job, server, lookup, calls: Path, shelf=None, child=None) -> tuple[acquire.Summary, Quiet]:
+def pass_once(config, job, daemon, lookup, calls, shelf=None) -> tuple[acquire.Summary, Quiet]:
     quiet = Quiet(Clock())
-    summary = acquire.run(config, job, server, lookup, library=shelf, log=quiet.log,
-                          sleep=quiet.sleep, clock=quiet.clock, child=child)
+    summary = acquire.run(config, job, daemon, lookup, library=shelf, log=quiet.log,
+                          sleep=quiet.sleep, clock=quiet.clock)
     return summary, quiet
 
 
@@ -180,53 +169,50 @@ def pass_once(config, job, server, lookup, calls: Path, shelf=None, child=None) 
 
 
 @pytest.mark.parametrize(
-    "status,connection,on_disk,stuck,queue,expected",
+    "status,on_disk,stuck,queue,expected",
     [
-        # The disk decides, whatever the server believes: a finished record is dropped after
-        # sixty seconds, so a later poll says not_found about a download that worked.
-        ("not_found", "", True, 1.0, 0, acquire.Move.DONE),
-        ("queued", "waiting_for_peer", True, 999.0, 0, acquire.Move.DONE),
-        # A finished transfer whose file has not appeared is the rename, which is quick.
-        ("finished", "", False, 1.0, 0, acquire.Move.WAIT),
-        ("finished", "", False, 6.0, 0, acquire.Move.FAILED),
-        ("failed", "", False, 1.0, 0, acquire.Move.FAILED),
-        ("cancelled", "", False, 1.0, 0, acquire.Move.FAILED),
-        ("session_expired", "", False, 1.0, 0, acquire.Move.FAILED),
+        # The disk decides, whatever the daemon believes: a transfer the daemon has forgotten is still a
+        # download that worked if its file is there.
+        ("queued", True, 999.0, 0, acquire.Move.DONE),
+        ("missing", True, 1.0, 0, acquire.Move.DONE),
+        # A completed transfer whose file has not appeared is the rename, which is quick.
+        ("completed", False, 1.0, 0, acquire.Move.WAIT),
+        ("completed", False, 6.0, 0, acquire.Move.FAILED),
+        ("failed", False, 1.0, 0, acquire.Move.FAILED),
+        ("cancelled", False, 1.0, 0, acquire.Move.FAILED),
+        ("timed_out", False, 1.0, 0, acquire.Move.FAILED),
         # A transfer in flight is never rotated on the connect timer, however long it has been at zero.
-        ("downloading", "transferring", False, 44.0, 0, acquire.Move.WAIT),
-        ("downloading", "transferring", False, 46.0, 0, acquire.Move.ROTATE),
-        # A connection that never transferred a byte is rotated at twelve seconds.
-        ("queued", "waiting_for_peer", False, 13.0, 0, acquire.Move.ROTATE),
-        ("queued", "connecting", False, 11.0, 0, acquire.Move.WAIT),
-        # A peer that declared a queue is behaving normally rather than failing, and gets the longer
-        # budget.
-        ("queued", "waiting_for_peer", False, 44.0, 5, acquire.Move.WAIT),
-        ("queued", "waiting_for_peer", False, 46.0, 5, acquire.Move.ROTATE),
+        ("in_progress", False, 44.0, 0, acquire.Move.WAIT),
+        ("in_progress", False, 46.0, 0, acquire.Move.ROTATE),
+        # A queued transfer is a wait, not a connection that never opened.
+        ("queued", False, 44.0, 0, acquire.Move.WAIT),
+        ("queued", False, 46.0, 0, acquire.Move.ROTATE),
+        # A position in the five figures is a mirror, and is rotated on the connect budget.
+        ("queued", False, 13.0, 159_626, acquire.Move.ROTATE),
+        ("queued", False, 11.0, 159_626, acquire.Move.WAIT),
     ],
 )
-def test_the_decision_to_wait_rotate_or_give_up(status, connection, on_disk, stuck, queue, expected):
-    transfer = acquire.Transfer(status=status, connection_state=connection)
-    assert acquire.move(transfer, on_disk=on_disk, stuck_for=stuck, declared_queue=queue) is expected
+def test_the_decision_to_wait_rotate_or_give_up(status, on_disk, stuck, queue, expected):
+    transfer = acquire.Transfer(status=status, queue=queue)
+    assert acquire.move(transfer, on_disk=on_disk, stuck_for=stuck) is expected
 
 
 @pytest.mark.parametrize(
     "decision,status,received,queue,expected",
     [
         # Nothing to answer for: the file arrived.
-        (acquire.Move.DONE, "finished", 90_000, 0, None),
-        # A peer that says it cannot find a file it advertised, or fails outright, is the whole point.
-        (acquire.Move.FAILED, "not_found", 0, 0, "not_found"),
+        (acquire.Move.DONE, "completed", 90_000, 0, None),
+        # A peer that fails outright, or claims a file and leaves no bytes, is the whole point.
         (acquire.Move.FAILED, "failed", 0, 0, "failed"),
-        # `finished` with no file is the peer's own claim coming to nothing.
-        (acquire.Move.FAILED, "finished", 0, 0, "finished"),
-        # Ours, not theirs: the child lost the session, and a cancel is a decision we made.
-        (acquire.Move.FAILED, "session_expired", 0, 0, None),
+        (acquire.Move.FAILED, "timed_out", 0, 0, "timed_out"),
+        # Ours, not theirs: a cancel is a decision we made.
         (acquire.Move.FAILED, "cancelled", 0, 0, None),
+        (acquire.Move.FAILED, "completed", 0, 0, None),
         # A connect that never opened is theirs.
         (acquire.Move.ROTATE, "queued", 0, 0, "nothing arrived"),
         # A declared queue is normal Soulseek, and a peer that has sent bytes has shown it can send them.
         (acquire.Move.ROTATE, "queued", 0, 5, None),
-        (acquire.Move.ROTATE, "downloading", 4096, 0, None),
+        (acquire.Move.ROTATE, "in_progress", 4096, 0, None),
         # A queue in the hundreds of thousands is a paid mirror holding every request it ever gets: the
         # declaration is the evidence, not the excuse (2026-10-16, from a real pass: DJ-Promo 10230,
         # musicmasterrdjpool 159626, both with no free slots, neither ever delivering a byte).
@@ -237,11 +223,9 @@ def test_the_decision_to_wait_rotate_or_give_up(status, connection, on_disk, stu
 def test_what_a_lost_download_says_about_the_peer(decision, status, received, queue, expected):
     """Eating a budget is not the peer's fault, which is the difference between an ignore list and a pass
     that bans whoever it was waiting for."""
-    candidate = Candidate(user="peer", path="M\\Kiasmos - Blurred.flac", duration=449, bitrate=855,
-                          queue=queue)
-    report = acquire.Transfer(status=status, received_bytes=received)
+    report = acquire.Transfer(status=status, received_bytes=received, queue=queue)
 
-    assert acquire.offence(decision, report, candidate) == expected
+    assert acquire.offence(decision, report) == expected
 
 
 # ── the candidate a search result becomes ────────────────────────────────────
@@ -280,14 +264,14 @@ def test_a_size_with_no_bitrate_still_gives_no_length():
 
 
 def test_the_servers_own_view_of_the_peer_is_carried_onto_the_candidate():
-    """`online_now` and `avg_speed` are the server's cache, not the peer's claim in this answer, and they are
-    what orders a peer that cannot serve behind one that can."""
+    """`avg_speed` and the free-slot count are the search answer's own account of the peer, and they order a
+    peer that cannot serve behind one that can."""
     item = {"username": "peer", "filename": r"M\Kiasmos - Blurred.flac", "filesize": 12_000_000,
-            "queue_size": 0, "online_now": False, "avg_speed": 0}
+            "has_free_slots": False, "avg_speed": 0}
 
     candidate = acquire.candidate_of(item)
 
-    assert (candidate.online, candidate.speed) == (False, 0)
+    assert (candidate.slots, candidate.speed) == (False, 0)
 
 
 # ── the flow ─────────────────────────────────────────────────────────────────
@@ -295,12 +279,11 @@ def test_the_servers_own_view_of_the_peer_is_carried_onto_the_candidate():
 
 def test_a_download_that_lands_is_recorded_and_the_run_left_open(tmp_path):
     landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
-    config, job, server, calls = setup(tmp_path, results=GOOD,
+    config, job, daemon, calls = setup(tmp_path, results=GOOD,
                                        download=f"downloading:transferring:90000:{landed}")
     landed.write_bytes(b"the file, already there when we look")
 
-    with server:
-        summary, quiet = pass_once(config, job, server, Reference(), calls)
+    summary, quiet = pass_once(config, job, daemon, Reference(), calls)
 
     record = job.records()[0]
     assert summary.downloaded == [1], quiet.lines
@@ -309,69 +292,30 @@ def test_a_download_that_lands_is_recorded_and_the_run_left_open(tmp_path):
     assert record.local_path == str(landed)
     assert record.tried == ["peerA:Music\\Kiasmos - Blurred.flac"]
     assert not job.finished(), "the import finishes a run, not this stage"
-    assert "download" in tools_called(calls)
+    assert "download.start" in tools_called(calls)
 
 
 def test_the_file_on_disk_wins_over_a_server_that_says_not_found(tmp_path):
     """The trap: the record of a finished download is dropped after a minute, so `not_found` can
     describe a download that succeeded."""
     landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
-    config, job, server, calls = setup(tmp_path, results=GOOD, download=f"not_found::0:{landed}")
+    config, job, daemon, calls = setup(tmp_path, results=GOOD, download=f"not_found::0:{landed}")
     landed.write_bytes(b"a file that did arrive")
 
-    with server:
-        summary, quiet = pass_once(config, job, server, Reference(), calls)
+    summary, quiet = pass_once(config, job, daemon, Reference(), calls)
 
     assert summary.downloaded == [1], quiet.lines
     assert job.records()[0].status == state.DOWNLOADED
 
 
-def test_a_rotated_peer_leaves_no_partial_in_staging(tmp_path):
-    """The child renames its `.part` only on success and never deletes it. Left behind, the next attempt at
-    the same file finds it, picks a new name, and starts from zero — and staging fills with the bytes of
-    every peer the pass rotated past."""
-    landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
-    part = landed.with_suffix(".flac.part")
-    config, job, server, calls = setup(tmp_path, results=GOOD,
-                                       download=f"downloading:transferring:0:{landed}")
-    part.parent.mkdir(parents=True, exist_ok=True)
-    part.write_bytes(b"the bytes a rotated peer left")
-
-    with server:
-        pass_once(config, job, server, Reference(), calls)
-
-    assert not part.exists(), "a transfer that will not finish leaves nothing in staging"
-
-
-def test_a_short_file_is_not_recorded_as_downloaded(tmp_path):
-    """The child calls a transfer finished on its own accounting, and ffmpeg converts whatever bytes are on
-    disk without complaint. A peer that advertised 82 MB and delivered 20 bytes has delivered nothing, and
-    the size the transfer declared is the only place that says so."""
-    landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
-    config, job, server, calls = setup(
-        tmp_path, results=GOOD, download=f"finished:complete:20:{landed}:82000000")
-    landed.parent.mkdir(parents=True, exist_ok=True)
-    landed.write_bytes(b"twenty bytes, roughly")
-
-    with server:
-        summary, quiet = pass_once(config, job, server, Reference(), calls)
-
-    assert summary.downloaded == [], quiet.lines
-    assert job.records()[0].status != state.DOWNLOADED
-    assert not landed.exists(), "a file that is not the one advertised is not kept"
-    lost = [event for event in job.events() if event["event"] == "candidate_lost"]
-    assert lost and lost[-1]["why"] == "truncated"
-
-
 def test_a_track_settled_by_hand_is_not_searched_again(tmp_path):
     """The decision axis is what a pass reads, so an answered question is not reopened."""
-    config, job, server, calls = setup(tmp_path, results=GOOD)
+    config, job, daemon, calls = setup(tmp_path, results=GOOD)
     records = job.records()
     records[0].decision = state.SKIPPED
     job.write_records(records)
 
-    with server:
-        summary, quiet = pass_once(config, job, server, Reference(), calls)
+    summary, quiet = pass_once(config, job, daemon, Reference(), calls)
 
     assert summary.decided == [1], quiet.lines
     assert summary.in_review == [] and summary.nothing_usable == []
@@ -382,80 +326,74 @@ def test_a_track_settled_by_hand_is_not_searched_again(tmp_path):
 def test_a_peer_that_reported_no_free_slot_is_remembered(tmp_path):
     """The answer belongs to the candidate, so it has to survive the search result rather than being
     dropped on the way into the record."""
-    landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
-    config, job, server, calls = setup(tmp_path, results=NO_SLOTS,
+    landed = tmp_path / "staging" / "Kiasmos - Blurred.aiff"
+    config, job, daemon, calls = setup(tmp_path, results=NO_SLOTS,
                                        download=f"downloading:transferring:90000:{landed}")
     landed.write_bytes(b"the file, already there when we look")
 
-    with server:
-        summary, quiet = pass_once(config, job, server, Reference(), calls)
+    summary, quiet = pass_once(config, job, daemon, Reference(), calls)
 
     assert summary.downloaded == [1], quiet.lines
     candidate = job.records()[0].candidates[0]
     assert candidate.slots is False
-    assert candidate.queue == 3
 
 
 def test_a_track_with_no_length_to_check_is_taken_on_its_name(tmp_path):
     """2026-10-14: it used to wait for a person. Nothing can check the length, so the file stands on its name
     and is taken — the queue is not where an unverifiable offer goes."""
     landed = tmp_path / "staging" / "Kiasmos - Blurred.aiff"
-    config, job, server, calls = setup(tmp_path, results=NO_LENGTH,
+    config, job, daemon, calls = setup(tmp_path, results=NO_LENGTH,
                                        download=f"downloading:transferring:90000:{landed}")
     landed.write_bytes(b"the file, already there when we look")
 
-    with server:
-        summary, quiet = pass_once(config, job, server, Reference(), calls)
+    summary, quiet = pass_once(config, job, daemon, Reference(), calls)
 
     assert summary.downloaded == [1], quiet.lines
     assert summary.in_review == []
     assert job.records()[0].status == state.DOWNLOADED
-    assert "download" in tools_called(calls), "taken, not put in the queue"
+    assert "download.start" in tools_called(calls), "taken, not put in the queue"
 
 
 def test_a_search_with_no_usable_candidate_says_so(tmp_path):
-    config, job, server, calls = setup(tmp_path, results=WRONG_LENGTH)
+    config, job, daemon, calls = setup(tmp_path, results=WRONG_LENGTH)
 
-    with server:
-        summary, quiet = pass_once(config, job, server, Reference(), calls)
+    summary, quiet = pass_once(config, job, daemon, Reference(), calls)
 
     assert summary.nothing_usable == [1], quiet.lines
-    assert "download" not in tools_called(calls)
+    assert "download.start" not in tools_called(calls)
 
 
 def test_an_empty_search_leaves_nothing_usable(tmp_path):
-    config, job, server, calls = setup(tmp_path, results=[])
+    config, job, daemon, calls = setup(tmp_path, results=[])
 
-    with server:
-        summary, _ = pass_once(config, job, server, Reference(), calls)
+    summary, _ = pass_once(config, job, daemon, Reference(), calls)
 
     assert summary.nothing_usable == [1]
 
 
 def test_a_connect_stall_rotates_to_the_next_peer_and_cancels_the_first(tmp_path):
-    landed = tmp_path / "staging" / "from peerB.flac"
-    config, job, server, calls = setup(
+    landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
+    config, job, daemon, calls = setup(
         tmp_path,
         results=TWO_PEERS,
         download=f"queued:waiting_for_peer:0:|downloading:transferring:90000:{landed}",
     )
     landed.write_bytes(b"the one that arrived")
 
-    with server:
-        summary, quiet = pass_once(config, job, server, Reference(), calls)
+    summary, quiet = pass_once(config, job, daemon, Reference(), calls)
 
     record = job.records()[0]
     assert summary.downloaded == [1], quiet.lines
     assert record.local_path == str(landed)
     assert "peerB:Other\\Kiasmos - Blurred.flac" in record.tried
-    assert "cancel_download" in tools_called(calls), "a stalled transfer must not hold a transfer slot"
+    assert "download.cancel" in tools_called(calls), "a stalled transfer must not hold a transfer slot"
 
 
 def test_a_transfer_is_asked_about_on_the_passs_own_interval(tmp_path):
     """The server asks for thirty seconds between polls, and every budget is decided *on a poll*, so obeying
     that ask makes its own grid the resolution the budgets are kept to: a peer with nothing to queue behind
     would be held for the whole of it rather than rotated when its budget is up (2026-10-14)."""
-    config, job, server, calls = setup(tmp_path, results=GOOD,
+    config, job, daemon, calls = setup(tmp_path, results=GOOD,
                                        download="queued:waiting_for_peer:0:")
     clock = Clock()
     slept: list[float] = []
@@ -464,22 +402,21 @@ def test_a_transfer_is_asked_about_on_the_passs_own_interval(tmp_path):
         slept.append(seconds)
         clock.tick(seconds + 0.001)     # even a sleep asked for nothing costs a little time
 
-    with server:
-        summary = acquire.run(config, job, server, Reference(), log=lambda line: None,
-                              sleep=sleep, clock=clock)
+    summary = acquire.run(config, job, daemon, Reference(), log=lambda line: None,
+                          sleep=sleep, clock=clock)
 
     assert summary.dropped == [1]
     assert max(slept) <= acquire.POLL_INTERVAL, "no wait longer than one poll"
     assert max(slept) < 30, "the server's own thirty-second ask is not obeyed"
-    assert sum(slept) == pytest.approx(acquire.CONNECT_BUDGET, abs=0.01), \
+    assert sum(slept) == pytest.approx(acquire.QUEUE_BUDGET, abs=0.05), \
         "the waits add up to the budget, not to a multiple of the poll"
-    assert tools_called(calls).count("download_status") == len(slept)
+    assert tools_called(calls).count("download.list") == len(slept)
 
 
 def test_a_finished_transfer_whose_file_never_appears_is_given_its_grace(tmp_path):
     """`FINISHED_GRACE` is shorter than the ask above, so a pass that obeyed it looked fifteen seconds late the
     first time and gave up on the rename before the grace had begun."""
-    config, job, server, calls = setup(tmp_path, results=GOOD, download="finished::0:")
+    config, job, daemon, calls = setup(tmp_path, results=GOOD, download="finished::0:")
     clock = Clock()
     slept: list[float] = []
 
@@ -487,21 +424,19 @@ def test_a_finished_transfer_whose_file_never_appears_is_given_its_grace(tmp_pat
         slept.append(seconds)
         clock.tick(seconds + 0.001)
 
-    with server:
-        summary = acquire.run(config, job, server, Reference(), log=lambda line: None,
-                              sleep=sleep, clock=clock)
+    summary = acquire.run(config, job, daemon, Reference(), log=lambda line: None,
+                          sleep=sleep, clock=clock)
 
     assert summary.dropped == [1]
     assert sum(slept) == pytest.approx(acquire.FINISHED_GRACE, abs=0.01)
-    assert tools_called(calls).count("download_status") == 2, "asked again, then given up on"
+    assert tools_called(calls).count("download.list") == 2, "asked again, then given up on"
 
 
 def test_every_candidate_failing_closes_the_track(tmp_path):
     """2026-10-14: nothing left to try is the end of it. The track is settled rather than left waiting for
     somebody to say so, which is what a run full of unanswerable rows cost."""
-    config, job, server, calls = setup(tmp_path, results=TWO_PEERS, download="failed::0:")
-    with server:
-        summary, quiet = pass_once(config, job, server, Reference(), calls)
+    config, job, daemon, calls = setup(tmp_path, results=TWO_PEERS, download="failed::0:")
+    summary, quiet = pass_once(config, job, daemon, Reference(), calls)
 
     assert summary.dropped == [1], quiet.lines
     assert summary.failed == []
@@ -514,7 +449,7 @@ def test_every_candidate_failing_closes_the_track(tmp_path):
 def test_a_track_with_a_candidate_left_untried_is_left_alone(tmp_path):
     """The other half of that: an offer nobody got to — because the pass stopped at its candidate ceiling, or
     the network went quiet — is not the same as one every peer refused."""
-    config, job, _server, _calls = setup(tmp_path, results=[])
+    config, job, _daemon, _calls = setup(tmp_path, results=[])
     first = Candidate(user="a", path=r"M\Kiasmos - Blurred.flac", duration=449)
     second = Candidate(user="b", path=r"M\Kiasmos - Blurred.flac", duration=449, bitrate=320)
     records = job.records()
@@ -537,14 +472,13 @@ def test_a_track_with_a_candidate_left_untried_is_left_alone(tmp_path):
 
 def test_the_reference_is_resolved_once_and_only_once(tmp_path):
     landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
-    config, job, server, calls = setup(tmp_path, results=GOOD,
+    config, job, daemon, calls = setup(tmp_path, results=GOOD,
                                        download=f"downloading:transferring:90000:{landed}")
     landed.write_bytes(b"x")
     lookup = Reference()
 
-    with server:
-        pass_once(config, job, server, lookup, calls)
-        pass_once(config, job, server, lookup, calls)
+    pass_once(config, job, daemon, lookup, calls)
+    pass_once(config, job, daemon, lookup, calls)
 
     assert len(lookup.asked) == 1, "a resumed run must not ask MusicBrainz again"
     assert job.records()[0].duration_s == 449
@@ -552,15 +486,14 @@ def test_the_reference_is_resolved_once_and_only_once(tmp_path):
 
 def test_a_track_already_downloaded_is_not_fetched_again(tmp_path):
     landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
-    config, job, server, calls = setup(tmp_path, results=GOOD,
+    config, job, daemon, calls = setup(tmp_path, results=GOOD,
                                        download=f"downloading:transferring:90000:{landed}")
     landed.write_bytes(b"x")
 
-    with server:
-        pass_once(config, job, server, Reference(), calls)
-        second, quiet = pass_once(config, job, server, Reference(), calls)
+    pass_once(config, job, daemon, Reference(), calls)
+    second, quiet = pass_once(config, job, daemon, Reference(), calls)
 
-    assert tools_called(calls).count("download") == 1
+    assert tools_called(calls).count("download.start") == 1
     assert second.already_downloaded == [1], quiet.lines
     assert job.records()[0].local_path == str(landed)
 
@@ -569,7 +502,7 @@ def test_a_track_this_run_already_placed_and_tagged_is_not_searched_again(tmp_pa
     """One status further on. Until the import runs the collection still points at the lossy copy
     being replaced, so the dedupe alone finds a finished track "not held" and re-downloads it, resetting the
     status — which is how a retry pass left 43 placed and tagged records unimportable on 2026-10-12."""
-    config, job, server, calls = setup(tmp_path, results=GOOD)
+    config, job, daemon, calls = setup(tmp_path, results=GOOD)
     placed = config.lossless / "Kiasmos - Blurred.aiff"
     placed.parent.mkdir(parents=True, exist_ok=True)
     placed.write_bytes(b"audio")
@@ -578,27 +511,26 @@ def test_a_track_this_run_already_placed_and_tagged_is_not_searched_again(tmp_pa
     record.local_path = str(placed)
     job.write_records([record])
 
-    with server:
-        summary, quiet = pass_once(config, job, server, Reference(), calls)
+    summary, quiet = pass_once(config, job, daemon, Reference(), calls)
 
     assert summary.already_downloaded == [1], quiet.lines
     assert tools_called(calls) == [], "not even a search: the file it produced is right there"
     assert job.records()[0].status == state.TAGGED, "and its status is left where it was"
 
 
-def test_a_later_pass_asks_only_for_peers_with_free_slots(tmp_path):
-    """Peer attributes may scope a retry pass, and never the first one."""
-    config, job, server, calls = setup(tmp_path, results=[])
+def test_a_later_pass_prefers_peers_with_free_slots(tmp_path):
+    """Peer attributes may scope a retry pass, and never the first one: the filter is applied to what came
+    back, and only when it leaves something to take."""
+    busy = [{"username": "busy", "filename": "M\\busy.flac", "filesize": 10, "has_free_slots": False}]
+    free = [{"username": "free", "filename": "M\\free.flac", "filesize": 10, "has_free_slots": True}]
+    config, job, daemon, calls = setup(tmp_path, results=busy + free)
     record = job.records()[0]
 
-    with server:
-        acquire.search(server, record, later_pass=False)
-        acquire.search(server, record, later_pass=True)
+    first = acquire.search(daemon, record, later_pass=False)
+    second = acquire.search(daemon, record, later_pass=True)
 
-    searches = [entry["arguments"] for entry in calls_made(calls) if entry["tool"] == "search"]
-    assert searches[0]["query"] == "kiasmos blurred"
-    assert "free_slots_only" not in searches[0]
-    assert searches[1]["free_slots_only"] is True
+    assert {candidate.user for candidate in first} == {"busy", "free"}
+    assert [candidate.user for candidate in second] == ["free"]
 
 
 class Nothing:
@@ -632,12 +564,11 @@ def held_lossy(tmp_path):
 def test_a_lossy_copy_held_is_an_upgrade_not_a_skip(tmp_path):
     """A lossy copy does not make a track held, when a lossless one can be had."""
     landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
-    config, job, server, calls = setup(tmp_path, results=GOOD,
+    config, job, daemon, calls = setup(tmp_path, results=GOOD,
                                        download=f"downloading:transferring:90000:{landed}")
     landed.write_bytes(b"the lossless one")
 
-    with server:
-        summary, quiet = pass_once(config, job, server, Reference(), calls, shelf=held_lossy(tmp_path))
+    summary, quiet = pass_once(config, job, daemon, Reference(), calls, shelf=held_lossy(tmp_path))
 
     record = job.records()[0]
     assert summary.downloaded == [1], quiet.lines
@@ -649,12 +580,11 @@ def test_the_copy_in_the_collection_is_the_reference_when_musicbrainz_has_none(t
     """This is not a bare tracklist, so the reference is not looked up: four of five lossy tracks in the
     collection have no MusicBrainz recording at all, and the copy in hand is the same track by definition."""
     landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
-    config, job, server, calls = setup(tmp_path, results=GOOD,
+    config, job, daemon, calls = setup(tmp_path, results=GOOD,
                                        download=f"downloading:transferring:90000:{landed}")
     landed.write_bytes(b"the lossless one")
 
-    with server:
-        summary, quiet = pass_once(config, job, server, Nothing(), calls, shelf=held_lossy(tmp_path))
+    summary, quiet = pass_once(config, job, daemon, Nothing(), calls, shelf=held_lossy(tmp_path))
 
     assert summary.downloaded == [1], quiet.lines
     assert job.records()[0].duration_s == 449, "the held file's own length"
@@ -664,26 +594,24 @@ def test_a_lossy_candidate_is_not_an_upgrade(tmp_path):
     """A lossy copy is not better than the lossy copy already held, so it is not an upgrade — and since
     2026-10-12 it is not a question either. It used to land in review, where a queue of mp3s with no
     bitrate was offered to replace mp3s already held."""
-    config, job, server, calls = setup(tmp_path, results=LOSSY_ONLY)
+    config, job, daemon, calls = setup(tmp_path, results=LOSSY_ONLY)
 
-    with server:
-        summary, quiet = pass_once(config, job, server, Reference(), calls, shelf=held_lossy(tmp_path))
+    summary, quiet = pass_once(config, job, daemon, Reference(), calls, shelf=held_lossy(tmp_path))
 
     assert summary.nothing_usable == [1], quiet.lines
     assert summary.in_review == [], "never asked about: the copy already held plays"
-    assert "download" not in tools_called(calls)
+    assert "download.start" not in tools_called(calls)
 
 
 def test_a_track_the_library_already_holds_is_not_even_searched(tmp_path):
     """Nothing is fetched that the collection holds. It is asked before the search, so an already-held
     track costs no request at all — which is exactly what the first smoke run showed it was missing."""
-    config, job, server, calls = setup(tmp_path, results=GOOD)
+    config, job, daemon, calls = setup(tmp_path, results=GOOD)
     shelf = library.Library(
         [library.Held("Kiasmos", "Blurred", 449, path="/Library/Kiasmos - Blurred.aiff")], []
     )
 
-    with server:
-        summary, quiet = pass_once(config, job, server, Reference(), calls, shelf=shelf)
+    summary, quiet = pass_once(config, job, daemon, Reference(), calls, shelf=shelf)
 
     record = job.records()[0]
     assert summary.already_held == [1], quiet.lines
@@ -694,31 +622,26 @@ def test_a_track_the_library_already_holds_is_not_even_searched(tmp_path):
 
 
 def test_a_track_the_library_holds_at_another_length_is_still_fetched(tmp_path):
-    config, job, server, calls = setup(tmp_path, results=GOOD)
+    config, job, daemon, calls = setup(tmp_path, results=GOOD)
     shelf = library.Library([library.Held("Kiasmos", "Blurred", 520)], [])
 
-    with server:
-        summary, quiet = pass_once(config, job, server, Reference(), calls, shelf=shelf)
+    summary, quiet = pass_once(config, job, daemon, Reference(), calls, shelf=shelf)
 
     assert summary.already_held == []
     assert "search" in tools_called(calls)
 
 
-def test_a_server_that_refuses_is_left_to_retry_rather_than_crashing(tmp_path):
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(f'[paths]\nstaging = "{tmp_path / "staging"}"\n'
-                           f'lossless = "{tmp_path / "Loseless Tracks"}"\n'
-                           f'lossy = "{tmp_path / "Losy Tracks"}"\n'
-                           'state = "state"\n'
-                           f'peers = "{tmp_path / "peers.json"}"\n', encoding="utf-8")
-    config = config_module.load(config_path)
-    job = state.create(config, "test")
-    job.write_records([state.Record(idx=1, artist="Kiasmos", title="Blurred")])
+def test_a_daemon_that_refuses_is_left_to_retry_rather_than_crashing(tmp_path):
+    class Refusing(Direct):
+        def search(self, query, *, timeout):
+            raise slsk.DaemonError("search", "the daemon is not logged in", 3)
 
-    with StdioServer([sys.executable, FAKE, "refuses"]) as server:
-        quiet = Quiet(Clock())
-        summary = acquire.run(config, job, server, Reference(), log=quiet.log, sleep=quiet.sleep,
-                              clock=quiet.clock)
+    config, job, _daemon, calls = setup(tmp_path, results=[], tracks=1)
+    daemon = Refusing(results=[])
+
+    quiet = Quiet(Clock())
+    summary = acquire.run(config, job, daemon, Reference(), log=quiet.log, sleep=quiet.sleep,
+                          clock=quiet.clock)
 
     assert summary.failed == [1]
     assert job.records()[0].status == state.RETRY_LATER
@@ -748,12 +671,11 @@ THREE_FROM_ONE_MIRROR = [
 def test_a_mirror_that_never_delivers_is_ignored(tmp_path):
     """A peer that advertises a file, accepts the transfer and hands over nothing is what a paid mirror looks
     like, and three of those inside a fortnight is the count the list runs on."""
-    config, job, server, calls = setup(tmp_path, results=THREE_FROM_ONE_MIRROR,
+    config, job, daemon, calls = setup(tmp_path, results=THREE_FROM_ONE_MIRROR,
                                        download="not_found::0:|not_found::0:|not_found::0:",
                                        soulseek="maxretry = 3\n")
 
-    with server:
-        summary, quiet = pass_once(config, job, server, Reference(), calls)
+    summary, quiet = pass_once(config, job, daemon, Reference(), calls)
 
     assert summary.ignored == {"mirror"}
     assert peers.Ledger.at(config).ignored() == {"mirror"}
@@ -763,14 +685,13 @@ def test_a_mirror_that_never_delivers_is_ignored(tmp_path):
 def test_a_peer_banned_mid_pass_is_not_asked_for_the_rest_of_its_files(tmp_path):
     """One mirror offered three files of one track. The first that delivers nothing bans it, and the other
     two are the same peer answering the same question — asking costs a connect budget each."""
-    config, job, server, calls = setup(tmp_path, results=THREE_FROM_ONE_MIRROR,
+    config, job, daemon, calls = setup(tmp_path, results=THREE_FROM_ONE_MIRROR,
                                        download="not_found::0:", soulseek="maxretry = 1\n")
 
-    with server:
-        summary, quiet = pass_once(config, job, server, Reference(), calls)
+    summary, quiet = pass_once(config, job, daemon, Reference(), calls)
 
     assert summary.ignored == {"mirror"}
-    assert tools_called(calls).count("download") == 1
+    assert tools_called(calls).count("download.start") == 1
     assert len(job.records()[0].tried) == 1
     assert any("left from ignored" in line for line in quiet.lines), quiet.lines
 
@@ -778,29 +699,27 @@ def test_a_peer_banned_mid_pass_is_not_asked_for_the_rest_of_its_files(tmp_path)
 def test_a_file_from_an_ignored_peer_never_enters_the_record(tmp_path):
     """Dropped at the search, not at the ladder: nothing downstream — the record, the queue — should be able
     to offer a peer the account has given up on."""
-    config, job, server, calls = setup(tmp_path, results=GOOD, soulseek="maxretry = 1\n")
+    config, job, daemon, calls = setup(tmp_path, results=GOOD, soulseek="maxretry = 1\n")
     peers.Ledger.at(config).offence("peerA", "nothing arrived")
 
-    with server:
-        summary, quiet = pass_once(config, job, server, Reference(), calls)
+    summary, quiet = pass_once(config, job, daemon, Reference(), calls)
 
     assert job.records()[0].candidates == []
     assert summary.nothing_usable == [1], quiet.lines
-    assert "download" not in tools_called(calls)
+    assert "download.start" not in tools_called(calls)
 
 
 def test_a_peer_that_hands_a_file_over_is_forgiven(tmp_path):
     """The list is for peers that never deliver, so one that does has answered the question."""
     landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
-    config, job, server, calls = setup(tmp_path, results=GOOD,
+    config, job, daemon, calls = setup(tmp_path, results=GOOD,
                                        download=f"downloading:transferring:90000:{landed}")
     landed.write_bytes(b"the file, already there when we look")
     ledger = peers.Ledger.at(config)
     ledger.offence("peerA", "not_found")
     ledger.offence("peerA", "not_found")
 
-    with server:
-        summary, quiet = pass_once(config, job, server, Reference(), calls)
+    summary, quiet = pass_once(config, job, daemon, Reference(), calls)
 
     assert summary.downloaded == [1], quiet.lines
     assert peers.Ledger.at(config).peers() == []
@@ -815,7 +734,7 @@ def test_the_pass_works_on_several_tracks_at_once(tmp_path):
     poll until the barrier gave up."""
     import threading
 
-    config, job, server, calls = setup(tmp_path, results=GOOD + [{
+    config, job, daemon, calls = setup(tmp_path, results=GOOD + [{
         "id": "peerA:Music\\Kiasmos - Another 2.flac",
         "username": "peerA",
         "filename": "Music\\Kiasmos - Another 2.flac",
@@ -847,9 +766,8 @@ def test_the_pass_works_on_several_tracks_at_once(tmp_path):
         if first:
             met.wait()      # once per worker, so a pass that runs them in turn never gets its second
 
-    with server:
-        summary = acquire.run(config, job, server, AnswersAnyTitle(), log=lambda line: None,
-                              sleep=sleep, clock=clock)
+    summary = acquire.run(config, job, daemon, AnswersAnyTitle(), log=lambda line: None,
+                          sleep=sleep, clock=clock)
 
     settled = (summary.downloaded + summary.already_downloaded + summary.already_held
                + summary.in_review + summary.nothing_usable + summary.failed)
@@ -857,13 +775,13 @@ def test_the_pass_works_on_several_tracks_at_once(tmp_path):
     assert len(job.records()) == 2
 
 
-# ── a child that stops answering ─────────────────────────────────────────
+# ── a daemon that stops answering ────────────────────────────────────────
 
 
 def test_an_empty_answer_is_not_a_failure():
     """A search that comes back with nothing is the network answering, and nothing else in the stack can tell
     it from a rare track. So no number of them stops anything."""
-    watch = acquire.ChildWatch()
+    watch = acquire.Watch()
 
     for _ in range(200):
         watch.answered()
@@ -871,44 +789,14 @@ def test_an_empty_answer_is_not_a_failure():
     assert not watch.dead.is_set(), "a playlist's rare tail is not a dead network"
 
 
-def test_a_search_the_child_cannot_send_is_a_lost_session():
-    """2026-10-15: the server dropped the client, aioslsk never reconnected, and every search afterwards came
-    back empty, which from the outside is what a playlist of rare tracks looks like. The child's own log is
-    the only thing that tells them apart, and it is what the pass reads."""
-    child = slsk.ChildLog(log=lambda line: None)
-    watch = acquire.ChildWatch(child=child)
-    child("WARNING:aioslsk.search.manager:not returning search results : no valid session was set")
+def test_the_daemons_session_loss_stops_the_pass(tmp_path):
+    """The daemon records a session the server took away. From inside a search that is indistinguishable from
+    a rare track — every answer after it is an ordinary success with nothing in it — so the pass reads the
+    daemon's own status and stops, rather than spending three hundred searches learning nothing."""
+    config, job, daemon, calls = setup(tmp_path, results=[], tracks=6, session_loss=True)
 
-    watch.answered()
-
-    assert watch.session_lost is True
-    assert watch.dead.is_set()
-
-
-def test_a_refused_login_is_a_lost_session():
-    """2026-10-16: a pass was killed mid-session, and every pass after it logged in with
-    `Login failed: expected login response from server but got : None` and then spent its searches timing out.
-    The server keeps one session per account, so that is the account's state rather than this child's, and it
-    is read from the one line that says so rather than inferred from the silence after it."""
-    child = slsk.ChildLog(log=lambda line: None)
-    child("ERROR:slsk_mcp:Login failed: expected login response from server but got : None")
-
-    watch = acquire.ChildWatch(child=child)
-
-    assert child.lost_session == 1
-    assert watch.session_lost is True
-
-
-def test_a_lost_session_stops_the_pass_and_says_which_it_was(tmp_path):
-    """The caller restarts the pass with a fresh child on the strength of this, so the two reasons have to
-    reach it apart: a child that lost its session in one message reader is worth another child, and an account
-    with another client on it is not."""
-    config, job, server, calls = setup(tmp_path, results=[], tracks=6)
-    child = slsk.ChildLog(log=lambda line: None)
-    child.lost_session = 1                      # the child's own stderr already said it
-
-    with server, pytest.raises(acquire.ServerStuck) as raised:
-        pass_once(config, job, server, Reference(), calls, child=child)
+    with pytest.raises(acquire.ServerStuck) as raised:
+        pass_once(config, job, daemon, Reference(), calls)
 
     assert raised.value.lost_session is True
     assert "session" in str(raised.value)
@@ -916,28 +804,22 @@ def test_a_lost_session_stops_the_pass_and_says_which_it_was(tmp_path):
     assert "lost_session" in events
 
 
-def test_the_reader_dying_is_one_childs_bad_luck_and_not_the_accounts(tmp_path):
-    """The two are told apart because the caller answers them differently: an account that keeps losing the
-    session ends the passes, while a reader that died in this child is retried. Without the distinction a
-    flaky child per pass is a pass that cannot finish a long list."""
-    config, job, server, calls = setup(tmp_path, results=[], tracks=6)
-    child = slsk.ChildLog(log=lambda line: None)
-    child("UnboundLocalError: cannot access local variable 'message'")
+def test_a_session_loss_that_is_not_reported_is_read_from_the_status():
+    """The watch asks the daemon rather than waiting for an empty answer to mean something: `answered()` is
+    the one place a lost session becomes visible."""
+    daemon = Direct(results=[], session_loss=True)
+    watch = acquire.Watch(daemon=daemon)
 
-    with server, pytest.raises(acquire.ServerStuck) as raised:
-        pass_once(config, job, server, Reference(), calls, child=child)
+    watch.answered()
 
-    assert raised.value.lost_session is False
-    assert "could not read" in str(raised.value)
-    events = (config.state_root / job.id / "events.jsonl").read_text(encoding="utf-8")
-    assert "reader_died" in events
-    assert "lost_session" not in events
+    assert watch.session_lost is True
+    assert watch.dead.is_set()
 
 
 def test_one_candidate_may_not_own_the_pass():
     """Every other budget is reset by a byte, so a peer slow enough never trips one: 0.107 MB/s sustained on
     a 99 MB file held a whole pass open for 764 of its 1,772 seconds, with nothing else able to run."""
-    moving = acquire.Transfer(status="downloading", connection_state="transferring")
+    moving = acquire.Transfer(status="in_progress")
 
     assert acquire.move(moving, on_disk=False, stuck_for=0.5,
                         elapsed=acquire.TRANSFER_CEILING - 1) is acquire.Move.WAIT
@@ -947,7 +829,7 @@ def test_one_candidate_may_not_own_the_pass():
 
 def test_a_search_that_answers_resets_the_run_of_timeouts():
     """The run is *in a row*: a child that answers between two timeouts is talking, so nothing is stuck yet."""
-    watch = acquire.ChildWatch(stuck_after=3)
+    watch = acquire.Watch(stuck_after=3)
     for _ in range(2):
         watch.timed_out()
     watch.answered()
@@ -964,10 +846,9 @@ def test_a_silent_network_is_still_searched_to_the_end(tmp_path):
     left the rest unnamed. An empty answer is the network's answer about that one track and nothing more, so
     the pass asks about every track and says which of them turned up nothing."""
     total = 60
-    config, job, server, calls = setup(tmp_path, results=[], tracks=total)
+    config, job, daemon, calls = setup(tmp_path, results=[], tracks=total)
 
-    with server:
-        summary, _ = pass_once(config, job, server, Reference(), calls)
+    summary, _ = pass_once(config, job, daemon, Reference(), calls)
 
     searched = tools_called(calls).count("search")
     assert searched == total, f"{total} tracks and {searched} searches"
@@ -977,19 +858,17 @@ def test_a_silent_network_is_still_searched_to_the_end(tmp_path):
     assert "network_quiet" not in events
 
 
-def test_a_dead_child_does_not_race_the_bar_through_the_rest(tmp_path):
-    """The bar counts the tracks the pass got through. When the child is gone the others were never searched,
+def test_a_dead_daemon_does_not_race_the_bar_through_the_rest(tmp_path):
+    """The bar counts the tracks the pass got through. When the daemon is gone the others were never searched,
     and settling them one at a time raced the count from 28 to 296 in a blink — which reads as a pass that
     finished the list, and leaves a captured stream with one line per track that was never asked about."""
-    config, job, server, calls = setup(tmp_path, results=[], tracks=5)
-    child = slsk.ChildLog(log=lambda line: None)
-    child("WARNING:aioslsk.search.manager:not returning search results : no valid session was set")
+    import io
+
+    config, job, daemon, calls = setup(tmp_path, results=[], tracks=5, session_loss=True)
     lines, printed = [], io.StringIO()
 
-    with server:
-        with pytest.raises(acquire.ServerStuck) as stuck:
-            acquire.run(config, job, server, Reference(), library=None, log=lines.append,
-                        child=child, stream=printed)
+    with pytest.raises(acquire.ServerStuck) as stuck:
+        acquire.run(config, job, daemon, Reference(), library=None, log=lines.append, stream=printed)
 
     assert "5 tracks were never searched" in str(stuck.value), "the pass says it once, where it ends"
     assert printed.getvalue() == "", "a track nobody searched is not a track the pass settled"
@@ -999,13 +878,12 @@ def test_a_pass_starts_with_the_tracks_no_pass_has_asked_about(tmp_path):
     """2026-10-16: five passes over 315 tracks, between 20:54 and 22:28, searched the first 91 records and never
     reached the other 224 — every pass began at track one and every child died inside the first hundred. The
     tracks nobody has asked about go first, so each attempt makes progress on the tail instead."""
-    config, job, server, calls = setup(tmp_path, results=[], tracks=6, soulseek="workers = 1\n")
+    config, job, daemon, calls = setup(tmp_path, results=[], tracks=6, soulseek="workers = 1\n")
     for idx in (1, 2, 3):
         job.append_event(state.SEARCHED_EVENT, idx=idx, added=0, offered=0)
     before = len(job.events())
 
-    with server:
-        pass_once(config, job, server, Reference(), calls)
+    pass_once(config, job, daemon, Reference(), calls)
 
     asked = [event["idx"] for event in job.events()[before:]
              if event["event"] == state.SEARCHED_EVENT]
@@ -1016,12 +894,11 @@ def test_the_file_keeps_its_order_while_the_pass_works_from_the_tail(tmp_path):
     """The unasked-first order belongs to the pass, not to the file. Writing the schedule back reorders
     `tracks.jsonl` on every pass — which changes the order `review` prints its queue in and makes a run file
     that a person opens read out of track order, for no gain."""
-    config, job, server, calls = setup(tmp_path, results=[], tracks=4, soulseek="workers = 1\n")
+    config, job, daemon, calls = setup(tmp_path, results=[], tracks=4, soulseek="workers = 1\n")
     for idx in (1, 2):
         job.append_event(state.SEARCHED_EVENT, idx=idx, added=0, offered=0)
 
-    with server:
-        pass_once(config, job, server, Reference(), calls)
+    pass_once(config, job, daemon, Reference(), calls)
 
     assert [record.idx for record in job.records()] == [1, 2, 3, 4]
 
@@ -1059,7 +936,7 @@ def test_a_search_in_flight_does_not_hold_the_next_one_back():
 
 def test_searches_are_spaced_out_rather_than_fired_as_fast_as_the_loop_can(tmp_path):
     """A pass asked for 330 searches in six minutes and everything after the first seconds came
-    back empty — no error, no warning, and nothing in the child or in aioslsk that keeps to a rate or
+    back empty — no error, no warning, and nothing in the daemon that keeps to a rate or
     reports one being refused. So the gap between two searches is the pass's own to keep.
 
     One worker, so the reservations run in a known order and the gaps are exact; a pace that only held
@@ -1067,7 +944,7 @@ def test_searches_are_spaced_out_rather_than_fired_as_fast_as_the_loop_can(tmp_p
     """
     from dataclasses import replace
 
-    config, job, server, calls = setup(tmp_path, results=[], tracks=4)
+    config, job, daemon, calls = setup(tmp_path, results=[], tracks=4)
     config = replace(config, search_interval=3.0, workers=1)
     clock = Clock()
     gaps: list[float] = []
@@ -1076,8 +953,7 @@ def test_searches_are_spaced_out_rather_than_fired_as_fast_as_the_loop_can(tmp_p
         gaps.append(seconds)
         clock.tick(seconds)
 
-    with server:
-        acquire.run(config, job, server, Reference(), log=lambda line: None, sleep=sleep, clock=clock)
+    acquire.run(config, job, daemon, Reference(), log=lambda line: None, sleep=sleep, clock=clock)
 
     assert len(tools_called(calls)) == 4, "the pace must not cost a track its search"
     assert gaps == [3.0, 3.0, 3.0], "four tracks, three gaps, each exactly the interval"

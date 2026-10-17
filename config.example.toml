@@ -15,36 +15,26 @@ true_peak_db = -1.0
 tolerance_lu = 0.5                              # a file already inside it is left alone
 
 [soulseek]
-# Pinned to a commit: the match rules read specific fields, and a rebuild must not move them. This is a fork
-# of `voidtype/slsk_mcp` that pins aioslsk 1.7.1: at 1.4.1 the client stops answering the moment a frame
-# fails to deserialize, and every search after that reads as an empty network.
-command = [
-  "uvx",
-  "--from",
-  "git+https://github.com/alchimestre/slsk-mcp.git@e37c092b1e0486ea56523769ab9d81f59ce3a085",
-  "slsk-mcp",
-]
+# `soulseek-rs daemon` holds the account and speaks JSON-RPC over a Unix socket in `state_dir`. The pass
+# starts it when nothing answers there and leaves it running: the session and any unfinished transfers are
+# the daemon's, and the next pass picks them up.
+command = ["soulseek-rs", "daemon"]
 
-# The listening ports are in `.env`. The download directory is not here either: `paths.staging` is handed to
-# the child as SLSK_DOWNLOAD_DIR.
+# Where the daemon keeps its socket, token and transfer state. Empty uses `SOULSEEK_STATE_DIR`, then the
+# daemon's own default (`~/.local/share/soulseek-rs/state`). Both ends have to look in the same place.
+state_dir = ""
 
-# The two lanes under `paths` are what the client shares, handed over as SLSK_SHARE_DIRS. Staging is not one
-# of them. A client that reports no shared files reads as a leecher, and peers queue or ban those.
+# The listening port is in `.env`. The daemon registers exactly that one; its neighbour is only swept in
+# case a client that used both is still alive. The download directory is not here either: `paths.staging` is
+# set on the daemon at the start of every pass, and the two lanes under `paths` are what it shares. Staging
+# is not one of them. A client that reports no shared files reads as a leecher, and peers queue or ban those.
+max_downloads = 20
+workers       = 20
 
-# Ceilings handed to the child as SLSK_*. `max_operations` is the socket lock: a search holds it for its whole
-# window and a download start takes it again, so it has to clear `max_searches` with a start to spare.
-# The invariant that bites: `max_searches` must be at least `workers`, because every track in flight may be
-# holding a search, and one queued behind this lock times out at the call deadline rather than waiting. A
-# smaller number here does not slow the pass down, it ends it: four timeouts in a row stop it.
-# `workers` must not exceed `max_downloads` either, or a download start blocks on the transfer ceiling.
-max_downloads  = 20
-max_searches   = 24
-max_operations = 32
-workers        = 20
-
-# Seconds between two searches. A throttled search and a rare track read the same, so the pace is ours: the
-# one rate measured going silent was 0.9 a second.
-search_interval = 1.0
+# Seconds between two searches: 34 per 220 seconds, the rate slsk-batchdl ships, whose README warns that
+# higher values earn 30-minute bans. Stated as a gap rather than a burst, so the sustained rate is the same
+# and no window of the pass is heavier than another.
+search_interval = 6.47
 
 # fail2ban's three numbers, for peers that list a file and then deliver nothing — paid mirrors and bots fail
 # every request, while a peer with a long queue or a bad rip is not failing at all. `maxretry` failures

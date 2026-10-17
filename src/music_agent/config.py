@@ -7,7 +7,7 @@ directories, the loudness targets and tolerances, the search pace, the programs 
 *names* of the environment variables carrying the credentials — never the secrets, so it is safe to commit.
 
 The Soulseek listening ports are not in it either: they come from the environment
-(`SLSK_LISTEN_PORT`, `SLSK_OBFUSCATED_PORT`), like the credentials.
+(`SLSK_LISTEN_PORT`, `SLSK_USERNAME`, `SLSK_PASSWORD`), like the credentials.
 """
 
 from __future__ import annotations
@@ -55,18 +55,18 @@ class Config:
     acoustid_key_env: str
     discogs_token_env: str
     soulseek_command: tuple[str, ...]
+    # Where the daemon keeps its socket and its durable transfer state. Empty means `SOULSEEK_STATE_DIR`,
+    # then `~/.local/share/soulseek-rs/state` — the daemon's own default, so both ends look in one place.
+    soulseek_state_dir: str
     # Traktor's collection belongs to another project, which owns it and its own config. This is how to run
     # that tool here; empty means the machine has no Traktor tool and its half is skipped.
     traktor_command: tuple[str, ...]
     soulseek_listen_port: int
-    soulseek_obfuscated_port: int
-    # How much of the acquisition runs at once. The first three are the child's own ceilings, handed to it
-    # as SLSK_* variables; `workers` is how many tracks a pass works on at a time.
+    # How much of the acquisition runs at once: `max_downloads` is the daemon's own transfer ceiling and
+    # `workers` is how many tracks a pass works on at a time.
     max_downloads: int
-    max_searches: int
-    max_operations: int
     workers: int
-    # A floor on the gap between two searches we ask for, in seconds. Ours rather than the child's:
+    # A floor on the gap between two searches we ask for, in seconds. Ours rather than the daemon's:
     # nothing in the pinned build paces searches, and nothing reports one being ignored. 0 turns it off.
     search_interval: float
     # fail2ban's triple, for peers that list a file and then deliver nothing: `maxretry` failures inside
@@ -96,12 +96,9 @@ def _port_from_env(name: str, default: int) -> int:
 
 
 def _listening_ports() -> dict[str, int]:
-    """Both ports, under the field names `Config` gives them."""
+    """The listening port, under the field name `Config` gives it."""
     return {
         "soulseek_listen_port": _port_from_env("SLSK_LISTEN_PORT", DEFAULTS.soulseek_listen_port),
-        "soulseek_obfuscated_port": _port_from_env(
-            "SLSK_OBFUSCATED_PORT", DEFAULTS.soulseek_obfuscated_port
-        ),
     }
 
 
@@ -117,40 +114,26 @@ DEFAULTS = Config(
     musicbrainz_contact_env="MUSICBRAINZ_CONTACT",
     acoustid_key_env="ACOUSTID_API_KEY",
     discogs_token_env="DISCOGS_TOKEN",
-    # Verified against this commit. Pinned rather than floating on a branch: the match rules read
-    # specific fields, and a rebuild that moved them should fail loudly, not quietly.
-    #
-    # A fork of `voidtype/slsk_mcp`, because the server pinned there stops answering the moment aioslsk fails
-    # to deserialize a frame: the reader task dies, the child answers every search with nothing for the rest
-    # of its life, and the pass reads it as an empty network. The fork pins aioslsk 1.7.1, where that handler
-    # binds the exception instead of raising, and changes nothing else.
-    soulseek_command=(
-        "uvx", "--from",
-        "git+https://github.com/alchimestre/slsk-mcp.git@892a2a8aec192a1660f24a5313321adc907fafa4",
-        "slsk-mcp",
-    ),
+    # The daemon from `michel/tap/soulseek-rs`: one process that holds the account, speaks JSON-RPC over a
+    # Unix socket, and keeps its transfers across passes. The pipeline starts it when the socket answers
+    # nothing and leaves it running.
+    soulseek_command=("soulseek-rs", "daemon"),
+    soulseek_state_dir="",
     slsk_username_env="SLSK_USERNAME",
     slsk_password_env="SLSK_PASSWORD",
     # The tool's own name on PATH. A machine that runs it out of a checkout sets this to its own argv.
     traktor_command=("traktor-nml",),
-    # aioslsk's defaults are 60000/60001, which a second Soulseek client may already hold.
+    # The port the server hands to peers, and the one forwarded here. The daemon registers exactly this one;
+    # its neighbour is only ever swept in case a client that used both is still alive.
     soulseek_listen_port=20000,
-    soulseek_obfuscated_port=20001,
-    # Twenty transfers at a time, not one: the server's defaults are 3 transfers, 4 searches and *one*
-    # operation — the socket lock, which a search holds for its whole window and a download start takes
-    # again. So `max_operations` must clear `max_searches` with a start to spare, and `max_searches` must be
-    # at least `workers`, or a search queued behind the lock reaches the call deadline instead of waiting.
-    # A number under `workers` does not slow the pass down; it ends it, on four timeouts in a row.
+    # Twenty transfers at a time, which is how many tracks a pass works on: the daemon runs them, and the
+    # server's own default is three.
     max_downloads=20,
-    max_searches=24,
-    max_operations=32,
-    # Never above `max_downloads`, or a download start blocks on the transfer ceiling.
     workers=20,
-    # A pass once fired 330 searches in six minutes — eight at a time — and every search after the first
-    # seconds was answered with nothing, silently; that is 0.9 a second, and it is the ceiling to stay under.
-    # One second is 1.0 a second, and the searches that came back did so in a second or two. The threshold is
-    # a guess, which is why it is a knob.
-    search_interval=1.0,
+    # Known-good rate: 34 searches per 220 seconds, from slsk-batchdl, whose README warns that higher values
+    # earn 30-minute bans. This is the same sustained rate without its burst. A pass still spends ten seconds
+    # collecting each search; 315 tracks at this pace is about 34 minutes of searching.
+    search_interval=6.47,
     # Three silent failures inside a fortnight, then a month off. Bots and paid mirrors fail every request,
     # so they reach three in one pass; a peer whose queue was long, or whose one file was a bad rip, does not
     # fail again for a fortnight and is never ignored at all.
@@ -209,11 +192,10 @@ def load(path: Path | None = None) -> Config:
         acoustid_key_env=credentials.get("acoustid_key", DEFAULTS.acoustid_key_env),
         discogs_token_env=credentials.get("discogs_token", DEFAULTS.discogs_token_env),
         soulseek_command=tuple(soulseek.get("command", DEFAULTS.soulseek_command)),
+        soulseek_state_dir=str(soulseek.get("state_dir", DEFAULTS.soulseek_state_dir)),
         traktor_command=tuple(traktor.get("command", DEFAULTS.traktor_command)),
         **_listening_ports(),
         max_downloads=int(soulseek.get("max_downloads", DEFAULTS.max_downloads)),
-        max_searches=int(soulseek.get("max_searches", DEFAULTS.max_searches)),
-        max_operations=int(soulseek.get("max_operations", DEFAULTS.max_operations)),
         workers=int(soulseek.get("workers", DEFAULTS.workers)),
         search_interval=float(soulseek.get("search_interval", DEFAULTS.search_interval)),
         maxretry=int(soulseek.get("maxretry", DEFAULTS.maxretry)),

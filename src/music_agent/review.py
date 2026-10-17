@@ -87,7 +87,7 @@ def accept(
     idx: int,
     *,
     number: int | None = None,
-    server_factory=None,
+    daemon_factory=None,
     log=print,
     sleep=time.sleep,
     clock=time.monotonic,
@@ -95,7 +95,7 @@ def accept(
     """Take the candidate a person picked, whatever the rule said about it.
 
     This is the one decision that needs the network: the file still has to be fetched. A record already
-    pointing at a file is settled from the disk instead, so the server is opened only when it is needed —
+    pointing at a file is settled from the disk instead, so the daemon is opened only when it is needed —
     which is why it is a factory.
     """
     records = job.records()
@@ -108,10 +108,10 @@ def accept(
         path = record.local_path
         log(f"[{record.idx}] {record.label}: the file is already in staging — not fetching it again")
     else:
-        if server_factory is None:
-            raise NotAccepted(f"track {record.idx} needs its file fetched, and no server was given")
-        with server_factory() as server:
-            decision, path, _report = acquire.await_transfer(server, candidate, log=log, sleep=sleep,
+        if daemon_factory is None:
+            raise NotAccepted(f"track {record.idx} needs its file fetched, and no daemon was given")
+        with daemon_factory() as daemon:
+            decision, path, _report = acquire.await_transfer(daemon, candidate, log=log, sleep=sleep,
                                                              clock=clock)
         if decision is not acquire.Move.DONE:
             # The record is left exactly as it was: nothing was decided, and the candidate is marked tried
@@ -149,15 +149,15 @@ def accept_many(
     picks: Sequence[tuple[int, int | None]],
     *,
     workers: int = 8,
-    server_factory=None,
+    daemon_factory=None,
     log=print,
     sleep=time.sleep,
     clock=time.monotonic,
 ) -> Batch:
-    """Take several candidates at once, through one server and several transfers.
+    """Take several candidates at once, through one daemon and several transfers.
 
-    A queue worked by hand is a list of picks rather than one, and `accept` on its own opens a server and
-    logs in for each — so a batch of thirty was thirty logins and thirty downloads in file order. Every
+    A queue worked by hand is a list of picks rather than one, and `accept` on its own opens the daemon and
+    prepares it for each — so a batch of thirty was thirty preparations in file order. Every
     pick is resolved before anything is opened, so an index that is not on offer is the caller's error
     rather than a batch that stops half-way through.
     """
@@ -176,8 +176,8 @@ def accept_many(
     if not fetching:
         return Batch(tuple(settled), ())
 
-    if server_factory is None:
-        raise NotAccepted("these picks need their files fetched, and no server was given")
+    if daemon_factory is None:
+        raise NotAccepted("these picks need their files fetched, and no daemon was given")
 
     printing = threading.Lock()
     refused: list[str] = []
@@ -186,8 +186,8 @@ def accept_many(
         with printing:
             log(line)
 
-    def fetch(server, record: state.Record, candidate: Candidate) -> Settled | str:
-        decision, path, _report = acquire.await_transfer(server, candidate, log=say, sleep=sleep,
+    def fetch(daemon, record: state.Record, candidate: Candidate) -> Settled | str:
+        decision, path, _report = acquire.await_transfer(daemon, candidate, log=say, sleep=sleep,
                                                          clock=clock)
         if decision is not acquire.Move.DONE:
             # The record is left as it was, and the candidate is marked tried so a later pass moves on.
@@ -196,9 +196,11 @@ def accept_many(
             return f"[{record.idx}] {record.label}: {candidate.user} did not hand the file over ({decision.value})"
         return _take(job, records, record, candidate, path, from_disk=False)
 
-    with server_factory() as server:
+    with daemon_factory() as daemon:
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-            running = {pool.submit(fetch, server, record, candidate) for record, candidate in fetching}
+            # Submitted in pick order: a batch that met a failing peer on a different track each run would
+            # make its own reports untraceable. Completion is still whatever finishes first.
+            running = [pool.submit(fetch, daemon, record, candidate) for record, candidate in fetching]
             for future in as_completed(running):
                 outcome = future.result()
                 (refused if isinstance(outcome, str) else settled).append(outcome)

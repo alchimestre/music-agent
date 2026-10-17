@@ -17,10 +17,9 @@ import pytest
 
 from music_agent import config as config_module
 from music_agent import review, state
-from music_agent.mcp import StdioServer
+from fake_server import Direct
 from music_agent.rules import Candidate
 
-FAKE = str(Path(__file__).parent / "fake_server.py")
 
 # Two files, both plausible and neither verifiable: the length is unknown, so the rule will not choose.
 TWO_UNVERIFIABLE = [
@@ -61,6 +60,13 @@ def a_waiting_track(idx: int = 2) -> state.Record:
                                               duration=None)])
 
 
+def _named(idx: int) -> state.Record:
+    """A waiting track whose candidate is named after its index, so the daemon's derived path is per-track."""
+    return state.Record(idx=idx, artist="Ntogn", title="Mines", duration_s=528,
+                        candidates=[Candidate(user="mole", path=rf"M\Ntogn - Mines {idx}.aiff",
+                                              duration=None)])
+
+
 def setup(tmp_path: Path) -> tuple[config_module.Config, state.Job, list[str]]:
     config_path = tmp_path / "config.toml"
     staging = tmp_path / "staging"
@@ -76,16 +82,12 @@ def setup(tmp_path: Path) -> tuple[config_module.Config, state.Job, list[str]]:
     return config, job, []
 
 
-def server_for(tmp_path: Path, download: str) -> StdioServer:
-    env = dict(os.environ)
-    env["FAKE_RESULTS"] = json.dumps(TWO_UNVERIFIABLE)
-    env["FAKE_DOWNLOAD"] = download
-    env["FAKE_LOG"] = str(tmp_path / "calls.jsonl")
-    return StdioServer([sys.executable, FAKE, "normal"], env=env)
+def server_for(tmp_path: Path, download: str) -> Direct:
+    return Direct(results=TWO_UNVERIFIABLE, download=download)
 
 
-def factory(server: StdioServer):
-    """A `server_factory` that hands over the one stand-in, as the CLI's lambda does the real one."""
+def factory(server: Direct):
+    """A `daemon_factory` that hands over the one stand-in, as the CLI's lambda does the real one."""
     return lambda: server
 
 
@@ -161,8 +163,7 @@ def test_accepting_fetches_the_candidate_and_hands_it_to_process(tmp_path):
     server = server_for(tmp_path, f"downloading:transferring:90000:{landed}")
     landed.write_bytes(b"the file, there when we look")
 
-    with server:
-        settled = review.accept(job, 2, server_factory=factory(server))
+    settled = review.accept(job, 2, daemon_factory=factory(server))
 
     assert settled.decision == state.ACCEPTED
     assert settled.from_disk is False
@@ -185,8 +186,7 @@ def test_the_candidate_he_pointed_at_is_the_one_fetched(tmp_path):
     server = server_for(tmp_path, f"downloading:transferring:90000:{landed}")
     landed.write_bytes(b"the second peer's copy")
 
-    with server:
-        settled = review.accept(job, 2, number=2, server_factory=factory(server))
+    settled = review.accept(job, 2, number=2, daemon_factory=factory(server))
 
     assert settled.candidate.user == "crate"
     assert job.records()[0].tried == ["crate:O\\Ntogn - Mines.flac"]
@@ -205,7 +205,7 @@ def test_a_file_already_in_staging_is_not_fetched_again(tmp_path):
     def never():
         raise AssertionError("a server was opened for a file that is already on disk")
 
-    settled = review.accept(job, 2, server_factory=never)
+    settled = review.accept(job, 2, daemon_factory=never)
 
     assert settled.from_disk is True
     assert job.records()[0].decision == state.ACCEPTED
@@ -217,7 +217,7 @@ def test_a_peer_that_does_not_hand_it_over_decides_nothing(tmp_path):
     server = server_for(tmp_path, "failed::0:")
 
     with server, pytest.raises(review.NotAccepted, match="did not hand the file over"):
-        review.accept(job, 2, server_factory=factory(server))
+        review.accept(job, 2, daemon_factory=factory(server))
 
     record = job.records()[0]
     assert record.decision == state.UNDECIDED, "nothing was decided, so nothing is recorded as decided"
@@ -228,7 +228,7 @@ def test_a_peer_that_does_not_hand_it_over_decides_nothing(tmp_path):
 
 def test_accepting_without_a_server_says_so(tmp_path):
     config, job, _ = setup(tmp_path)
-    with pytest.raises(review.NotAccepted, match="no server was given"):
+    with pytest.raises(review.NotAccepted, match="no daemon was given"):
         review.accept(job, 2)
 
 
@@ -240,7 +240,7 @@ def test_an_accepted_track_leaves_the_queue(tmp_path):
     records[0].local_path = str(here)
     job.write_records(records)
 
-    review.accept(job, 2, server_factory=lambda: pytest.fail("no server needed"))
+    review.accept(job, 2, daemon_factory=lambda: pytest.fail("no server needed"))
 
     waiting = state.queue(job)
     assert waiting.needs_you == []
@@ -254,10 +254,10 @@ def test_a_batch_fetches_through_one_server_and_settles_every_pick(tmp_path):
     landed = [tmp_path / "staging" / f"Ntogn - Mines {n}.aiff" for n in (1, 2, 3)]
     for path in landed:
         path.write_bytes(b"the file, there when we look")
-    job.write_records([a_waiting_track(idx) for idx in (1, 2, 3)])
+    job.write_records([_named(idx) for idx in (1, 2, 3)])
     server = server_for(tmp_path, "|".join(f"downloading:transferring:90000:{p}" for p in landed))
 
-    opened: list[StdioServer] = []
+    opened: list[Direct] = []
 
     def counted():
         opened.append(server)
@@ -265,7 +265,7 @@ def test_a_batch_fetches_through_one_server_and_settles_every_pick(tmp_path):
 
     with server:
         batch = review.accept_many(job, [(1, None), (2, None), (3, None)], workers=3,
-                                   server_factory=counted)
+                                   daemon_factory=counted)
 
     assert len(opened) == 1, "one child for the batch, not one login per track"
     assert batch.refused == ()
@@ -276,18 +276,18 @@ def test_a_batch_fetches_through_one_server_and_settles_every_pick(tmp_path):
 
 def test_one_peer_that_does_not_hand_over_does_not_stop_the_others(tmp_path):
     config, job, _ = setup(tmp_path)
-    landed = [tmp_path / "staging" / f"Ntogn - Mines {n}.aiff" for n in (1, 2)]
+    landed = [tmp_path / "staging" / f"Ntogn - Mines {n}.aiff" for n in (1, 2, 3)]
     for path in landed:
         path.write_bytes(b"the file, there when we look")
-    job.write_records([a_waiting_track(idx) for idx in (1, 2, 3)])
-    # The scripts are handed out in arrival order, so which track meets the failing peer is not fixed:
-    # what is fixed is that it is one of them, and that the other two still come through.
-    server = server_for(tmp_path, "failed::0:|" + "|".join(
-        f"downloading:transferring:90000:{p}" for p in landed))
+    job.write_records([_named(idx) for idx in (1, 2, 3)])
+    # One worker, so the scripts are handed out in pick order and each landed file matches the track's own
+    # candidate: the daemon names the file after the peer's path, not after the script.
+    script = "failed::0:|" + "|".join(f"downloading:transferring:90000:{p}" for p in landed[1:])
+    server = server_for(tmp_path, script)
 
     with server:
-        batch = review.accept_many(job, [(1, None), (2, None), (3, None)], workers=3,
-                                   server_factory=factory(server))
+        batch = review.accept_many(job, [(1, None), (2, None), (3, None)], workers=1,
+                                   daemon_factory=factory(server))
 
     assert len(batch.settled) == 2
     assert len(batch.refused) == 1 and "did not hand the file over" in batch.refused[0]
@@ -302,7 +302,7 @@ def test_a_batch_settles_a_file_already_in_staging_without_the_network(tmp_path)
     records[0].local_path = str(here)
     job.write_records(records)
 
-    batch = review.accept_many(job, [(2, None)], server_factory=lambda: pytest.fail("no server needed"))
+    batch = review.accept_many(job, [(2, None)], daemon_factory=lambda: pytest.fail("no server needed"))
 
     assert batch.settled[0].from_disk is True
     assert batch.refused == ()
@@ -314,7 +314,7 @@ def test_a_batch_with_an_index_that_is_not_on_offer_decides_nothing(tmp_path):
     config, job, _ = setup(tmp_path)
 
     with pytest.raises(review.NoSuchCandidate, match="is not one of them"):
-        review.accept_many(job, [(2, None), (2, 4)], server_factory=lambda: pytest.fail("nothing opened"))
+        review.accept_many(job, [(2, None), (2, 4)], daemon_factory=lambda: pytest.fail("nothing opened"))
 
 
 def test_the_queue_is_split_by_why_a_track_is_in_it(tmp_path):

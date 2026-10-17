@@ -97,54 +97,47 @@ A pass shows its position while it runs: one line rewritten in place at a termin
 it settles when the output is captured — which is the form a harness reads back. Each line carries the count,
 what the track came to, and its label.
 
-Searching is paced: one search every `search_interval` seconds in `config.toml`, one by default, which is the
-rate the network has answered at. The child's own log comes out on stderr with an `slsk: ` prefix.
+Searching is paced: one search every `search_interval` seconds in `config.toml`, 6.47 by default — 34
+searches per 220 seconds, the rate slsk-batchdl ships, with its warning that higher values earn 30-minute bans.
 
-Both failures that stop a pass are the child's, and each says so in one line. A search that comes back empty
-is never one of them: that is the network answering, and once the findable tracks are taken, what is left to
-search is the rare ones, whose searches come back empty one after another.
+The client is `soulseek-rs daemon`: one process that holds the account and answers JSON-RPC on a Unix socket
+in `state_dir` (`~/.local/share/soulseek-rs/state` by default). A pass starts it when nothing answers there
+and leaves it running, so the session and any unfinished transfers belong to the daemon and the next pass
+picks them up; its log is `daemon.log` beside the socket. `soulseek-rs daemon status` says what it is doing.
 
-- **Nothing answering.** Four searches in a row that time out instead of returning means the child itself has
-  stopped talking. The pass stops, the run stays open, and a fresh pass picks it up.
-- **No session.** The child reports that it has no session to search with — a login the server refused, or one
-  it took away. Every search after that comes back empty, and a fresh child loses the same session while
-  another client holds the account, so the passes stop there instead of asking again.
+Two failures can stop a pass, and each says so in one line. A search that comes back empty is never one of
+them: that is the network answering, and once the findable tracks are taken, what is left to search is the
+rare ones, whose searches come back empty one after another.
+
+- **Nothing answering.** Four calls in a row that time out instead of returning means the daemon has stopped
+  talking. The pass stops, the run stays open, and a fresh pass picks it up.
+- **Session displaced.** The daemon reports `session_loss: "displaced"`: another login took the account. Every
+  search after that comes back empty, and a fresh daemon loses the same session while another client holds
+  the account, so the passes stop there instead of asking again. `"disconnected"` is not this — the daemon
+  logs back in on its own.
 
 Tracks a stopped pass never reached are reported as **not searched** and left exactly as they were.
 
-A child can also go deaf without saying anything: the searches stop being answered, its own log stops at the
-last line it wrote, and it neither errors nor exits. The pass cannot tell that from a child that died, so it
-ends it on four timeouts — the right call, and no explanation. Two ways to ask a child where it stopped, both
-worth having ready before the next occurrence:
+The one port that must be free is `SLSK_LISTEN_PORT` (20000 by default). A Soulseek client left on it by an
+earlier run is logged in on the same account, so the server hands it every search reply and the pass sees an
+empty network. A pass sweeps it before starting the daemon, stopping that client and saying which; anything
+else holding it is named and the pass stops rather than killing a stranger's process.
 
-1. `kill -ABRT <child pid>` — the child is started with `PYTHONFAULTHANDLER` armed, so it writes its own
-   Python stack into the pass's `slsk: ` log and exits. Needs no root.
-2. `sudo py-spy dump --pid <child pid>` — every asyncio task and the await each one is sitting on, which is
-   what names the culprit when the child is alive and idle rather than blocked inside a call. Needs root on
-   macOS.
+That is why a harness's own Soulseek MCP server has to be **disabled or unmounted**, not just stopped, while
+a pass runs: it is on the same account, the server keeps one session per account, and it is started again the
+moment it is killed. With the daemon the symptom is `session_loss: "displaced"`, and `soulseek-rs daemon
+status` says so without a log to read.
 
-The other silent failure is the ports. `SLSK_LISTEN_PORT` and `SLSK_OBFUSCATED_PORT` (20000 and 20001 by
-default) must be free: a Soulseek client left on them by an earlier run is logged in on the same account, so
-the server hands it every search reply and the pass sees an empty network. A pass frees them itself, stopping
-that client and saying which, so nothing has to be arranged by hand. Anything *else* holding a port is named
-and the pass stops rather than killing a stranger's process.
+One pass at a time, and never kill one mid-session. A pass that is killed abruptly — SIGKILL, a closed
+terminal — leaves the server holding that session until its own timeout, and every login after it is refused
+for twelve to seventeen minutes. The cure is to wait, and it is worth knowing that a brand-new account still
+logs in and searches from the same machine while this is happening, which is what makes it easy to mistake
+for a network fault. Two passes at once cannot work for the same reason: the later one displaces the first
+one's session.
 
-That is why a harness's own Soulseek MCP server has to be **disabled or unmounted**, not just stopped, while a
-pass runs: it is on the same account, the server keeps one session per account, and it is started again the
-moment it is killed. The symptom is a child that logs in and then answers no searches at all — its own log says
-`Login failed: expected login response from server but got : None`, or `server closed connection`.
-
-One pass at a time, and never kill one mid-session. A pass that is killed abruptly — SIGKILL, a closed terminal,
-another pass's `free_ports` — leaves the server holding that session, and every login after it gets the same
-silence until the server lets go: the child reaches the server, sends its login, and is answered with nothing.
-Nothing local fixes it and a fresh child does not; the cure is to stop asking, and it is worth knowing that a
-brand-new account still logs in and searches from the same machine while this is happening, which is what makes
-it easy to mistake for a network fault. Two passes at once cannot work for the same reason: the later one's
-first step stops the earlier one's child.
-
-While it is up the child also shares: `paths.lossless` and `paths.lossy` are handed over as
-`SLSK_SHARE_DIRS`, so peers see a client with a library rather than a leecher, and the pass answers uploads
-while it runs. Staging is not one of them, since it holds what is still being worked on.
+While it is up the daemon shares: `paths.lossless` and `paths.lossy` are handed to it at the start of every
+pass, so peers see a client with a library rather than a leecher, and the daemon answers uploads while it
+runs. Staging is not one of them, since it holds what is still being worked on.
 
 Peers that advertise a file and then deliver nothing are counted per user, across runs: `maxretry` failures
 inside `findtime_days` earn an ignore lasting `bantime_days`, and an ignored peer's files never enter a record.

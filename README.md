@@ -109,15 +109,14 @@ Those three flags are the only writers of the decision axis (`GLOSSARY.md`).
 and library directories, the loudness targets and tolerances, the Soulseek pace, the peer ignore policy, the
 `[tools]` paths, and the names of the credential environment variables. No secrets.
 
-The two Soulseek listening ports are not in it: which port this machine can accept peers on is a fact about its
-network, so `SLSK_LISTEN_PORT` and `SLSK_OBFUSCATED_PORT` live in `.env` with the credentials. Forward the
-first on the router — a peer that cannot reach it cannot deliver search results, and every search comes back
-empty.
+The Soulseek listening port is not in it: which port this machine can accept peers on is a fact about its
+network, so `SLSK_LISTEN_PORT` lives in `.env` with the credentials. Forward it on the router — a peer that
+cannot reach it cannot open the connection that carries the file.
 
 ## Driving it from an agent
 
 `skill/SKILL.md` ships with the project: `run` first, then the stage commands behind it, what each stage prints,
-and the rare track the queue still asks about. Point a harness at it. A pass frees the two Soulseek ports itself,
+and the rare track the queue still asks about. Point a harness at it. A pass frees the Soulseek listening port itself,
 stopping a client left on them, so a harness's own Soulseek server does not have to be arranged around.
 
 ## Tests

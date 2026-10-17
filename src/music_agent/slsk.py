@@ -1,243 +1,387 @@
-"""The Soulseek side: starting the acquisition server, and reading what it answers.
+"""The Soulseek side: the daemon's control socket, and what it answers.
 
-The server reports a failure *inside* an ordinary result — `{"status": "error", "code": ..., "message":
-...}` — rather than raising.
+`soulseek-rs daemon` is one process that holds the account and speaks newline-delimited JSON-RPC over a
+Unix socket. Everything the pipeline asks of the network goes through it — a search, a download, the
+transfers in flight — and the daemon owns the session, the shares and the files. Nothing is scraped from
+another process's stderr, and a pass that ends leaves the session and any unfinished transfers where they are.
+
+The daemon is started here when the socket answers nothing, and left running afterwards: a login costs the
+network's timeout, and a transfer that survives one pass is resumed by the next.
 """
 
 from __future__ import annotations
 
+import json
 import os
-
-from music_agent.config import ENV_HINT, Config, MissingCredential
+import socket
+import subprocess
+import threading
+import time
+from pathlib import Path
+from typing import Any, Iterable
 
 from . import processes
+from .config import ENV_HINT, Config, MissingCredential
 
-
-class ToolError(RuntimeError):
-    """The server refused a call. `code` is its own short reason, e.g. `not_authenticated`."""
-
-    def __init__(self, tool: str, code: str, message: str) -> None:
-        super().__init__(f"{tool}: {code}: {message}")
-        self.tool = tool
-        self.code = code
-        self.message = message
+# The daemon's control protocol, as `soulseek-rs` 19.1.0 speaks it. It is bumped whenever a change would
+# break a client written against the old shape, and a mismatch is refused rather than guessed at.
+PROTOCOL = 2
+# A connection that has not authenticated is closed after thirty seconds; a daemon that has to build itself
+# the first time is slower than that.
+STARTUP_TIMEOUT = 45.0
+# A local round trip. The daemon answers from its own memory except when starting a transfer.
+CALL_TIMEOUT = 15.0
+# The daemon caps the lines it *accepts* at 1 MiB; its own answers are not capped. A broad search answer —
+# "aphex twin" — measured 1.6 MB in one line on 2026-10-17, so the limit here is the reply's, not the
+# request's.
+_LINE = 8 << 20
 
 
 class PortBusy(RuntimeError):
-    """Something on this machine holds a Soulseek listening port that is not a Soulseek client."""
+    """Something else holds the Soulseek listening port and would not stop."""
 
 
-# A Soulseek client, by the name its process carries. The squatter here is another harness's `slsk-mcp`,
-# started on the same account and never stopped: it answers the same two ports, so the server routes search
-# replies to it and a pass on this side comes back empty while looking like a quiet network.
-_SLSK_NAMES = ("slsk-mcp", "slsk_mcp", "soulseek", "nicotine", "sldl")
+class DaemonError(RuntimeError):
+    """The daemon refused a call, or the socket stopped answering."""
+
+    def __init__(self, method: str, message: str, exit_status: int | None = None) -> None:
+        super().__init__(f"{method}: {message}")
+        self.method = method
+        self.message = message
+        self.exit_status = exit_status
+
+
+def state_dir(config: Config) -> Path:
+    """Where the daemon keeps its socket, token and durable transfer state."""
+    if config.soulseek_state_dir:
+        return Path(config.soulseek_state_dir).expanduser()
+    return Path(os.environ.get("SOULSEEK_STATE_DIR")
+                or Path.home() / ".local" / "share" / "soulseek-rs" / "state")
+
+
+def socket_path(config: Config) -> Path:
+    return state_dir(config) / "daemon.sock"
+
+
+def environment(config: Config) -> dict[str, str]:
+    """The daemon's environment: the credentials, the one listening port, and its ceilings.
+
+    The shares and the download directory are per session, so they are set over the socket once the daemon
+    is up — a folder added at runtime is served without a restart.
+    """
+    username = os.environ.get(config.slsk_username_env)
+    password = os.environ.get(config.slsk_password_env)
+    if not username:
+        raise MissingCredential(f"{config.slsk_username_env} is not set — add it to .env, or run: "
+                                f"{ENV_HINT}")
+    if not password:
+        raise MissingCredential(f"{config.slsk_password_env} is not set — add it to .env, or run: "
+                                f"{ENV_HINT}")
+    env = dict(os.environ)
+    env["SOULSEEK_USERNAME"] = username
+    env["SOULSEEK_PASSWORD"] = password
+    env["SOULSEEK_STATE_DIR"] = str(state_dir(config))
+    env["SOULSEEK_LISTENER_PORT"] = str(config.soulseek_listen_port)
+    env["SOULSEEK_MAX_CONCURRENT_DOWNLOADS"] = str(config.max_downloads)
+    # The server's own default is 10s, which cuts the window short before the pass has read a slow peer's
+    # answer; the pass decides its own window and reads once, so the daemon's is set to match.
+    env["SOULSEEK_SEARCH_TIMEOUT"] = "10"
+    return env
+
+
+# The clients that squat the account and the port. `soulseek-rs` is deliberately absent: the daemon is ours,
+# and this function is what clears the field *before* it is started.
+SQUATTERS = ("slsk-mcp", "slsk_mcp", "nicotine", "sldl", "soulseekqt", "soulseek-qt")
 
 
 def free_ports(config: Config, *, log=print) -> list[int]:
-    """Clear the field: no other Soulseek client, and the two Soulseek ports ours.
+    """Clear the field: no other Soulseek client, and the listening port ours.
 
-    aioslsk registers the listening port with the server, and a client that keeps the port after its run has
-    ended is not harmless: the account is the same, so the server hands every search reply to the session
-    that still holds it and this pass sees nothing. A holder whose command names a Soulseek client is
-    stopped; anything else holding the port is named and raised, because it is not ours to kill.
-
-    A client that is *logged in* is stopped whether or not it holds a port. The server keeps one session per
-    account, so a second client makes it close this one's connection: the pass then logs in, answers no
-    search, and looks like a dead network. A harness starts such a client again the moment it is killed, so
-    this is a defence that has to be repeated rather than a fix — the mount has to go.
+    A second client on the same account makes the server hand it every search reply, so this pass asks and
+    hears nothing. The processes stopped are another harness's clients, restarted on demand; anything else
+    on the port is named and left alone.
     """
-    stray = processes.stop_named(_SLSK_NAMES[:2], log=log)
+    stopped = []
+    for name in SQUATTERS:
+        pids = [pid for pid in processes.named(name) if pid != os.getpid()]
+        if pids:
+            stubborn = processes.stop(pids)
+            if stubborn:
+                raise PortBusy(f"pids {stubborn} ({name}) would not stop")
+            log(f"stopped {name} (pid {', '.join(str(pid) for pid in pids)})")
+            stopped.extend(pids)
 
-    ports = (config.soulseek_listen_port, config.soulseek_obfuscated_port)
+    # The obfuscated port is the plain one plus one by convention; a client that registered it before this
+    # pipeline moved off it may still hold it, so the sweep covers both.
+    ports = (config.soulseek_listen_port, config.soulseek_listen_port + 1)
     held: list[int] = []
     for port in ports:
         for pid in processes.listeners(port):
-            command = processes.command_of(pid)
-            if not any(name in command.lower() for name in _SLSK_NAMES):
-                raise PortBusy(
-                    f"port {port} is held by {command or f'pid {pid}'} — stop it and run this again"
-                )
-            if pid not in held:                  # one client holds both ports, and is named once
+            if pid not in held and pid != os.getpid():
                 held.append(pid)
-
     if not held:
-        return stray
+        return stopped
 
     stubborn = processes.stop(held)
     if stubborn:
         raise PortBusy(f"pids {stubborn} would not stop, and they hold {ports}")
-    log(f"stopped a stale Soulseek client holding port{'s' if len(held) > 1 else ''} "
+    log(f"stopped a stale Soulseek client holding port{'s' if len(ports) > 1 else ''} "
         f"{', '.join(str(port) for port in ports)} (pid {', '.join(str(pid) for pid in held)})")
-    return stray + [pid for pid in held if pid not in stray]
+    return stopped + held
 
 
-class ChildLog:
-    """The child's stderr, made readable: what can be acted on, and none of the walls.
+class Daemon:
+    """The daemon's socket: one request at a time, notifications skipped, replies matched by id."""
 
-    aioslsk logs one warning per peer whose connection it could not broker. They arrive by the dozen, they
-    say nothing a person can do, and one refused peer is one candidate that cannot be served — so they are
-    counted and reported once. A traceback is a failure worth knowing about, but its frames are the wall:
-    the exception keeps its line and loses the rest. Nothing is lost outright — `mcp.StdioServer` keeps the
-    child's last lines and quotes them when a call fails.
-    """
-
-    NOISE = "failed to fulfill ConnectToPeer request"
-    OPENING = "Traceback (most recent call last):"
-    # Once per call, once per search and once per task cancelled, and not one of them says anything a person
-    # acts on: the pass prints the track it is asking about, and the child's last lines are quoted when a call
-    # fails. Counted and left out, so a pass over three hundred tracks does not bury its own bar in protocol.
-    CHATTER = (
-        "Processing request of type CallToolRequest",
-        "Starting search query=",
-        "cancelling task :",
-        "not sending message, connection is closing",
-    )
-    # The ways the child loses the ability to answer. It reports each of them and recovers from none.
-    # `no valid session` is the server taking the session away. The other is the child's own message reader
-    # dying: `DataConnection._message_reader_loop` raises `UnboundLocalError` on a frame it cannot
-    # deserialize, the task ends, and nothing says so — every search after it answers nothing, and `_connect`
-    # then short-circuits on a flag only `logout()` clears, so it cannot log in again either.
-    LOST_SESSION = (
-        # Every spelling the child has for it: the search manager's `no valid session was set`, once per
-        # search, and the shares manager's `attempted to report shares without valid session` at startup,
-        # which is a login that never completed at all.
-        "valid session",
-        # The login itself being refused, which is the same thing said once: `Login failed: expected login
-        # response from server but got : None`. The server holds one session per account, so a client that
-        # ended abruptly leaves the next login answered with nothing — it is the account's state, not this
-        # child's, and no child gets past it until the server lets go.
-        "Login failed",
-        # And the server hanging up on a session it had already granted: `server closed connection, will not
-        # attempt to reconnect`, which the fork logs once when it happens and then never reconnects. Read as
-        # the session's loss rather than let pass as a dead child, because the child that reports it is not
-        # crashed — it is connected to nothing, and every search after the line goes unanswered. Measured
-        # 2026-10-16: pass 5 of a 315-track grab answered 57 searches, took this line, and then spent 69
-        # calls finding out; the three retries after it went out with no wait at all and were refused.
-        "server closed connection",
-    )
-    READER_DIED = (
-        # The other way it stops answering, and a different thing entirely: aioslsk's
-        # `DataConnection._message_reader_loop` raises on a frame it cannot deserialize — a short read gives
-        # it `struct.error: unpack_from requires a buffer of at least 293 bytes` — the task ends, and nothing
-        # says so. Told apart from the session because the answer differs: the session belongs to the
-        # account and the next child loses it the same way, while this is one child's bad luck and the next
-        # one carries on from where the pass left off.
-        "MessageDeserializationError",
-        "cannot access local variable 'message'",
-    )
-    # Which of those it was, in the words a person reads. They call for different things: a closed connection
-    # is the server dropping a session it granted, a refused login is the account still held from the last
-    # child, and no session is the child's own state once either has happened. Counted separately because the
-    # report could otherwise only say that one of them happened.
-    LOSSES = (
-        ("server closed connection", "the server closed the connection"),
-        ("Login failed", "the server refused the login"),
-        ("valid session", "no session to search with"),
-    )
-
-    def __init__(self, log=print) -> None:
+    def __init__(self, config: Config, *, log=print) -> None:
+        self._config = config
         self._log = log
-        self._frames = False
-        self.refused = 0
-        self.lost_session = 0
-        self.reader_died = 0
-        self.chatter = 0
-        self.losses: dict[str, int] = {}
+        self._sock: socket.socket | None = None
+        self._buffer = b""
+        # Re-entrant: `call` closes the socket on a read error while holding it, and `close` takes it again.
+        self._lock = threading.RLock()         # one request in flight, so replies cannot cross
+        self._searches: dict[str, threading.Lock] = {}
+        self._search_lock = threading.Lock()   # guards `_searches`
+        self._ids = iter(range(1, 1 << 30))
+        self.username = ""
 
-    @property
-    def cannot_answer(self) -> bool:
-        """Whether the child has said it can no longer answer, either way. It recovers from neither."""
-        return bool(self.lost_session or self.reader_died)
+    # ── lifecycle ────────────────────────────────────────────────────────────
 
-    def __call__(self, line: str) -> None:
-        if any(marker in line for marker in self.LOST_SESSION):
-            self.lost_session += 1
-            for marker, name in self.LOSSES:
-                if marker in line:
-                    self.losses[name] = self.losses.get(name, 0) + 1
-                    break
+    def ensure(self) -> None:
+        """Connect, starting the daemon first when nothing answers on the socket."""
+        if self._sock is not None:
             return
-        if any(marker in line for marker in self.READER_DIED):
-            self.reader_died += 1
+        if self._open():
             return
-        if any(marker in line for marker in self.CHATTER):
-            self.chatter += 1
-            return
-        if self.NOISE in line:
-            self.refused += 1
-            return
-        if line.strip() == self.OPENING:
-            self._frames = True
-            return
-        if self._frames:
-            if line[:1].isspace():  # a frame, or the source line beneath it
-                return
-            self._frames = False
-            line = f"{line.strip()} (frames suppressed)"
-        self._log(f"slsk: {line}")
+        self.start()
+        deadline = time.monotonic() + STARTUP_TIMEOUT
+        while not self._open():
+            if time.monotonic() > deadline:
+                raise DaemonError("start", f"no daemon on {socket_path(self._config)} after "
+                                           f"{STARTUP_TIMEOUT:g}s — see "
+                                           f"{state_dir(self._config) / 'daemon.log'}")
+            time.sleep(0.25)
 
-    def route(self, say) -> None:
-        """Send what this keeps through `say` instead of printing it.
+    def start(self) -> None:
+        """Clear the port, then start the daemon detached, its own log beside its state."""
+        free_ports(self._config, log=self._log)
+        directory = state_dir(self._config)
+        directory.mkdir(parents=True, exist_ok=True)
+        log = directory / "daemon.log"
+        with open(log, "ab") as handle:
+            try:
+                subprocess.Popen(
+                    list(self._config.soulseek_command),
+                    env=environment(self._config),
+                    stdin=subprocess.DEVNULL,
+                    stdout=handle,
+                    stderr=handle,
+                    start_new_session=True,
+                )
+            except FileNotFoundError as exc:
+                raise DaemonError("start", f"cannot run {self._config.soulseek_command[0]!r}: {exc}") from exc
+        self._log(f"started the Soulseek daemon — its log is {log}")
 
-        A pass draws its progress on the same terminal, and a line printed beside a bar that is rewritten in
-        place leaves the bar shredded around it; `say` is the bar's own writer, which erases itself first.
+    def stop(self) -> None:
+        """Ask the daemon to shut down, then let go of the socket."""
+        try:
+            self.call("daemon.stop", {})
+        except (DaemonError, OSError):
+            pass
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        with self._lock:
+            if self._sock is not None:
+                try:
+                    self._sock.close()
+                finally:
+                    self._sock = None
+                    self._buffer = b""
+
+    def __enter__(self) -> "Daemon":
+        self.ensure()
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        self.close()
+        return False
+
+    # ── the wire ─────────────────────────────────────────────────────────────
+
+    def _open(self) -> bool:
+        path = socket_path(self._config)
+        if not path.exists():
+            return False
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.connect(str(path))
+        except OSError:
+            sock.close()
+            return False
+        self._sock = sock
+        self._buffer = b""
+        try:
+            answer = self.call("auth", {"protocol": PROTOCOL}, timeout=STARTUP_TIMEOUT)
+        except DaemonError as error:
+            self.close()
+            raise
+        if answer.get("protocol") != PROTOCOL:
+            self.close()
+            raise DaemonError("auth", f"the daemon speaks protocol {answer.get('protocol')}, this client "
+                                      f"{PROTOCOL} — pin the binary and the client to one version")
+        self.username = str(answer.get("username") or "")
+        self._check_account()
+        return True
+
+    def _check_account(self) -> None:
+        """The daemon's account is the one this machine configured; another one would mix two libraries."""
+        wanted = os.environ.get(self._config.slsk_username_env)
+        if wanted and self.username and wanted.lower() != self.username.lower():
+            raise DaemonError("auth", f"the daemon is logged in as {self.username!r}, and this machine's "
+                                      f"{self._config.slsk_username_env} names {wanted!r} — stop it with "
+                                      f"`soulseek-rs daemon stop`, then run the pass again")
+
+    def call(self, method: str, params: dict | None = None,
+             timeout: float = CALL_TIMEOUT) -> dict[str, Any]:
+        """One call, its answer, and any notification the daemon pushed meanwhile."""
+        with self._lock:
+            if self._sock is None:
+                raise DaemonError(method, "the daemon's socket is closed")
+            message_id = next(self._ids)
+            line = json.dumps({"jsonrpc": "2.0", "id": message_id, "method": method,
+                               "params": params or {}}) + "\n"
+            try:
+                self._sock.sendall(line.encode("utf-8"))
+            except OSError as error:
+                self.close()
+                raise DaemonError(method, f"the socket closed on the write: {error}") from error
+            deadline = time.monotonic() + timeout
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise DaemonError(method, f"no answer within {timeout:g}s")
+                try:
+                    self._sock.settimeout(remaining)
+                    message = json.loads(self._readline())
+                except socket.timeout:
+                    raise DaemonError(method, f"no answer within {timeout:g}s") from None
+                except OSError as error:
+                    self.close()
+                    raise DaemonError(method, f"the socket closed on the read: {error}") from error
+                except json.JSONDecodeError:
+                    continue                     # a line that is not ours is not an answer either way
+                if message.get("id") != message_id:
+                    continue                     # an event, or an answer to a call already given up on
+                error = message.get("error")
+                if error is not None:
+                    data = error.get("data") or {}
+                    raise DaemonError(method, str(error.get("message") or "refused"), data.get("exit"))
+                return message.get("result") or {}
+
+    def _readline(self) -> str:
+        assert self._sock is not None
+        while b"\n" not in self._buffer:
+            chunk = self._sock.recv(65536)
+            if not chunk:
+                raise OSError("end of file")
+            self._buffer += chunk
+            if len(self._buffer) > _LINE:
+                self._buffer = b""
+                raise OSError("a line larger than the daemon's own limit")
+        line, _, self._buffer = self._buffer.partition(b"\n")
+        return line.decode("utf-8", "replace")
+
+    # ── what the pipeline asks ───────────────────────────────────────────────
+
+    def status(self) -> dict[str, Any]:
+        """The daemon's own view: connected, logged in, shares, and the last session loss."""
+        return self.call("daemon.status", {})
+
+
+    def session_lost(self) -> bool:
+        """Whether the account's session was taken by another login.
+
+        The daemon reports two kinds. `disconnected` is a dropped connection, which it logs back in from on
+        its own; `displaced` is another client logging in as this account, and no retry of ours can win that.
+        Only the second stops a pass.
         """
-        self._log = say
+        return self.status().get("session_loss") == "displaced"
 
-    def report(self) -> None:
-        """What the child's noise came to, in one line each, at the end of a pass."""
-        if self.lost_session:
-            times = "time" if self.lost_session == 1 else "times"
-            detail = " · ".join(f"{count} {name}" for name, count in
-                                sorted(self.losses.items(), key=lambda pair: -pair[1]))
-            self._log(f"slsk: the child was left without a session {self.lost_session} {times} — {detail}. "
-                      f"Every search after the first came back empty")
-        if self.reader_died:
-            times = "time" if self.reader_died == 1 else "times"
-            self._log(f"slsk: the child's message reader died {self.reader_died} {times} on a frame it could "
-                      f"not read — a short read raises `struct.error` inside aioslsk — and it answers nothing "
-                      f"after that")
-        if self.refused:
-            self._log(f"slsk: {self.refused} peer connections refused — the network, not the run")
-        if self.chatter:
-            self._log(f"slsk: {self.chatter} lines of the child's own progress left out of the terminal — one "
-                      f"per call, one per search, one per task it cancels on the way down")
+    def set_dir(self, directory: Path | str) -> None:
+        self.call("download.set_dir", {"directory": str(directory)})
+
+    def share(self, directories: Iterable[Path | str]) -> dict[str, Any]:
+        """Serve these folders at once, without a restart. The answer is the index it built."""
+        return self.call("shares.set", {"directories": [str(path) for path in directories]})
+
+    def search(self, query: str, *, timeout: float) -> list[dict[str, Any]]:
+        """One search: the query on the wire, the window waited here, every answer read once.
+
+        The daemon returns immediately and collects answers for as long as they come; the window is the
+        client's, because a client's search must not be time the daemon spends not answering anyone else.
+        Two records with the same query take turns rather than sharing one window.
+        """
+        with self._search_lock:
+            lock = self._searches.setdefault(query, threading.Lock())
+        with lock:
+            self._forget(query)
+            try:
+                self.call("search.start", {"query": query})
+                time.sleep(timeout)
+                payload = self.call("search.results", {"query": query})
+            finally:
+                self._forget(query)
+        return _files(payload.get("results") or [])
+
+    def _forget(self, query: str) -> None:
+        try:
+            self.call("search.forget", {"query": query})
+        except DaemonError:
+            pass                                  # nothing was remembered under that query
+
+    def download(self, user: str, filename: str, *, size: int = 0,
+                 metadata: dict | None = None) -> dict[str, Any]:
+        payload = self.call("download.start", {"username": user, "filename": filename,
+                                               "size": int(size or 0),
+                                               "metadata": metadata or {}})
+        return payload.get("download") or {}
+
+    def downloads(self) -> dict[tuple[str, str], dict[str, Any]]:
+        payload = self.call("download.list", {})
+        return {(str(item.get("username")), str(item.get("filename"))): item
+                for item in payload.get("downloads") or []}
+
+    def cancel(self, user: str, filename: str) -> None:
+        self.call("download.cancel", {"username": user, "filename": filename})
 
 
-def environment(config: Config) -> dict[str, str]:
-    """The child's environment: the credentials, our own ports, what it shares, and its ceilings.
+def _files(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One flat offer per file, in the shape `acquire.candidate_of` reads.
 
-    Credentials arrive under whatever names this machine uses and are copied into the two the server looks
-    for, so `config.toml` stays free to name them the local way. The ceilings are set here so how much of
-    this runs at once is one decision, rather than a default buried in a pinned build.
+    The daemon groups a peer's answers under the peer, with the protocol's attribute codes beside each file:
+    0 is the bitrate, 1 the duration in seconds.
     """
-    for name in (config.slsk_username_env, config.slsk_password_env):
-        if not os.environ.get(name):
-            raise MissingCredential(f"{name} is not set — add it to .env, or run: {ENV_HINT}")
-
-    env = dict(os.environ)
-    env["SLSK_USERNAME"] = os.environ[config.slsk_username_env]
-    env["SLSK_PASSWORD"] = os.environ[config.slsk_password_env]
-    env["SLSK_DOWNLOAD_DIR"] = str(config.staging)
-    # The two lanes are what we share: a client that reports no shared files is a leecher, and peers queue
-    # or ban those. `staging` is not one of them — it holds what is still being worked on.
-    env["SLSK_SHARE_DIRS"] = os.pathsep.join(str(lane) for lane in (config.lossless, config.lossy))
-    env["SLSK_LISTEN_PORT"] = str(config.soulseek_listen_port)
-    env["SLSK_OBFUSCATED_PORT"] = str(config.soulseek_obfuscated_port)
-    env["SLSK_MAX_CONCURRENT_DL"] = str(config.max_downloads)
-    env["SLSK_MAX_CONCURRENT_SEARCH"] = str(config.max_searches)
-    env["SLSK_MAX_CONCURRENT_OPS"] = str(config.max_operations)
-    # A child that goes deaf says nothing about why: no error, no exit, no further lines, and the pass ends it
-    # on four timeouts without learning anything. Armed, `kill -ABRT <pid>` writes its own Python stack into
-    # this pass's log.
-    env["PYTHONFAULTHANDLER"] = "1"
-    return env
+    offers = []
+    for peer in results:
+        for item in peer.get("files") or []:
+            attribs = item.get("attribs") or {}
+            offers.append({
+                "username": peer.get("username") or "",
+                "filename": item.get("name") or "",
+                "filesize": item.get("size"),
+                "bitrate": attribs.get("0"),
+                "duration_sec": attribs.get("1"),
+                "has_free_slots": int(peer.get("slots") or 0) > 0,
+                "avg_speed": peer.get("speed"),
+            })
+    return offers
 
 
-def check(payload: object, tool: str) -> dict:
-    """The payload, or a `ToolError` if the server reported a failure inside it."""
-    if not isinstance(payload, dict):
-        raise ToolError(tool, "unexpected", f"expected an object, got {type(payload).__name__}")
-    if payload.get("status") == "error":
-        raise ToolError(tool, str(payload.get("code", "?")), str(payload.get("message", "")))
-    return payload
+def local_path(download: dict[str, Any]) -> str:
+    """Where the daemon puts a finished file: its directory and the peer's basename, flattened."""
+    filename = str(download.get("filename") or "")
+    name = filename.replace("\\", "/").rsplit("/", 1)[-1]
+    directory = str(download.get("download_directory") or "")
+    return str(Path(directory) / name) if directory and name else ""
