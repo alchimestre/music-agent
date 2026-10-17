@@ -89,6 +89,11 @@ def environment(config: Config) -> dict[str, str]:
     return env
 
 
+# A connect can fail on a daemon that is still starting or briefly busy. Waiting this long before
+# concluding nothing is there is what keeps a transient miss from starting a second daemon, which has to
+# kill the first to take the port.
+CONNECT_GRACE = 0.5
+
 # The clients that squat the account and the port. `soulseek-rs` is deliberately absent: the daemon is ours,
 # and this function is what clears the field *before* it is started.
 SQUATTERS = ("nicotine", "sldl", "soulseekqt", "soulseek-qt")
@@ -116,11 +121,21 @@ def free_ports(config: Config, *, log=print) -> list[int]:
     if not held:
         return stopped
 
+    # Our own daemon holds this port too, and killing it is right only when it has stopped answering — the
+    # caller has already tried to connect twice. It is named apart, because the log otherwise reads like a
+    # stranger was killed.
+    ours = Path(config.soulseek_command[0]).name
+    mine = [pid for pid in held if ours in processes.command_of(pid)]
+    others = [pid for pid in held if pid not in mine]
     stubborn = processes.stop(held)
     if stubborn:
         raise PortBusy(f"pids {stubborn} would not stop, and they hold {port}")
-    log(f"stopped a stale Soulseek client holding port {port} "
-        f"(pid {', '.join(str(pid) for pid in held)})")
+    if mine:
+        log(f"stopped the Soulseek daemon that stopped answering port {port} "
+            f"(pid {', '.join(str(pid) for pid in mine)})")
+    if others:
+        log(f"stopped a stale Soulseek client holding port {port} "
+            f"(pid {', '.join(str(pid) for pid in others)})")
     return stopped + held
 
 
@@ -147,6 +162,8 @@ class Daemon:
         if self._sock is not None:
             return
         if self._open():
+            return
+        if self._connect_again():
             return
         self.start()
         deadline = time.monotonic() + STARTUP_TIMEOUT
@@ -235,6 +252,11 @@ class Daemon:
         self.username = str(answer.get("username") or "")
         self._check_account()
         return True
+
+    def _connect_again(self) -> bool:
+        """One more try after a grace: a daemon that was momentarily busy is not one to replace."""
+        time.sleep(CONNECT_GRACE)
+        return self._open()
 
     def _check_account(self) -> None:
         """The daemon's account is the one this machine configured; another one would mix two libraries."""

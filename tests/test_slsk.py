@@ -179,6 +179,28 @@ def test_a_closed_socket_is_reconnected_before_the_next_call(tmp_path, creds):
         assert daemon.status()["username"]
 
 
+def test_a_missed_connect_does_not_replace_the_daemon(tmp_path, creds, monkeypatch):
+    """A connect can miss on a daemon that is still starting or briefly busy. Starting a second daemon means
+    killing the first to take the port and logging the account in again — so the second attempt is a connect,
+    and only after that is a start considered."""
+    running = Running(tmp_path)
+    with running as (_daemon, _fake):
+        attempts = []
+        real = slsk.Daemon._open
+
+        def flaky(self):
+            attempts.append(1)
+            return False if len(attempts) == 1 else real(self)
+
+        monkeypatch.setattr(slsk.Daemon, "_open", flaky)
+        monkeypatch.setattr(slsk, "CONNECT_GRACE", 0)
+        monkeypatch.setattr(slsk.Daemon, "start",
+                            lambda self: pytest.fail("started a second daemon"))
+        slsk.Daemon(running.config).ensure()
+
+    assert len(attempts) == 2
+
+
 def test_a_download_is_addressable_and_its_path_is_derived(tmp_path, creds):
     """The daemon names the directory and the peer's own path; the file is the basename of that path inside
     it, which is where the daemon writes the rename."""
