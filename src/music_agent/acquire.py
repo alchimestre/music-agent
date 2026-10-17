@@ -713,10 +713,13 @@ def run(
     # 2026-10-16 five passes over 315 tracks, between 20:54 and 22:28, searched the first 91 records over and
     # over and never reached the other 224.
     asked = job.searched()
-    records = sorted(job.records(), key=lambda record: (record.idx in asked, record.idx))
+    records = job.records()
+    # Only the order the pass works through is sorted; the records are written back as they were read, so the
+    # file a person opens stays in track order and a run does not churn it every pass.
+    schedule = sorted(records, key=lambda record: (record.idx in asked, record.idx))
     summary = Summary()
     watch = ChildWatch(child=child)
-    bar = progress.Bar(len(records), log=log, stream=stream)
+    bar = progress.Bar(len(schedule), log=log, stream=stream)
     if child is not None:
         # Its lines arrive while the bar is drawn on the same terminal, and a plain print leaves the bar's last
         # drawing shredded around them. The bar's own writer erases first, so the child goes through it.
@@ -762,19 +765,22 @@ def run(
         bar.settle(record.idx, record.label, outcome)
         job.write_records(records)          # a crash costs the tracks in flight and nothing else
 
-    if records:
+    if schedule:
         lookup = one_at_a_time(lookup)
         if pacer is not None:
             say(f"one search every {config.search_interval:g}s"
                 " — the network's rate, not this loop's")
-        with ThreadPoolExecutor(max_workers=max(1, config.workers)) as pool:
-            list(pool.map(work, records))
+        try:
+            with ThreadPoolExecutor(max_workers=max(1, config.workers)) as pool:
+                list(pool.map(work, schedule))
+        except BaseException:
+            # The pass is over either way, and a bar left drawn under the traceback outlives it.
+            bar.close()
+            raise
 
     if unsearched:
-        # One line for everything the child never reached, rather than one per track.
         unsearched.sort()
         summary.unsearched.extend(unsearched)
-        bar.say(f"{len(unsearched)} tracks were never searched — the child had stopped answering")
 
     if watch.hung or watch.session_lost:
         account = watch.session_lost and child is not None and child.lost_session > 0
