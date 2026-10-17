@@ -49,12 +49,11 @@ def _run(config: config_module.Config, args: argparse.Namespace) -> int:
     pinned = SimpleNamespace(job=job.id, tracks=None, name=None, retry=True,
                              no_backup=False, no_traktor=args.no_traktor)
 
-    # A pass walks the whole tracklist now: empty searches are the network's own answer, and only the daemon
-    # failing ends a pass early. The loop continues while a pass is still bringing files in and stops when one
-    # is not, because a pass that found nothing meets the same peers again a minute later.
-    PASSES = 6
+    # One pass is the run. A later pass meets the same peers again, and the ones that answered with nothing
+    # an hour ago are the ones that will answer with nothing now; asking is what `--passes` is for, and a
+    # pass that brings nothing in ends the loop early whatever the count.
     failed = 0
-    for number in range(1, PASSES + 1):
+    for number in range(1, max(1, args.passes) + 1):
         try:
             summary = _acquire_pass(config, job, retry=number > 1)
         except ACQUIRE_ERRORS as error:
@@ -112,6 +111,9 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="the tracklist to start from — a file, or a public Spotify playlist's URL")
     run.add_argument("--name", default=None, metavar="NAME",
                      help="what to call the run (default: the tracklist's own name)")
+    run.add_argument("--passes", type=int, default=1, metavar="N",
+                     help="how many search passes over the tracklist (default: 1; a pass that brings nothing "
+                          "in ends the loop early)")
     run.add_argument("--no-traktor", action="store_true",
                      help="rekordbox only: leave Traktor's collection alone")
 

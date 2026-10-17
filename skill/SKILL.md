@@ -207,9 +207,9 @@ music-agent acquire --retry
 ```
 
 is the later pass: it re-searches what failed, preferring peers with free slots, and moves on to candidates it
-has not already asked. `run` does these later passes itself — keep going while a pass is still bringing files
-in, stop on the first one that is not, and stop outright if the account has another client on it — so a run
-needs nobody to notice it ended early. `--retry` remains for the stage-by-stage route.
+has not already asked. A `run` is **one pass**; `--passes N` asks for more, and any pass that brings nothing in
+ends the loop early. A pass stops outright if the account has another client on it. `--retry` remains for the
+stage-by-stage route.
 
 ## 4. Process
 
