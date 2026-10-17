@@ -96,6 +96,7 @@ class Transfer:
     connection_state: str = ""
     progress_pct: float = 0.0
     received_bytes: int = 0
+    total_bytes: int | None = None
     local_path: str = ""
     message: str = ""
 
@@ -163,14 +164,49 @@ def offence(decision: Move, report: Transfer, candidate: Candidate) -> str | Non
 
 def transfer_of(payload: dict) -> Transfer:
     """The server's answer to `download` or `download_status`, as far as the decision needs it."""
+    total = payload.get("total_bytes") or payload.get("filesize")
     return Transfer(
         status=str(payload.get("status") or ""),
         connection_state=str(payload.get("connection_state") or ""),
         progress_pct=float(payload.get("progress_pct") or 0.0),
         received_bytes=int(payload.get("received_bytes") or 0),
+        total_bytes=int(total) if total else None,
         local_path=str(payload.get("local_path") or ""),
         message=str(payload.get("message") or ""),
     )
+
+
+def short_file(local_path: str, report: Transfer) -> int | None:
+    """The landed size when the file is not the one the peer advertised, else None.
+
+    `total_bytes` is what the transfer was started for, and the child renames the part file on nothing but
+    its own idea of finished. A peer that sends fewer bytes than it advertised leaves a file ffmpeg converts
+    without complaint, so the size is the only place that says the difference.
+    """
+    expected = report.total_bytes
+    if not expected or expected <= 0:
+        return None
+    try:
+        actual = Path(local_path).stat().st_size
+    except OSError:
+        return None
+    return actual if actual != expected else None
+
+
+def discard_partial(local_path: str) -> None:
+    """Remove the `.part` the child wrote for a transfer that will not finish.
+
+    The child renames `<name><ext>.part` only on success and never deletes it otherwise, so a rotated peer
+    leaves its bytes in staging for ever — and the next attempt at the same file finds the partial, picks a
+    new name, and starts from zero under it.
+    """
+    if not local_path:
+        return
+    path = Path(local_path)
+    try:
+        path.with_suffix(path.suffix + ".part").unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def length_from_size(candidate: Candidate) -> int | None:
@@ -637,6 +673,14 @@ def one(
         decision, local_path, report = await_transfer(server, candidate, log=log, sleep=sleep,
                                                       clock=clock)
 
+        short = short_file(local_path, report) if decision is Move.DONE else None
+        if short is not None:
+            # A file that is not the one advertised is not a download: ffmpeg converts what it is given, and
+            # nothing downstream would ever look at the size again.
+            Path(local_path).unlink(missing_ok=True)
+            decision = Move.FAILED
+            log(f"      {candidate.user} sent {short} of {report.total_bytes} bytes — the file was dropped")
+
         if decision is Move.DONE:
             if ledger is not None:
                 ledger.delivered(candidate.user)
@@ -648,14 +692,16 @@ def one(
                 log(f"[{record.idx}] {record.label}: from {candidate.user} → {local_path}")
             return "downloaded"
 
-        why = offence(decision, report, candidate)
+        why = "truncated" if short is not None else offence(decision, report, candidate)
         if decision is Move.ROTATE:
             give_up(server, candidate, log)
             log(f"      {candidate.user} went nowhere; rotating ({len(record.tried)} tried)")
         else:
             log(f"      {candidate.user} failed")
+        discard_partial(local_path)
         job.append_event("candidate_lost", idx=record.idx, peer=candidate.user,
-                         path=candidate.path, why=decision.value, reason=why or "")
+                         path=candidate.path, why="truncated" if short is not None else decision.value,
+                         reason=why or "")
         if ledger is not None and why is not None and ledger.offence(candidate.user, why):
             if ignored is not None:
                 ignored.add(candidate.user)
