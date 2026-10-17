@@ -279,6 +279,17 @@ def test_a_size_with_no_bitrate_still_gives_no_length():
     assert acquire.candidate_of(item).duration is None
 
 
+def test_the_servers_own_view_of_the_peer_is_carried_onto_the_candidate():
+    """`online_now` and `avg_speed` are the server's cache, not the peer's claim in this answer, and they are
+    what orders a peer that cannot serve behind one that can."""
+    item = {"username": "peer", "filename": r"M\Kiasmos - Blurred.flac", "filesize": 12_000_000,
+            "queue_size": 0, "online_now": False, "avg_speed": 0}
+
+    candidate = acquire.candidate_of(item)
+
+    assert (candidate.online, candidate.speed) == (False, 0)
+
+
 # ── the flow ─────────────────────────────────────────────────────────────────
 
 

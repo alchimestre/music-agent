@@ -243,6 +243,8 @@ def candidate_of(item: dict) -> Candidate | None:
         # is a wait, not a failure, and the fact belongs to the candidate rather than to the moment.
         slots=bool(item.get("has_free_slots", True)),
         size_bytes=item.get("filesize"),
+        online=item.get("online_now"),
+        speed=item.get("avg_speed"),
     )
     if candidate.duration is None:
         candidate = replace(candidate, duration=length_from_size(candidate))

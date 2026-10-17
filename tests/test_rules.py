@@ -20,6 +20,7 @@ from music_agent.rules import (
     in_review,
     nothing_usable,
     pick,
+    rank,
     taken,
     version_matches,
     visible,
@@ -488,3 +489,16 @@ def test_the_fixture_still_settles_and_queues_the_same_four_and_none():
     assert summary.startswith("0 in review")
     assert "4 settled automatically" in summary
     assert "1 with nothing usable" in summary
+
+
+def test_a_peer_that_cannot_serve_is_ranked_last():
+    """`online` and `speed` are the server's cache of the peer, not the offer. A peer it calls offline
+    cannot answer an offer it made a minute ago, and a peer reporting no upload speed is usually firewalled
+    — both cost a connect budget to find out, so quality comes after them rather than before."""
+    offline = candidate("Kiasmos - Blurred.flac", bitrate=1411, online=False)
+    online = candidate("Kiasmos - Blurred.aiff", bitrate=320, online=True)
+    silent = candidate("Kiasmos - Blurred.aiff", bitrate=1411, speed=0, online=True)
+    fast = candidate("Kiasmos - Blurred.aiff", bitrate=1411, speed=800_000, online=True)
+
+    assert sorted([offline, online], key=rank) == [online, offline]
+    assert sorted([silent, fast], key=rank)[0] is fast, "bitrate ties are broken by the faster peer"
