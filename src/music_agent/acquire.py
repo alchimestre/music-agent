@@ -533,8 +533,12 @@ def _prepare(
         # would repoint the row that holds the original, and a row whose length rekordbox never had is still
         # the copy this track would replace (2026-10-13: three tracks went unmatched that way and were
         # searched as if the collection did not hold them).
+        #
+        # With no length at all, `held` answered nothing: there was nothing to compare, not a mismatch. The
+        # name and the version are then the evidence there is, and a bare request takes only an original —
+        # so the collection's copy is the same track and fetching it again duplicates the library.
         for row in library.rows_for(record.artist, record.title):
-            if not row.lossless and mix_matches(record.mix, row.mix):
+            if mix_matches(record.mix, row.mix) and (record.duration_s is None or not row.lossless):
                 held = row
                 break
     if held is None:
