@@ -13,7 +13,7 @@ from audio_files import aiff
 from music_agent import acquire
 from music_agent import cli as cli_module
 from music_agent import config as config_module
-from music_agent import library, slsk, spotify, state, sweep
+from music_agent import exporting, library, slsk, spotify, state, sweep
 from music_agent.cli import main
 from fake_server import Direct
 from music_agent.rules import Candidate
@@ -612,12 +612,15 @@ def test_run_does_every_stage_in_order_and_asks_nothing(tmp_path, capsys, monkey
     monkeypatch.setattr(cli_module, "_acquire_pass", pass_off)
     monkeypatch.setattr(cli_module, "_process", stage("process"))
     monkeypatch.setattr(cli_module, "_import", stage("import"))
+    # The closing line names what is installed here, and the tool is not on every machine's PATH.
+    monkeypatch.setattr(exporting.REGISTRY["rekordbox"], "available", lambda config: True)
+    monkeypatch.setattr(exporting.REGISTRY["traktor"], "available", lambda config: True)
     # Lists, not tuples: the run passes on a slice of what `find` returned, and it must not care.
     monkeypatch.setattr(cli_module.sweep, "find", lambda config: sweep.Leftovers([], []))
 
     # Called the way `main` calls it without `--config`: the namespace it gets has no `config` attribute at
     # all, and every stage below takes the config as an argument of its own.
-    args = Namespace(job=None, tracks=str(tracklist), name=None, no_traktor=False, passes=6)
+    args = Namespace(job=None, tracks=str(tracklist), name=None, target=None, without=None, passes=6)
     assert cli_module._run(config_module.load(config_path), args) == 0
 
     out = capsys.readouterr().out
@@ -627,7 +630,7 @@ def test_run_does_every_stage_in_order_and_asks_nothing(tmp_path, capsys, monkey
     assert seen[0] == seen[-1], "every stage worked on the one run the tracklist started"
     assert "── run ·" in out, "the run says what it is doing before it starts"
     assert "── sweep" in out, "and each stage of its own says so"
-    assert "in both collections" in out
+    assert "is exported to rekordbox, traktor" in out
 
 
 def test_run_stops_at_the_stage_that_failed(tmp_path, capsys, monkeypatch):
@@ -672,7 +675,7 @@ def test_run_places_what_arrived_when_a_pass_dies(tmp_path, capsys, monkeypatch)
     monkeypatch.setattr(cli_module, "_import", stage("import"))
     monkeypatch.setattr(cli_module.sweep, "find", lambda config: sweep.Leftovers([], []))
 
-    args = Namespace(job=None, tracks=str(tracklist), name=None, no_traktor=False, passes=6)
+    args = Namespace(job=None, tracks=str(tracklist), name=None, target=None, without=None, passes=6)
 
     assert cli_module._run(config_module.load(config_path), args) == 1
     assert happened == ["acquire", "process", "import"], happened

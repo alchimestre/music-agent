@@ -112,6 +112,13 @@ played, playlists, artwork — and gives up what was measured from the audio tha
 file-derived columns (`importing.file_columns`), in Traktor the tempo, loudness, key, auto grid and fingerprint
 (`traktor-nml`). Removal would hard-delete the playlist memberships that hang off the row.
 
+## Export target
+
+One collection a run writes to, named in `[export] targets` and registered in `exporting.REGISTRY`. A target
+says whether it is installed (`available`), whether its rows can be read back (`reads`), and how one run's
+tracks go into it (`import_run`); `rekordbox` and `traktor` ship. A target that is not installed is reported
+and skipped, and the run is finished only when every target that ran succeeded.
+
 ## Leftover
 
 A file or a row that nothing points at. Three kinds, reported by `music-agent status --files` and never

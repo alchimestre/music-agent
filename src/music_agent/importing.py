@@ -1,7 +1,8 @@
-"""The import stage: what was tagged, into the rekordbox collection.
+"""The `rekordbox` target's import: what was tagged, into its collection.
 
-Its own command, because pyrekordbox refuses to commit while rekordbox is running. The write goes through
-pyrekordbox rather than the MCP, which buys one batch commit and one backup per run.
+Called by `exporting`, which owns the loop over targets. pyrekordbox refuses to commit while rekordbox is
+running, so the target says so rather than writing half a run. The write goes through pyrekordbox rather than
+the MCP, which buys one batch commit and one backup per run.
 """
 
 from __future__ import annotations
@@ -290,9 +291,4 @@ def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=pr
                 log(f"      removed the lossy file it replaced: {old.name}")
         except OSError as error:
             log(f"      could not remove {old.name}: {error}")
-    job.write_status(config)
-    if not summary.failed:
-        # The pipeline ends here, so this is where a run is finished: acquire and process leave it open
-        # deliberately, so the next command picks the same run up without being told which.
-        job.finish()
     return summary

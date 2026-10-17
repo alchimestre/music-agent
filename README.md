@@ -1,9 +1,10 @@
 # music-agent
 
-Turns a tracklist into tracks in a rekordbox collection and Traktor's: finds the files on Soulseek, keeps
-lossless ones as AIFF, normalizes loudness to −14 LUFS / −1 dBTP, writes tags from MusicBrainz and AcoustID, and
-imports the result into both. Every step is written under `.state/jobs/<run>/`, so a run can be read back,
-resumed, or repeated.
+Turns a tracklist into tracks in every collection it is configured for: finds the files on Soulseek, keeps
+lossless ones as AIFF, normalizes loudness to −14 LUFS / −1 dBTP, writes tags from MusicBrainz and AcoustID,
+and exports the result to each target. `rekordbox` and Traktor ship; the export loop is a list of targets, not
+a rekordbox step followed by a Traktor step. Every step is written under `.state/jobs/<run>/`, so a run can be
+read back, resumed, or repeated.
 
 ## Install
 
@@ -31,7 +32,7 @@ set -a; source .env; set +a
 One command does the whole job:
 
 ```
-music-agent run --tracks <file|URL>             # acquire, process, import both collections, sweep
+music-agent run --tracks <file|URL>             # acquire, process, import every target, sweep
 ```
 
 It prints a line as each stage starts and asks nothing along the way. The stages are also commands of their own,
@@ -45,7 +46,9 @@ music-agent process                             # identify, genre, convert, norm
 music-agent retag                               # re-derive the genre on files already tagged
 music-agent reconcile                           # rebuild the records from the files this run made
 music-agent status --files                      # files nothing points at, and rows whose file is gone
-music-agent import                              # rekordbox, then Traktor; rekordbox must be closed
+music-agent import                              # every configured target; rekordbox must be closed
+music-agent import --target rekordbox           # one target only; repeat for several
+music-agent import --without traktor            # leave one out
 music-agent dedupe                              # one row per track; dry run, --apply merges
 music-agent backfill                            # a row for every file that has none; dry run, --apply adds
 music-agent sweep                               # staging's leftover .part files; --apply clears
@@ -73,11 +76,19 @@ until `--apply`:
 
 Neither `dedupe` nor `backfill` identifies or re-tags anything.
 
+`import` is a loop over `[export] targets`, in the order the config names them. A target says whether it is
+installed, what it can read, and how to add a run's tracks; a target that is not installed is reported and
+skipped, and naming only one is a complete config. A target whose tool refuses is reported as failed and the
+run stays open. `dedupe`, `backfill` and `tidy` read the rekordbox collection, so they say so when rekordbox is
+not a target.
+
+A new collection is one class with `name`, `reads`, `available`, `rows` and `import_run`, registered in
+`exporting.REGISTRY` and named in `[export] targets`. Nothing above that module names a collection.
+
 Traktor's collection belongs to a separate project: [`traktor-nml`](https://github.com/alchimestre/traktor-nml)
 owns `collection.nml`, its own configuration and its own rules, and reads this project's job state as data to
-learn which file replaced which. `import` runs its `plan` and `apply` when it is installed, so a run ends in
-both collections; `[traktor] command` in `config.toml` says how to run it, and `--no-traktor` skips it. The
-entries `dedupe` leaves behind are still `traktor-nml purge`'s to remove.
+learn which file replaced which. The `traktor` target runs its `plan` and `apply`; `[traktor] command` says how
+to run it. The entries `dedupe` leaves behind are still `traktor-nml purge`'s to remove.
 
 The genre vocabulary is not this project's either: it is music-tagger's taxonomy, and `[genres] taxonomy`
 points at it. Genres outside it are left blank rather than invented.
@@ -108,6 +119,8 @@ Those three flags are the only writers of the decision axis (`GLOSSARY.md`).
 `~/.config/music-agent/config.toml` for an installed copy; `--config` reads another one. It holds the staging
 and library directories, the loudness targets and tolerances, the Soulseek pace, the peer ignore policy, the
 `[tools]` paths, and the names of the credential environment variables. No secrets.
+
+`[export] targets` names the collections, in order.
 
 The Soulseek listening port is not in it: which port this machine can accept peers on is a fact about its
 network, so `SLSK_LISTEN_PORT` lives in `.env` with the credentials. Forward it on the router — a peer that

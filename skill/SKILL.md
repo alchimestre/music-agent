@@ -2,10 +2,10 @@
 name: music-agent
 description: >
   Drive the music-agent CLI: turn a tracklist — a file, or a public Spotify playlist — into tracks
-  acquired from Soulseek, processed into a rekordbox collection, and imported into Traktor's collection
-  as well. Covers `run`, which does all of it in one command, the stage commands behind it, what each
-  stage prints, and the rare track the queue still asks about. Use when a tracklist should become files
-  in both collections, and when a run's state or its queue is the question.
+  acquired from Soulseek, processed once, and exported to every configured collection (`rekordbox` and
+  Traktor by default). Covers `run`, which does all of it in one command, the stage commands behind it,
+  what each stage prints, and the rare track the queue still asks about. Use when a tracklist should become
+  files in every configured collection, and when a run's state or its queue is the question.
 metadata:
   requires: "the music-agent CLI on PATH, with the credentials from .env loaded into its environment"
 ---
@@ -19,8 +19,8 @@ set -a; source .env; set +a
 music-agent run --tracks <file|URL>
 ```
 
-It acquires, processes, imports into rekordbox, imports into Traktor, and clears staging — in that order,
-printing a line as each stage starts. It asks nothing along the way: what the rules would not settle is
+It acquires, processes, exports to every `[export] targets` entry in order, and clears staging, printing a
+line as each stage starts. It asks nothing along the way: what the rules would not settle is
 printed once at the end. **This is the whole job for an ordinary tracklist**, and the rest of this file is
 what it does.
 
@@ -300,29 +300,30 @@ beside the copy the collection kept), and the rows whose file has gone. Nothing 
 cannot tell which copy of a stem the collection's row is meant to keep, and guessing is the mistake that
 report exists to prevent — so say what is there and let the owner say what should go.
 
-## 8. Import — both collections
+## 8. Import — every configured collection
 
 ```
 music-agent import
 ```
 
-Two writes, in order, from one command.
+One loop over `[export] targets`, in the order the config names them. A target that is not installed is
+reported and skipped; a target whose tool refuses is reported as failed and the run stays open. The run is
+finished only after every target that ran has succeeded.
 
-**Rekordbox first.** It has to be closed — pyrekordbox refuses to commit while the app runs, and the command
-says so rather than writing half a run. A `rekordbox-mcp` left running by a harness is stopped first, since it
-is a second writer on the same file. The collection is copied aside, the whole run commits once, and the run is
+**`rekordbox`** has to be closed — pyrekordbox refuses to commit while the app runs, and the command says so
+rather than writing half a run. A `rekordbox-mcp` left running by a harness is stopped first, since it is a
+second writer on the same file. The collection is copied aside, the whole run commits once, and the run is
 closed.
 
-**Traktor's collection second**, through the project that owns it — `[traktor] command` in `config.toml`, or
-`traktor-nml` on `PATH`. `traktor-nml` owns `collection.nml`, its own configuration and its own rules; it reads
-this run's records as data, where `replaces` → `local_path` is how it learns which file replaced which. The
-import runs its `plan`, applies it if it would change anything, and reports both. A machine without that tool
-prints one line and nothing else happens — **`--no-traktor`** skips it deliberately.
+**`traktor`** delegates to the project that owns `collection.nml` — `[traktor] command` in `config.toml`, or
+`traktor-nml` on `PATH`. That project reads this run's records as data, where `replaces` → `local_path` is how
+it learns which file replaced which. It runs its `plan`, applies it if it would change anything, and reports
+both. Nothing about Traktor is decided here.
 
-Neither Traktor step is this pipeline's code, and nothing about Traktor is decided here.
+`--target NAME` narrows the loop; `--without NAME` leaves one out. `dedupe`, `backfill` and `tidy` read
+rekordbox's database, and say so when rekordbox is not a configured target.
 
-**Done when** rekordbox reports how many it imported, `music-agent status` shows the run finished, and the
-Traktor tool's report reads `0 to repoint · 0 to add · 0 to purge`.
+**Done when** each target reports what it did and `music-agent status` shows the run finished.
 
 ## 9. Traktor's own last step
 
