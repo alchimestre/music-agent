@@ -391,6 +391,10 @@ class Daemon:
         return self.call("daemon.status", {})
 
 
+    def disconnected(self) -> bool:
+        """Whether the daemon's link to the server is down. It logs back in from this on its own."""
+        return self.status().get("session_loss") == "disconnected"
+
     def session_lost(self) -> bool:
         """Whether the account's session was taken by another login.
 

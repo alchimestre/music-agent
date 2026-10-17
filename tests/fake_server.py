@@ -124,6 +124,9 @@ class Direct:
     def session_lost(self) -> bool:
         return self.session_loss == "displaced"
 
+    def disconnected(self) -> bool:
+        return self.session_loss == "disconnected"
+
     def set_dir(self, directory: Path | str) -> None:
         self.directory = str(directory)
         self.calls.append(("download.set_dir", {"directory": str(directory)}))
