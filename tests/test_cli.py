@@ -617,7 +617,7 @@ def test_run_does_every_stage_in_order_and_asks_nothing(tmp_path, capsys, monkey
 
     # Called the way `main` calls it without `--config`: the namespace it gets has no `config` attribute at
     # all, and every stage below takes the config as an argument of its own.
-    args = Namespace(job=None, tracks=str(tracklist), name=None, no_traktor=False)
+    args = Namespace(job=None, tracks=str(tracklist), name=None, no_traktor=False, passes=6)
     assert cli_module._run(config_module.load(config_path), args) == 0
 
     out = capsys.readouterr().out
@@ -672,7 +672,7 @@ def test_run_places_what_arrived_when_a_pass_dies(tmp_path, capsys, monkeypatch)
     monkeypatch.setattr(cli_module, "_import", stage("import"))
     monkeypatch.setattr(cli_module.sweep, "find", lambda config: sweep.Leftovers([], []))
 
-    args = Namespace(job=None, tracks=str(tracklist), name=None, no_traktor=False)
+    args = Namespace(job=None, tracks=str(tracklist), name=None, no_traktor=False, passes=6)
 
     assert cli_module._run(config_module.load(config_path), args) == 1
     assert happened == ["acquire", "process", "import"], happened
@@ -737,6 +737,30 @@ class NoReference:
 
     def find(self, query: str, limit: int = 25) -> list:
         return []
+
+
+def test_a_run_is_one_pass_unless_more_are_asked_for(tmp_path, monkeypatch, capsys):
+    """A later pass meets the same peers again, and the ones that answered with nothing an hour ago answer
+    with nothing now. A run asks once; `--passes N` is how a caller asks for a second look."""
+    config_path = make_paths_config(tmp_path)
+    tracklist = tmp_path / "list.txt"
+    tracklist.write_text("Kiasmos - Blurred\n", encoding="utf-8")
+    passes: list[bool] = []
+
+    def one_pass(config, job, *, retry):
+        passes.append(retry)
+        return acquire.Summary()
+
+    monkeypatch.setattr(cli_module, "_acquire_pass", one_pass)
+    monkeypatch.setattr(cli_module, "_process", lambda config, args: 0)
+    monkeypatch.setattr(cli_module, "_import", lambda config, args: 0)
+    monkeypatch.setattr(cli_module.sweep, "find", lambda config: sweep.Leftovers([], []))
+    monkeypatch.setattr(cli_module.sweep, "clear", lambda leftovers, log=print: 0)
+    monkeypatch.setattr(cli_module, "_tidy", lambda config, args: None)
+    monkeypatch.setattr(cli_module, "_queue", lambda job: None)
+
+    assert main(["run", "--tracks", str(tracklist), "--config", str(config_path)]) == 0
+    assert passes == [False], "one pass, and it is not a retry"
 
 
 def test_a_tracklist_on_the_command_line_runs_the_pass_on_the_run_it_started(tmp_path, capsys, monkeypatch):
