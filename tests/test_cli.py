@@ -508,79 +508,6 @@ def test_accepting_carries_the_record_on_to_process(tmp_path, capsys, monkeypatc
     assert "music-agent process" in out, "the next command is the useful thing to say"
 
 
-def test_only_a_held_session_is_waited_out(tmp_path, monkeypatch, capsys):
-    """Two of the three ways a child goes wrong are retried at once: a reader that died, and calls that
-    stopped returning. The third cannot be — the child that lost the session could not log out either, so the
-    server holds the account until its own timeout passes and a fresh child is refused until then. Retrying
-    straight into it is a login that cannot succeed, which is what three passes in a row did."""
-    waits: list[float] = []
-    monkeypatch.setattr(cli_module, "SESSION_WAITS", (5.0,))
-    monkeypatch.setattr(cli_module.time, "sleep", waits.append)
-    monkeypatch.setattr(cli_module.slsk, "Daemon", lambda config: Direct())
-
-    answers: list[object] = [
-        acquire.ServerStuck("the child's message reader died", lost_session=False),
-        acquire.ServerStuck("the child was left without a session", lost_session=True),
-        acquire.Summary(downloaded=[1]),
-    ]
-
-    def pass_off(config, job, *, retry, attempt):
-        answer = answers[attempt - 1]
-        if isinstance(answer, Exception):
-            raise answer
-        return answer
-
-    monkeypatch.setattr(cli_module, "_one_pass", pass_off)
-    config = config_module.load(make_config(tmp_path))
-    job = state.create(config, "run")
-
-    assert cli_module._acquire_pass(config, job, retry=False).downloaded == [1]
-    assert waits == [5.0], "the reader death waited for nothing; the held session did"
-    assert "held by the daemon that died" in capsys.readouterr().err
-
-
-def test_a_second_refusal_ends_the_pass_rather_than_buying_another_login(tmp_path, monkeypatch, capsys):
-    """2026-10-16: one pass spent five logins on an account that was refusing every one of them, and each
-    attempt was another connection — which is what the server's own note says extends the refusal. Two, then
-    stop: the run reports what it kept and a person decides when to come back."""
-    waits: list[float] = []
-    monkeypatch.setattr(cli_module, "SESSION_WAITS", (5.0,))
-    monkeypatch.setattr(cli_module, "RESTARTS", 10)      # so only the session ladder can stop it
-    monkeypatch.setattr(cli_module.time, "sleep", waits.append)
-
-    def refused(config, job, *, retry, attempt):
-        raise acquire.ServerStuck("the child was left without a session", lost_session=True)
-
-    monkeypatch.setattr(cli_module, "_one_pass", refused)
-    config = config_module.load(make_config(tmp_path))
-    job = state.create(config, "run")
-
-    with pytest.raises(acquire.ServerStuck):
-        cli_module._acquire_pass(config, job, retry=False)
-
-    assert waits == [5.0], "one wait, then the second refusal ends it"
-
-
-def test_a_daemon_that_cannot_be_authenticated_is_not_retried(tmp_path, monkeypatch):
-    """A protocol mismatch, another account on the daemon, or a binary that will not run is the same answer
-    every time; retrying it spends a startup timeout per attempt to learn nothing."""
-    config = config_module.load(make_config(tmp_path))
-    job = state.create(config, "run")
-    tries: list[int] = []
-
-    def refused(*args, **kwargs):
-        tries.append(1)
-        raise slsk.DaemonError("auth", "the daemon speaks protocol 9")
-
-    monkeypatch.setattr(cli_module, "_one_pass", refused)
-    monkeypatch.setattr(cli_module.slsk, "Daemon", lambda config: Direct())
-
-    with pytest.raises(slsk.DaemonError):
-        cli_module._acquire_pass(config, job, retry=False)
-
-    assert len(tries) == 1, "one attempt, not one per restart"
-
-
 def test_run_does_every_stage_in_order_and_asks_nothing(tmp_path, capsys, monkeypatch):
     """2026-10-14: one command from a tracklist to both collections.
 
@@ -597,7 +524,7 @@ def test_run_does_every_stage_in_order_and_asks_nothing(tmp_path, capsys, monkey
     # nothing, which is the network's answer rather than a count of two. `retry` is set after the first pass.
     rations = [acquire.Summary(downloaded=[1]), acquire.Summary(downloaded=[2]), acquire.Summary()]
 
-    def pass_off(config, job, *, retry):
+    def pass_off(config, job, *, retry, attempt=1):
         happened.append(f"acquire:{int(retry)}")
         seen.append(job.id)
         return rations[min(len(happened) - 1, len(rations) - 1)]
@@ -609,7 +536,7 @@ def test_run_does_every_stage_in_order_and_asks_nothing(tmp_path, capsys, monkey
             return 0
         return run
 
-    monkeypatch.setattr(cli_module, "_acquire_pass", pass_off)
+    monkeypatch.setattr(cli_module, "_one_pass", pass_off)
     monkeypatch.setattr(cli_module, "_process", stage("process"))
     monkeypatch.setattr(cli_module, "_import", stage("import"))
     # The closing line names what is installed here, and the tool is not on every machine's PATH.
@@ -640,8 +567,8 @@ def test_run_stops_at_the_stage_that_failed(tmp_path, capsys, monkeypatch):
     tracklist = tmp_path / "list.txt"
     tracklist.write_text("Kiasmos - Blurred\n", encoding="utf-8")
 
-    monkeypatch.setattr(cli_module, "_acquire_pass",
-                        lambda config, job, *, retry: acquire.Summary())
+    monkeypatch.setattr(cli_module, "_one_pass",
+                        lambda config, job, *, retry, attempt=1: acquire.Summary())
     monkeypatch.setattr(cli_module, "_process", lambda config, args: 1)
     monkeypatch.setattr(cli_module, "_import",
                         lambda config, args: pytest.fail("import ran after process failed"))
@@ -660,7 +587,7 @@ def test_run_places_what_arrived_when_a_pass_dies(tmp_path, capsys, monkeypatch)
 
     happened: list[str] = []
 
-    def dying_pass(config, job, *, retry):
+    def dying_pass(config, job, *, retry, attempt=1):
         happened.append("acquire")
         raise acquire.ServerStuck("the child had stopped answering")
 
@@ -670,7 +597,7 @@ def test_run_places_what_arrived_when_a_pass_dies(tmp_path, capsys, monkeypatch)
             return 0
         return run
 
-    monkeypatch.setattr(cli_module, "_acquire_pass", dying_pass)
+    monkeypatch.setattr(cli_module, "_one_pass", dying_pass)
     monkeypatch.setattr(cli_module, "_process", stage("process"))
     monkeypatch.setattr(cli_module, "_import", stage("import"))
     monkeypatch.setattr(cli_module.sweep, "find", lambda config: sweep.Leftovers([], []))
@@ -750,11 +677,11 @@ def test_a_run_is_one_pass_unless_more_are_asked_for(tmp_path, monkeypatch, caps
     tracklist.write_text("Kiasmos - Blurred\n", encoding="utf-8")
     passes: list[bool] = []
 
-    def one_pass(config, job, *, retry):
+    def one_pass(config, job, *, retry, attempt=1):
         passes.append(retry)
         return acquire.Summary()
 
-    monkeypatch.setattr(cli_module, "_acquire_pass", one_pass)
+    monkeypatch.setattr(cli_module, "_one_pass", one_pass)
     monkeypatch.setattr(cli_module, "_process", lambda config, args: 0)
     monkeypatch.setattr(cli_module, "_import", lambda config, args: 0)
     monkeypatch.setattr(cli_module.sweep, "find", lambda config: sweep.Leftovers([], []))

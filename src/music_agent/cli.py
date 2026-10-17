@@ -56,7 +56,7 @@ def _run(config: config_module.Config, args: argparse.Namespace) -> int:
     failed = 0
     for number in range(1, max(1, args.passes) + 1):
         try:
-            summary = _acquire_pass(config, job, retry=number > 1)
+            summary = _one_pass(config, job, retry=number > 1, attempt=number)
         except ACQUIRE_ERRORS as error:
             # The passes are abandoned, not the run. Every file they brought in is already written to the run
             # as it went, so what did arrive is still worth placing — ending here is how one stage's bad
@@ -391,17 +391,6 @@ def _tools(config: config_module.Config) -> process.Tools:
 ACQUIRE_ERRORS = (slsk.MissingCredential, slsk.PortBusy, slsk.DaemonError, acquire.ServerStuck,
                   library.Unreadable, exporting.UnknownTarget)
 
-# A pass is resumed this many times when the daemon dies under it. Everything it did is already in the run,
-# so a restart costs the price of a login; four daemons in a row dying is a problem a restart will not fix.
-RESTARTS = 3
-
-# What is waited before a fresh daemon is worth trying, once the account's session has been taken and the
-# daemon that held it died without logging out. One wait, and it is the top of the measured window: a login starts
-# working again twelve to seventeen minutes after the daemon died, and anything below the top spends a login
-# inside it — and every attempt is another connection to an account that is refusing them. When the second
-# daemon is refused too the pass stops, because a third login buys the same answer.
-SESSION_WAITS = (1020.0,)
-
 
 def _stage(name: str, detail: str = "") -> None:
     """One line saying which stage is running, and on what.
@@ -509,79 +498,23 @@ def _start(config: config_module.Config, args: argparse.Namespace) -> state.Job 
     return job
 
 
-def _silence(error: Exception) -> str:
-    """What a pass that stopped on its session usually means.
-
-    A second Soulseek client on the same account is the usual cause, and it is not this program's process:
-    the server keeps one session per account and closes the other one's connection. A harness's own Soulseek
-    MCP server is the one that does it, and killing it does not settle the question — a harness restarts it.
-    """
-    said = str(error).lower()
-    if "session" not in said and "login" not in said:
-        return ""
-    return ("\n  the account's session is held elsewhere: stop the other client, or let the daemon wait it out")
-
-
-def _acquire_pass(config: config_module.Config, job: state.Job, *, retry: bool) -> acquire.Summary:
-    """Resume a pass through a fresh daemon whenever the daemon dies under it.
-
-    The daemon is somebody else's program and it can go down mid-pass — a crash, a killed process, calls that
-    stop returning. Everything it did is already written to the run as it went, so the pass is resumed rather
-    than lost: a new daemon, the same records, and a line saying so.
-
-    A session the server has taken away is not that. The daemon that lost it could not log out either — its
-    networking is what died — so the server keeps the account until its own timeout passes, and a fresh
-    daemon is refused for as long as that takes. Measured here, a login starts working again twelve to
-    seventeen minutes after the daemon died, so there is one wait and it is the top of that window. A second
-    refusal ends the pass: 2026-10-16 a pass spent five logins finding out what two would have said, and each
-    one was another connection to an account that was refusing them.
-
-    A daemon that merely stopped answering is the other kind: it is restarted at once, and the next pass
-    carries on from where the run got to. `ServerStuck.lost_session` is what tells them apart.
-    """
-    lost = 0
-    for attempt in range(1, RESTARTS + 2):
-        try:
-            return _one_pass(config, job, retry=retry, attempt=attempt)
-        except (slsk.DaemonError, acquire.ServerStuck) as error:
-            if isinstance(error, slsk.DaemonError) and error.method in {"auth", "start"}:
-                # A protocol mismatch, another account on the daemon, or a binary that will not run is not
-                # mended by trying again: every attempt spends a startup timeout to reach the same answer.
-                raise
-            if attempt > RESTARTS:
-                raise
-            if isinstance(error, acquire.ServerStuck) and error.lost_session:
-                if lost >= len(SESSION_WAITS):
-                    # The ladder is spent. Another attempt is another connection to an account that is
-                    # refusing them, which is what the server's own note says extends the refusal, so the
-                    # pass ends here and the run reports what it kept.
-                    raise
-                # The daemon that lost the session cannot get it back; a fresh process is the only thing
-                # worth trying, and not before the server has had time to let go.
-                slsk.Daemon(config).stop()
-                wait = SESSION_WAITS[lost]
-                lost += 1
-                retry_at = time.strftime("%H:%M", time.localtime(time.time() + wait))
-                print(f"the account is still held by the daemon that died — waiting {wait / 60:.0f}m, "
-                      f"next login at {retry_at}", file=sys.stderr)
-                time.sleep(wait)
-            else:
-                slsk.Daemon(config).stop()
-            print(f"the daemon stopped mid-pass ({error}){_silence(error)}; "
-                  f"{RESTARTS + 1 - attempt} more attempt(s)", file=sys.stderr)
-    raise AssertionError("unreachable: the loop either returns or raises")
-
-
 def _one_pass(config: config_module.Config, job: state.Job, *, retry: bool,
               attempt: int = 1) -> acquire.Summary:
-    """One pass, everything it needs and nothing else: the daemon, the shares, the records."""
+    """One pass, everything it needs and nothing else: the daemon, the shares, the records.
+
+    A pass that stops is the pass falling short, not a reason to start another: what it brought in is already
+    written to the run, the stages after it still place those files, and the failing records are marked for a
+    later run. Asking the same peers again is `--passes`, and a person asks for it.
+    """
     daemon = slsk.Daemon(config)
+    # The shelf is read before the socket is opened: the database takes seconds, and while the client is not
+    # reading the daemon fills the socket with upload events and drops the connection on its own write.
+    shelf = library.open(config)
     # The daemon is started only when nothing answers on the socket, and the port sweep is part of starting
     # it: a client left on the port by an earlier run answers the same account, and every search then comes
     # back empty — the pass would spend its whole tracklist learning nothing.
     daemon.ensure()
     _ready(daemon, config)
-    shelf = library.open(config)
     _stage("acquire", f"{len(job.records())} tracks · pass {attempt}"
                       f"{' · retry' if retry else ''}")
     return acquire.run(config, job, daemon, reference.lookup(config),
@@ -611,7 +544,7 @@ def _acquire(config: config_module.Config, args: argparse.Namespace) -> int:
             return 1
 
     try:
-        summary = _acquire_pass(config, job, retry=args.retry)
+        summary = _one_pass(config, job, retry=args.retry)
     except ACQUIRE_ERRORS as error:
         print(error, file=sys.stderr)
         return 1
