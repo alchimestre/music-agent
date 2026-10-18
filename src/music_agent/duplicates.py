@@ -28,7 +28,7 @@ from sqlalchemy import text
 
 from . import importing, parsing, rules
 from .config import Config
-from .library import path_key
+from .lanes import path_key
 
 # The tables whose rows are *moved* onto the survivor rather than deleted with the row that goes.
 MOVED = ("djmdSongPlaylist", "djmdSongMyTag", "djmdSongHistory", "djmdCue")

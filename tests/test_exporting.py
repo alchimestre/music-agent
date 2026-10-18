@@ -6,7 +6,7 @@ from dataclasses import replace
 
 import pytest
 
-from music_agent import exporting, library
+from music_agent import exporting, lanes, library
 from music_agent.config import DEFAULTS
 
 
@@ -23,7 +23,7 @@ class FakeTarget:
         return self._available
 
     def rows(self, config):
-        return ([library.Held(path="/music/a.aiff", artist="A", title="T")], ["House"])
+        return ([lanes.Held(path="/music/a.aiff", artist="A", title="T")], ["House"])
 
     def import_run(self, config, job, *, backup_first=True, log=print):
         self.calls += 1

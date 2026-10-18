@@ -26,7 +26,7 @@ from pathlib import Path
 from . import importing, parsing, tag
 from .config import Config
 from .duplicates import Copy, agrees, copies
-from .library import path_key, read_directories, seconds_of
+from .lanes import path_key, read_directories, seconds_of
 
 
 class NotClosed(RuntimeError):

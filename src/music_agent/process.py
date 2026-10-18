@@ -19,6 +19,7 @@ from typing import Protocol
 
 from . import genre, identify, state, tag
 from .config import Config
+from .lanes import Lanes, filename_for
 from .rules import LOSSLESS_EXTENSIONS
 
 
@@ -111,23 +112,6 @@ class Summary:
         if self.failed:
             parts.append(f"{len(self.failed)} failed")
         return " · ".join(parts)
-
-
-# Characters a filesystem will not take, replaced rather than dropped so that two differently punctuated
-# titles cannot collapse onto one name.
-_UNSAFE = str.maketrans({"/": "-", "\\": "-", ":": "-", "\0": ""})
-
-
-def filename_for(record: state.Record, suffix: str) -> str:
-    """The house convention the library already uses: `Artist - Title`, with the mix in parentheses.
-
-    A white-label request has no artist, so its title stands alone.
-    """
-    name = f"{record.artist} - {record.title}" if record.artist else record.title
-    if record.mix:
-        name = f"{name} ({record.mix})"
-    cleaned = " ".join(name.translate(_UNSAFE).split()).strip()
-    return (cleaned or "untitled") + suffix.lower()
 
 
 def tags_for(found: identify.Identified, *, genre_name: str = "") -> tag.Tags:
@@ -378,18 +362,6 @@ def _downloaded(config: Config, job: state.Job) -> set[int]:
     return fetched
 
 
-def _in_lanes(config: Config) -> dict[str, Path]:
-    """Both lanes in one scan, by stem. Lossless first: when both hold a stem that copy is the upgrade."""
-    on_disk: dict[str, Path] = {}
-    for lane in (config.lossless, config.lossy):
-        if not lane.is_dir():
-            continue
-        for path in sorted(lane.rglob("*")):
-            if path.is_file() and not path.name.startswith("."):
-                on_disk.setdefault(path.stem, path)
-    return on_disk
-
-
 def reconcile(config: Config, job: state.Job, *, log=print) -> Reconciled:
     """Rebuild the records from the files this run downloaded.
 
@@ -399,14 +371,14 @@ def reconcile(config: Config, job: state.Job, *, log=print) -> Reconciled:
     """
     summary = Reconciled()
     fetched = _downloaded(config, job)
-    on_disk = _in_lanes(config)
+    on_disk = Lanes.scan(config)
 
     records = job.records()
     doomed: list[int] = []
     for record in records:
         if record.idx not in fetched:
             continue
-        path = on_disk.get(filename_for(record, ""))
+        path = on_disk.file_for(record)
         if path is None:
             summary.missing.append(record.idx)
             log(f"[{record.idx}] {record.label}: downloaded, but no file of that name in a lane")
