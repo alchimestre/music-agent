@@ -230,6 +230,18 @@ def identifier(candidate: Candidate) -> str:
     return f"{candidate.user}:{candidate.path}"
 
 
+class Outcome(Enum):
+    """Where a track belongs in the pass's summary."""
+
+    DECIDED = "decided"
+    ALREADY_DOWNLOADED = "already_downloaded"
+    ALREADY_HELD = "already_held"
+    DOWNLOADED = "downloaded"
+    IN_REVIEW = "in_review"
+    NOTHING_USABLE = "nothing_usable"
+    FAILED = "failed"
+
+
 @dataclass
 class Summary:
     """What a pass came to, by track."""
@@ -245,6 +257,10 @@ class Summary:
     dropped: list[int] = field(default_factory=list)      # every candidate refused, nothing left to try
     # The peers this pass put on the ignore list, by name: a run that silences three mirrors should say so.
     ignored: set[str] = field(default_factory=set)
+
+    def add(self, record: state.Record, outcome: Outcome) -> None:
+        """File a track under the list its outcome names."""
+        getattr(self, outcome.value).append(record.idx)
 
     def report(self) -> str:
         parts = [
@@ -528,7 +544,7 @@ def _prepare(
     lookup: Lookup,
     library: Library | None,
     log,
-) -> tuple[str | None, Held | None]:
+) -> tuple[Outcome | None, Held | None]:
     """Resolve the reference, then settle what the collection already holds.
 
     Returns the summary list to file the track under when there is nothing to fetch, and otherwise the lossy
@@ -558,7 +574,7 @@ def _prepare(
         job.append_event("already_held", idx=record.idx, path=held.path, genre=held.genre)
         log(f"[{record.idx}] {record.label}: already in the library"
             + (f" — {held.path}" if held.path else ""))
-        return "already_held", None
+        return Outcome.ALREADY_HELD, None
     # Held, but only as a lossy copy: an upgrade rather than a reason to skip, and the lane decides it, not
     # whether the lookup happened to match.
     record.replaces = held.path
@@ -573,142 +589,168 @@ def _prepare(
     return None, held
 
 
-def one(
-    job: state.Job,
-    record: state.Record,
-    daemon: Daemon,
-    lookup: Lookup,
-    *,
-    library: Library | None,
-    log,
-    sleep,
-    clock,
-    later_pass: bool,
-    watch: Watch,
-    pacer: Pacer | None = None,
-    ledger: peers.Ledger | None = None,
-    ignored: set[str] | None = None,
-) -> str:
-    """Acquire one track. Returns which of the summary's lists it belongs in."""
-    if record.decided():
-        # GLOSSARY.md: a settled track is not asked about again — that is the whole of what the decision
-        # axis means — so a pass leaves it alone rather than spending a search to re-open the question.
-        log(f"[{record.idx}] {record.label}: {record.decision} by hand — left alone")
-        return "decided"
+class Pass:
+    """One pass over a job's records: the network, the pace, and the ignore list inside it.
 
-    if record.local_path and Path(record.local_path).is_file():
-        # The file is the truth, not the status: a record this run has already placed must not be searched
-        # for again, because until the import runs the collection still points at the copy it replaces.
-        if record.status in {state.DOWNLOADED, state.NORMALIZED, state.TAGGED, state.IMPORTED}:
-            return "already_downloaded"
+    Built once, so a per-track attempt carries only the record. The watch, the pacer, the ledger and the
+    summary belong to the pass, not to the caller.
+    """
 
-    if record.status == state.FOUND_IN_LIBRARY:
-        # The collection check already answered this track, and the collection does not change under a pass.
-        # Asking again costs a MusicBrainz reference per track per pass: 130 of the 305 tracks in a run on
-        # 2026-10-17 were already held, and every pass spent five minutes re-resolving them to reach the same
-        # answer before it searched anything.
-        return "already_held"
+    def __init__(self, config: Config, job: state.Job, daemon: Daemon, lookup: Lookup, *,
+                 library: Library | None = None, log=print, sleep=None,
+                 clock=time.monotonic, retry: bool = False) -> None:
+        self.job = job
+        self.daemon = daemon
+        # MusicBrainz's rate limiter is a module global inside `musicbrainzngs`, and their policy asks for
+        # one request a second, so lookups queue here rather than race inside a library not written for it.
+        self.lookup = one_at_a_time(lookup)
+        self.library = library
+        self.log = log
+        self.sleep = sleep or daemon.settle
+        self.clock = clock
+        self.retry = retry
+        self.watch = Watch(daemon=daemon)
+        # A daemon that lost its session before this pass started is not worth one search: every answer
+        # would be an ordinary success with nothing in it, which is what a tracklist of rare tracks is.
+        self.watch.answered()
+        self.pacer = (Pacer(config.search_interval, clock=clock, sleep=self.sleep)
+                      if config.search_interval > 0 else None)
+        self.ledger = peers.Ledger.at(config)
+        self.summary = Summary()
 
-    outcome, upgrade = _prepare(job, record, lookup, library, log)
-    if outcome is not None:
-        return outcome
+    def ignored_peers(self) -> list[str]:
+        return sorted(self.ledger.ignored())
 
-    if pacer is not None:
-        pacer.wait()
-    found = search(daemon, record, later_pass=later_pass)
-    # Before the peers are filtered: a search that came back at all is the daemon talking, whatever it held.
-    watch.answered()
-    if ledger is not None:
-        # Dropped here rather than filtered later, so nothing downstream — the ladder, the queue, the counts —
-        # ever sees a peer this account has given up on.
-        kept = [candidate for candidate in found if not ledger.ignores(candidate.user)]
-        if len(kept) != len(found):
-            log(f"[{record.idx}] {record.label}: {len(found) - len(kept)} files from ignored peers")
-        found = kept
-    added = merge(record, found)
-    job.append_event("searched", idx=record.idx, added=added, offered=len(record.candidates))
+    def stopped(self) -> bool:
+        """Whether the daemon can still answer, so nothing more should be asked of it."""
+        return self.watch.dead.is_set() or self.watch.session_lost
 
-    if record.settled() is None:
-        record.status = state.PENDING
-        log(f"[{record.idx}] {record.label}: {len(record.offered())} offered, "
-            "nothing to take on its own")
-        return "in_review" if record.usable() else "nothing_usable"
+    def attempt(self, record: state.Record) -> Outcome:
+        """Acquire one track. Returns which of the summary's lists it belongs in."""
+        job, daemon, lookup, library = self.job, self.daemon, self.lookup, self.library
+        log, sleep, clock = self.log, self.sleep, self.clock
+        watch, pacer, ledger = self.watch, self.pacer, self.ledger
+        ignored = self.summary.ignored
+        later_pass = self.retry or bool(record.candidates)
+        if record.decided():
+            # GLOSSARY.md: a settled track is not asked about again — that is the whole of what the decision
+            # axis means — so a pass leaves it alone rather than spending a search to re-open the question.
+            log(f"[{record.idx}] {record.label}: {record.decision} by hand — left alone")
+            return Outcome.DECIDED
 
-    tried = set(record.tried)
-    queue = sorted(
-        (verdict.candidate for verdict in rules.takeable(record.track)
-         if identifier(verdict.candidate) not in tried),
-        key=rules.rank,
-    )
-    silenced = 0
-    if ledger is not None:
-        # Asked again for the files already in hand: a peer banned a moment ago, by the first file of its
-        # own that it failed to deliver, must not be asked for the other five.
-        before = len(queue)
-        queue = [candidate for candidate in queue if not ledger.ignores(candidate.user)]
-        silenced = before - len(queue)
-    if upgrade is not None:
-        # A lossless copy is strictly better than the lossy one held; a lossy copy is not better than the
-        # copy already held, so only the better lane is worth fetching.
-        queue = [candidate for candidate in queue if candidate.lossless]
-        if not queue:
+        if record.local_path and Path(record.local_path).is_file():
+            # The file is the truth, not the status: a record this run has already placed must not be searched
+            # for again, because until the import runs the collection still points at the copy it replaces.
+            if record.status in {state.DOWNLOADED, state.NORMALIZED, state.TAGGED, state.IMPORTED}:
+                return Outcome.ALREADY_DOWNLOADED
+
+        if record.status == state.FOUND_IN_LIBRARY:
+            # The collection check already answered this track, and the collection does not change under a pass.
+            # Asking again costs a MusicBrainz reference per track per pass: 130 of the 305 tracks in a run on
+            # 2026-10-17 were already held, and every pass spent five minutes re-resolving them to reach the same
+            # answer before it searched anything.
+            return Outcome.ALREADY_HELD
+
+        outcome, upgrade = _prepare(job, record, lookup, library, log)
+        if outcome is not None:
+            return outcome
+
+        if pacer is not None:
+            pacer.wait()
+        found = search(daemon, record, later_pass=later_pass)
+        # Before the peers are filtered: a search that came back at all is the daemon talking, whatever it held.
+        watch.answered()
+        if ledger is not None:
+            # Dropped here rather than filtered later, so nothing downstream — the ladder, the queue, the counts —
+            # ever sees a peer this account has given up on.
+            kept = [candidate for candidate in found if not ledger.ignores(candidate.user)]
+            if len(kept) != len(found):
+                log(f"[{record.idx}] {record.label}: {len(found) - len(kept)} files from ignored peers")
+            found = kept
+        added = merge(record, found)
+        job.append_event("searched", idx=record.idx, added=added, offered=len(record.candidates))
+
+        if record.settled() is None:
             record.status = state.PENDING
-            job.append_event("no_upgrade_offered", idx=record.idx, replaces=upgrade.path)
-            log(f"[{record.idx}] {record.label}: nothing lossless offered — the copy held stands")
-            return "in_review"
+            log(f"[{record.idx}] {record.label}: {len(record.offered())} offered, "
+                "nothing to take on its own")
+            return Outcome.IN_REVIEW if record.usable() else Outcome.NOTHING_USABLE
 
-    if not queue and silenced:
-        # Nothing is left to try that the account is still willing to ask, which is not the same thing as a
-        # pass that failed: the record stays open, and a person may still take one of those offers by hand.
-        record.status = state.PENDING
-        job.append_event("only_ignored_peers", idx=record.idx, ignored=silenced)
-        log(f"[{record.idx}] {record.label}: every offer left is from an ignored peer")
-        return "in_review" if record.usable() else "nothing_usable"
+        tried = set(record.tried)
+        queue = sorted(
+            (verdict.candidate for verdict in rules.takeable(record.track)
+             if identifier(verdict.candidate) not in tried),
+            key=rules.rank,
+        )
+        silenced = 0
+        if ledger is not None:
+            # Asked again for the files already in hand: a peer banned a moment ago, by the first file of its
+            # own that it failed to deliver, must not be asked for the other five.
+            before = len(queue)
+            queue = [candidate for candidate in queue if not ledger.ignores(candidate.user)]
+            silenced = before - len(queue)
+        if upgrade is not None:
+            # A lossless copy is strictly better than the lossy one held; a lossy copy is not better than the
+            # copy already held, so only the better lane is worth fetching.
+            queue = [candidate for candidate in queue if candidate.lossless]
+            if not queue:
+                record.status = state.PENDING
+                job.append_event("no_upgrade_offered", idx=record.idx, replaces=upgrade.path)
+                log(f"[{record.idx}] {record.label}: nothing lossless offered — the copy held stands")
+                return Outcome.IN_REVIEW
 
-    for candidate in queue[:MAX_CANDIDATES]:
-        if ledger is not None and ledger.ignores(candidate.user):
-            # Banned by an earlier file of its own in this same pass: the rest of its offers are the same
-            # question, already answered.
-            silenced += 1
-            continue
-        record.tried.append(identifier(candidate))
-        decision, local_path, report = await_transfer(daemon, candidate, log=log, sleep=sleep,
-                                                      clock=clock)
+        if not queue and silenced:
+            # Nothing is left to try that the account is still willing to ask, which is not the same thing as a
+            # pass that failed: the record stays open, and a person may still take one of those offers by hand.
+            record.status = state.PENDING
+            job.append_event("only_ignored_peers", idx=record.idx, ignored=silenced)
+            log(f"[{record.idx}] {record.label}: every offer left is from an ignored peer")
+            return Outcome.IN_REVIEW if record.usable() else Outcome.NOTHING_USABLE
 
-        if decision is Move.DONE:
-            if ledger is not None:
-                ledger.delivered(candidate.user)
-            record_taken(job, record, candidate, local_path, upgrade=upgrade)
-            if upgrade is not None:
-                log(f"[{record.idx}] {record.label}: a lossless copy from {candidate.user} → {local_path}"
-                    f"  (replacing the lossy one at import)")
+        for candidate in queue[:MAX_CANDIDATES]:
+            if ledger is not None and ledger.ignores(candidate.user):
+                # Banned by an earlier file of its own in this same pass: the rest of its offers are the same
+                # question, already answered.
+                silenced += 1
+                continue
+            record.tried.append(identifier(candidate))
+            decision, local_path, report = await_transfer(daemon, candidate, log=log, sleep=sleep,
+                                                          clock=clock)
+
+            if decision is Move.DONE:
+                if ledger is not None:
+                    ledger.delivered(candidate.user)
+                record_taken(job, record, candidate, local_path, upgrade=upgrade)
+                if upgrade is not None:
+                    log(f"[{record.idx}] {record.label}: a lossless copy from {candidate.user} → {local_path}"
+                        f"  (replacing the lossy one at import)")
+                else:
+                    log(f"[{record.idx}] {record.label}: from {candidate.user} → {local_path}")
+                return Outcome.DOWNLOADED
+
+            why = offence(decision, report)
+            if decision is Move.ROTATE:
+                give_up(daemon, candidate, log)
+                log(f"      {candidate.user} went nowhere; rotating ({len(record.tried)} tried)")
             else:
-                log(f"[{record.idx}] {record.label}: from {candidate.user} → {local_path}")
-            return "downloaded"
+                log(f"      {candidate.user} failed")
+            job.append_event("candidate_lost", idx=record.idx, peer=candidate.user,
+                             path=candidate.path, why=decision.value, reason=why or "")
+            if ledger is not None and why is not None and ledger.offence(candidate.user, why):
+                if ignored is not None:
+                    ignored.add(candidate.user)
+                job.append_event("peer_ignored", idx=record.idx, peer=candidate.user, reason=why)
+                log(f"      {candidate.user} ignored — {ledger.maxretry} failures in "
+                    f"{ledger.findtime.days} days (music-agent peers --unban {candidate.user})")
 
-        why = offence(decision, report)
-        if decision is Move.ROTATE:
-            give_up(daemon, candidate, log)
-            log(f"      {candidate.user} went nowhere; rotating ({len(record.tried)} tried)")
+        record.status = state.RETRY_LATER
+        job.append_event("exhausted", idx=record.idx, tried=len(record.tried))
+        if silenced:
+            log(f"[{record.idx}] {record.label}: everything asked failed, {silenced} offers left from ignored "
+                "peers — left to retry")
         else:
-            log(f"      {candidate.user} failed")
-        job.append_event("candidate_lost", idx=record.idx, peer=candidate.user,
-                         path=candidate.path, why=decision.value, reason=why or "")
-        if ledger is not None and why is not None and ledger.offence(candidate.user, why):
-            if ignored is not None:
-                ignored.add(candidate.user)
-            job.append_event("peer_ignored", idx=record.idx, peer=candidate.user, reason=why)
-            log(f"      {candidate.user} ignored — {ledger.maxretry} failures in "
-                f"{ledger.findtime.days} days (music-agent peers --unban {candidate.user})")
-
-    record.status = state.RETRY_LATER
-    job.append_event("exhausted", idx=record.idx, tried=len(record.tried))
-    if silenced:
-        log(f"[{record.idx}] {record.label}: everything asked failed, {silenced} offers left from ignored "
-            "peers — left to retry")
-    else:
-        log(f"[{record.idx}] {record.label}: every candidate failed — left to retry")
-    return "failed"
+            log(f"[{record.idx}] {record.label}: every candidate failed — left to retry")
+        return Outcome.FAILED
 
 
 def one_at_a_time(lookup: Lookup) -> Lookup:
@@ -745,10 +787,6 @@ def run(
     The transfers and the waiting on them overlap; the searching does not, and goes out at
     `config.search_interval`, because that rate is the network's and not this loop's.
     """
-    # Time spent waiting is time the daemon spends pushing events at us; reading them keeps its socket free
-    # while a share is being leeched. A caller that substitutes its own sleep (tests) loses that, and nothing
-    # else.
-    sleep = sleep or daemon.settle
     # The tracks no pass has asked about yet go first. A daemon that stops early leaves the rest of the list
     # unasked, and a pass that starts at the top of the file spends every attempt on the same head: on
     # 2026-10-16 five passes over 315 tracks, between 20:54 and 22:28, searched the first 91 records over and
@@ -758,61 +796,47 @@ def run(
     # Only the order the pass works through is sorted; the records are written back as they were read, so the
     # file a person opens stays in track order and a run does not churn it every pass.
     schedule = sorted(records, key=lambda record: (record.idx in asked, record.idx))
-    summary = Summary()
-    watch = Watch(daemon=daemon)
-    # A daemon that lost its session before this pass started is not worth one search: every answer would be
-    # an ordinary success with nothing in it, which is what a tracklist of rare tracks looks like.
-    watch.answered()
     bar = progress.Bar(len(schedule), log=log, stream=stream)
     unsearched: list[int] = []
-
-    # The ignore list, read once: twenty workers ask it on every search and every failure, and `offence`
-    # writes it whole from what this object holds.
-    ledger = peers.Ledger.at(config)
-    already_ignored = sorted(ledger.ignored())
-    if already_ignored:
-        log(f"{len(already_ignored)} peers ignored — music-agent peers lists them, --unban USER relents")
-
-    # The network's rate on searching, and ours to keep. Zero is the loop's own speed, worth having only for
-    # a tracklist too small for the rate to matter.
-    pacer = (Pacer(config.search_interval, clock=clock, sleep=sleep)
-             if config.search_interval > 0 else None)
 
     # One track's story stays readable while others are running, so lines are printed under the bar's lock.
     def say(line: str) -> None:
         bar.say(line)
 
+    pass_ = Pass(config, job, daemon, lookup, library=library, log=say, sleep=sleep,
+                 clock=clock, retry=retry)
+    summary = pass_.summary
+    already_ignored = pass_.ignored_peers()
+    if already_ignored:
+        log(f"{len(already_ignored)} peers ignored — music-agent peers lists them, --unban USER relents")
+
     def work(record: state.Record) -> None:
-        if watch.dead.is_set() or watch.session_lost:
+        if pass_.stopped():
             # The daemon is gone, so the pass stops asking; the record is left exactly as it was, and nothing
             # is written about a search that never happened. Not settled either: the bar counts what the pass
             # got through, and settling these one by one races it through the rest of the list as if it had.
             unsearched.append(record.idx)
             return
-        later_pass = retry or bool(record.candidates)
         bar.begin(record.idx, record.label)
         try:
-            outcome = one(job, record, daemon, lookup, library=library, log=say, sleep=sleep,
-                          clock=clock, later_pass=later_pass, watch=watch, pacer=pacer,
-                          ledger=ledger, ignored=summary.ignored)
+            outcome = pass_.attempt(record)
         except DaemonError as error:
             record.status = state.RETRY_LATER
-            outcome = "failed"
-            watch.timed_out()
+            outcome = Outcome.FAILED
+            pass_.watch.timed_out()
             say(f"[{record.idx}] {record.label}: the server refused — {error}")
             job.append_event("refused", idx=record.idx, error=str(error))
         except Exception as error:          # noqa: BLE001 — one malformed reply must not end the pass
             record.status = state.RETRY_LATER
-            outcome = "failed"
+            outcome = Outcome.FAILED
             say(f"[{record.idx}] {record.label}: {type(error).__name__} — {error}")
             job.append_event("failed", idx=record.idx, error=f"{type(error).__name__}: {error}")
-        getattr(summary, outcome).append(record.idx)
-        bar.settle(record.idx, record.label, outcome)
+        summary.add(record, outcome)
+        bar.settle(record.idx, record.label, outcome.value)
         job.write_records(records)          # a crash costs the tracks in flight and nothing else
 
     if schedule:
-        lookup = one_at_a_time(lookup)
-        if pacer is not None:
+        if pass_.pacer is not None:
             say(f"one search every {config.search_interval:g}s"
                 " — the network's rate, not this loop's")
         try:
@@ -827,11 +851,11 @@ def run(
         unsearched.sort()
         summary.unsearched.extend(unsearched)
 
-    if watch.hung or watch.session_lost:
+    if pass_.watch.hung or pass_.watch.session_lost:
         summary.failed.sort()
         summary.dropped = drop_exhausted(job, log=say)
         summary.failed = [idx for idx in summary.failed if idx not in set(summary.dropped)]
-        if watch.session_lost:
+        if pass_.watch.session_lost:
             # The daemon answered, and every answer was empty because it had no session to search with.
             # Named here because from the inside this is indistinguishable from the network holding nothing,
             # and a pass that stops on it while returning success is a pass that lies.
@@ -842,13 +866,14 @@ def run(
                 f"and a fresh daemon loses it the same way until the server lets go."
             )
         else:
-            job.append_event("server_stuck", consecutive=watch.hung, unsearched=len(summary.unsearched))
-            reason = (f"{watch.hung} searches timed out in a row — {len(summary.unsearched)} tracks were "
+            job.append_event("server_stuck", consecutive=pass_.watch.hung,
+                             unsearched=len(summary.unsearched))
+            reason = (f"{pass_.watch.hung} searches timed out in a row — {len(summary.unsearched)} tracks were "
                       f"never searched. The daemon had stopped answering; the run is open, so a fresh pass "
                       f"picks it up.")
         job.write_status(config)
         bar.close()
-        raise ServerStuck(reason, lost_session=watch.session_lost)
+        raise ServerStuck(reason, lost_session=pass_.watch.session_lost)
 
     # A track whose every candidate refused is closed here rather than put to a person: there is nothing
     # left to try, and asking about it would only be asking permission to stop.
