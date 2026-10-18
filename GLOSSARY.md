@@ -119,6 +119,11 @@ says whether it is installed (`available`), whether its rows can be read back (`
 tracks go into it (`import_run`); `rekordbox` and `traktor` ship. A target that is not installed is reported
 and skipped, and the run is finished only when every target that ran succeeded.
 
+## Lane
+
+One of the two directories the collection is kept in: `paths.lossless` and `paths.lossy`. A file's extension
+decides which lane it belongs to, and the import reads the file rather than the row. Staging is not a lane.
+
 ## Leftover
 
 A file or a row that nothing points at. Three kinds, reported by `music-agent status --files` and never
