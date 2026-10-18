@@ -8,6 +8,7 @@ the MCP, which buys one batch commit and one backup per run.
 from __future__ import annotations
 
 import shutil
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,6 +56,28 @@ def is_running() -> bool:
     from pyrekordbox.utils import get_rekordbox_pid
 
     return bool(get_rekordbox_pid())
+
+
+@contextmanager
+def database(_config: Config):
+    """The rekordbox database, open for the length of the block.
+
+    Every verb that touches the collection goes through here, so the open, the close and the error a failed
+    open produces are written once.
+    """
+    from pyrekordbox import Rekordbox6Database
+
+    try:
+        db = Rekordbox6Database()
+    except Exception as error:              # pyrekordbox raises its own types and its own messages
+        raise library.Unreadable(
+            f"cannot read the rekordbox collection ({error}) — is rekordbox installed, and is the "
+            "database where pyrekordbox expects it?"
+        ) from error
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 def database_path(db) -> Path | None:
