@@ -154,8 +154,12 @@ def test_the_verb_prints_the_plan_and_writes_nothing_until_apply(tmp_path, monke
             keep=copy(1, "Perfect Stranger - Timewarp.aiff"),
             drops=[copy(2, "Perfect Stranger - Timewarp.mp3", plays=3)])])
 
+    class Database:
+        def close(self) -> None:
+            pass
+
     monkeypatch.setattr(duplicates, "run", fake_run)
-    monkeypatch.setattr("pyrekordbox.Rekordbox6Database", lambda *args, **kwargs: object())
+    monkeypatch.setattr("pyrekordbox.Rekordbox6Database", lambda *args, **kwargs: Database())
     config = replace(config_module.DEFAULTS)
 
     assert cli._dedupe(config, argparse.Namespace(apply=False, leave_files=False)) == 0

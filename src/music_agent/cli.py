@@ -26,6 +26,7 @@ from . import slsk
 from . import spotify
 from . import state
 from . import sweep
+from . import tidy
 from . import tracklist
 from . import traktor
 
@@ -252,10 +253,7 @@ def _import(config: config_module.Config, args: argparse.Namespace) -> int:
 
 def _rekordbox(config: config_module.Config):
     """The rekordbox target when this config exports to it and this machine has it."""
-    for target in exporting.configured(config):
-        if target.name == "rekordbox" and target.available(config):
-            return target
-    return None
+    return exporting.named(config, "rekordbox")
 
 
 def _rekordbox_or_say(config: config_module.Config, why: str):
@@ -277,22 +275,18 @@ def _dedupe(config: config_module.Config, args: argparse.Namespace) -> int:
     collection already holds, which is not a run's business to notice. What it leaves behind in Traktor is a
     dead entry, so the report says where to go next.
     """
-    from pyrekordbox import Rekordbox6Database
-
     from . import duplicates
 
     if _rekordbox_or_say(config, "dedupe reads rekordbox's collection: name it in [export] targets "
                                  "first") is None:
         return 1
     try:
-        database = Rekordbox6Database()
-    except Exception as error:                      # pyrekordbox raises its own types and its own messages
-        print(f"cannot read the rekordbox collection ({error}) — is rekordbox installed?", file=sys.stderr)
+        with importing.database(config) as database:
+            summary = duplicates.run(config, db=database, apply=args.apply,
+                                     remove_files=not args.leave_files)
+    except library.Unreadable as error:
+        print(error, file=sys.stderr)
         return 1
-
-    try:
-        summary = duplicates.run(config, db=database, apply=args.apply,
-                                 remove_files=not args.leave_files)
     except duplicates.NotClosed as error:
         print(error, file=sys.stderr)
         return 1
@@ -318,22 +312,17 @@ def _backfill(config: config_module.Config, args: argparse.Namespace) -> int:
     The other direction from `dedupe`: `import` is scoped to a run's records, so a file placed in a lane outside
     a run never gets a row, and the collection quietly holds less than the library does.
     """
-    from pyrekordbox import Rekordbox6Database
-
     from . import backfill
 
     if _rekordbox_or_say(config, "backfill writes rekordbox rows: name rekordbox in [export] targets "
                                  "first") is None:
         return 1
-
     try:
-        database = Rekordbox6Database()
-    except Exception as error:                      # pyrekordbox raises its own types and its own messages
-        print(f"cannot read the rekordbox collection ({error}) — is rekordbox installed?", file=sys.stderr)
+        with importing.database(config) as database:
+            summary = backfill.run(config, db=database, apply=args.apply)
+    except library.Unreadable as error:
+        print(error, file=sys.stderr)
         return 1
-
-    try:
-        summary = backfill.run(config, db=database, apply=args.apply)
     except backfill.NotClosed as error:
         print(error, file=sys.stderr)
         return 1
@@ -805,67 +794,13 @@ def _tidy(config: config_module.Config, args: argparse.Namespace) -> int:
     the collection and nothing said so: the pass that imported it was reading its own records, every other
     check is a verb a person has to know to run, and the track was heard twice before anything looked.
     """
-    from pyrekordbox import Rekordbox6Database
-
-    from . import backfill, duplicates
-
     job = _job(config, args)
     print(f"\ntidy · run {job.id}" if job is not None else "\ntidy")
-    trouble = 0
-
-    database = None
-    try:
-        rekordbox = _rekordbox(config)
-    except exporting.UnknownTarget as error:
-        print(f"  {'rekordbox':<11} {error}", file=sys.stderr)
-        trouble += 1
-    else:
-        if rekordbox is None:
-            print(f"  {'rekordbox':<11} not a configured target — its rows are not read")
-        else:
-            try:
-                database = Rekordbox6Database()
-            except Exception as error:              # pyrekordbox raises its own types and its own messages
-                print(f"  {'rekordbox':<11} cannot read the collection ({error})", file=sys.stderr)
-                trouble += 1
-
-    if database is not None:
-        try:
-            rows = duplicates.run(config, db=database, apply=False, remove_files=False)
-            trouble += _say("duplicates", rows.report() if rows.merges else "",
-                            "music-agent dedupe --apply")
-        except duplicates.NotClosed as error:
-            print(f"  {'duplicates':<11} {error}", file=sys.stderr)
-            trouble += 1
-        try:
-            gaps = backfill.run(config, db=database, apply=False)
-            trouble += _say("backfill", gaps.report() if gaps.candidates else "",
-                            "music-agent backfill --apply")
-        except backfill.NotClosed as error:
-            print(f"  {'backfill':<11} {error}", file=sys.stderr)
-            trouble += 1
-        finally:
-            database.close()
-
-    left = sweep.find(config)
-    trouble += _say("staging", f"{len(left.all)} to clear" if left.all else "",
-                    "music-agent sweep --apply")
-
-    if job is not None:
-        try:
-            drift = library.unpointed(
-                config, claimed=[record.local_path for record in job.records() if record.local_path])
-            # `staging` above already owns what is in staging, so this line is the part `sweep` cannot see:
-            # a file in a lane nothing points at, and a row whose file has gone.
-            counted = (f"{len(drift.lane)} in a lane, {len(drift.gone)} rows whose file has gone")
-            trouble += _say("lanes", "" if not (drift.lane or drift.gone) else counted,
-                            "music-agent status --files")
-        except (library.Unreadable, exporting.UnknownTarget) as error:
-            print(f"  {'lanes':<11} {error}", file=sys.stderr)
-            trouble += 1
-
-    print("nothing to do" if not trouble else f"{trouble} thing(s) for you")
-    return 1 if trouble else 0
+    report = tidy.plan(config, job)
+    for check in report.checks:
+        _say(check.label, check.detail, check.action)
+    print("nothing to do" if not report.trouble else f"{report.trouble} thing(s) for you")
+    return 1 if report.trouble else 0
 
 
 def _sweep(config: config_module.Config, args: argparse.Namespace) -> int:

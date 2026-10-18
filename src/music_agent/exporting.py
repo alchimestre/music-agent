@@ -74,15 +74,10 @@ class Rekordbox:
 
     def import_run(self, config: Config, job: state.Job, *,
                    backup_first: bool = True, log=print) -> Summary:
-        from pyrekordbox import Rekordbox6Database
-
         from . import importing
 
-        database = Rekordbox6Database()
-        try:
+        with importing.database(config) as database:
             result = importing.run(config, job, db=database, backup_first=backup_first, log=log)
-        finally:
-            database.close()
         return Summary(lines=[result.report()], failed=len(result.failed))
 
 
@@ -133,6 +128,14 @@ def configured(config: Config, *, only: list[str] | None = None,
             f"{', '.join(sorted(REGISTRY))}"
         )
     return [REGISTRY[name] for name in names if name not in skipped]
+
+
+def named(config: Config, name: str) -> Target | None:
+    """The configured target called `name`, when this machine can write it."""
+    for target in configured(config):
+        if target.name == name and target.available(config):
+            return target
+    return None
 
 
 def run(config: Config, job: state.Job, *, targets: list[Target] | None = None,
