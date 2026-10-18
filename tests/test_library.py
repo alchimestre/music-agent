@@ -8,11 +8,11 @@ from pathlib import Path
 import pytest
 
 from music_agent import config as config_module
-from music_agent import library
+from music_agent import lanes, library
 
 
-def held(artist: str, title: str, seconds: int | None, path: str = "") -> library.Held:
-    return library.Held(artist=artist, title=title, seconds=seconds, path=path)
+def held(artist: str, title: str, seconds: int | None, path: str = "") -> lanes.Held:
+    return lanes.Held(artist=artist, title=title, seconds=seconds, path=path)
 
 
 @pytest.fixture
@@ -87,8 +87,8 @@ def test_rows_without_a_title_are_ignored():
 
 def test_paths_are_compared_nfc_and_casefolded():
     """Raw equality matches only 1342 of 1627 paths."""
-    assert library.path_key("/Music/Losy Tracks/ROSALÍA - De plata.m4a") == \
-        library.path_key("/Music/Losy Tracks/Rosalía - De plata.m4a")
+    assert lanes.path_key("/Music/Losy Tracks/ROSALÍA - De plata.m4a") == \
+        lanes.path_key("/Music/Losy Tracks/Rosalía - De plata.m4a")
 
 
 # ── reading the directories ──────────────────────────────────────────────────
@@ -119,7 +119,7 @@ def test_the_directories_are_read_with_their_lengths(tmp_path):
     config.lossless.mkdir(parents=True)
     write_wav(config.lossless / "Kiasmos - Blurred.wav", seconds=3.0)
 
-    found = library.read_directories(config)
+    found = lanes.read_directories(config)
 
     assert len(found) == 1
     assert (found[0].artist, found[0].title) == ("Kiasmos", "Blurred")
@@ -132,7 +132,7 @@ def test_a_file_whose_length_cannot_be_read_is_still_listed(tmp_path):
     config.lossless.mkdir(parents=True)
     (config.lossless / "Nobody - Nothing.flac").write_bytes(b"not a flac at all")
 
-    found = library.read_directories(config)
+    found = lanes.read_directories(config)
 
     assert len(found) == 1
     assert found[0].seconds is None
@@ -150,7 +150,7 @@ def test_artwork_beside_the_tracks_is_not_a_track(tmp_path):
 
 def test_a_missing_directory_is_not_an_error(tmp_path):
     config = make_config(tmp_path)
-    assert library.read_directories(config) == []
+    assert lanes.read_directories(config) == []
 
 
 def test_the_directories_and_the_database_are_one_shelf(tmp_path):
@@ -158,7 +158,7 @@ def test_the_directories_and_the_database_are_one_shelf(tmp_path):
     config.lossless.mkdir(parents=True)
     write_wav(config.lossless / "Kiasmos - Blurred.wav", seconds=3.0)
 
-    shelf = library.Library(library.read_directories(config), [])
+    shelf = library.Library(lanes.read_directories(config), [])
     assert shelf.held("Kiasmos", "Blurred", 3) is not None
 
 
@@ -234,4 +234,4 @@ def test_a_file_in_a_folder_inside_a_lane_is_still_held(tmp_path):
     album.mkdir(parents=True)
     write_wav(album / "Kiasmos - Blurred.wav", seconds=3.0)
 
-    assert [track.title for track in library.read_directories(config)] == ["Blurred"]
+    assert [track.title for track in lanes.read_directories(config)] == ["Blurred"]

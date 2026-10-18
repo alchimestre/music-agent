@@ -15,7 +15,8 @@ from pathlib import Path
 
 from . import peers, progress, reference, rules, slsk, state
 from .config import Config
-from .library import Held, Library
+from .lanes import Held
+from .library import Library
 from .parsing import mix_matches, search_query
 from .reference import Lookup
 from .rules import Candidate

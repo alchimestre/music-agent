@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import library, processes, state, tag
+from . import lanes, library, processes, state, tag
 from .config import Config
 
 
@@ -115,7 +115,7 @@ def file_columns(path: Path) -> dict:
     """
     from pyrekordbox.db6.tables import FileType
 
-    sound = library.sound_of(path)
+    sound = lanes.sound_of(path)
     columns: dict = {"FileNameL": path.name, "FileSize": path.stat().st_size}
     member = getattr(FileType, path.suffix.lstrip(".").upper(), None)
     if member is not None:

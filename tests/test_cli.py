@@ -13,7 +13,7 @@ from audio_files import aiff
 from music_agent import acquire
 from music_agent import cli as cli_module
 from music_agent import config as config_module
-from music_agent import exporting, library, slsk, spotify, state, sweep
+from music_agent import exporting, lanes, library, slsk, spotify, state, sweep
 from music_agent.cli import main
 from fake_server import Direct
 from music_agent.rules import Candidate
@@ -436,8 +436,8 @@ def test_the_files_report_names_what_nothing_points_at(tmp_path, capsys, monkeyp
     (tmp_path / "staging" / "01 - Left Behind.aiff.part").write_bytes(b"a cancelled transfer's leftovers")
     (tmp_path / "lossless").mkdir()
     (tmp_path / "lossless" / "Nobody - Nothing.aiff").write_bytes(b"a copy no row points at")
-    gone = library.Held(artist="Gone", title="Missing",
-                        seconds=200, path=str(tmp_path / "lossless" / "Gone - Missing.aiff"))
+    gone = lanes.Held(artist="Gone", title="Missing",
+                      seconds=200, path=str(tmp_path / "lossless" / "Gone - Missing.aiff"))
     monkeypatch.setattr(library, "read_database", lambda: ([gone], []))
 
     assert main(["--config", str(config_path), "status", "--files"]) == 0

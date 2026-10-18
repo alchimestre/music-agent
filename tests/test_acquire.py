@@ -16,7 +16,7 @@ import pytest
 
 from music_agent import acquire
 from music_agent import config as config_module
-from music_agent import library, peers, reference, slsk, state
+from music_agent import lanes, library, peers, reference, slsk, state
 from music_agent.rules import Candidate
 
 from fake_server import Direct
@@ -556,7 +556,7 @@ LOSSY_ONLY = [
 def held_lossy(tmp_path):
     """The collection holding this track, but only as a lossy copy."""
     return library.Library(
-        [library.Held("Kiasmos", "Blurred", 449, path=str(tmp_path / "Losy Tracks" / "Kiasmos - Blurred.mp3"))],
+        [lanes.Held("Kiasmos", "Blurred", 449, path=str(tmp_path / "Losy Tracks" / "Kiasmos - Blurred.mp3"))],
         [],
     )
 
@@ -608,7 +608,7 @@ def test_a_track_the_library_already_holds_is_not_even_searched(tmp_path):
     track costs no request at all — which is exactly what the first smoke run showed it was missing."""
     config, job, daemon, calls = setup(tmp_path, results=GOOD)
     shelf = library.Library(
-        [library.Held("Kiasmos", "Blurred", 449, path="/Library/Kiasmos - Blurred.aiff")], []
+        [lanes.Held("Kiasmos", "Blurred", 449, path="/Library/Kiasmos - Blurred.aiff")], []
     )
 
     summary, quiet = pass_once(config, job, daemon, Reference(), calls, shelf=shelf)
@@ -626,7 +626,7 @@ def test_a_track_already_in_the_collection_is_not_resolved_again(tmp_path):
     again costs a MusicBrainz reference per held track per pass, which on a 305-track run was five minutes of
     the pass spent re-confirming what it already knew."""
     config, job, daemon, calls = setup(tmp_path, results=GOOD)
-    shelf = library.Library([library.Held("Kiasmos", "Blurred", 449, path="/Library/Kiasmos.aiff")], [])
+    shelf = library.Library([lanes.Held("Kiasmos", "Blurred", 449, path="/Library/Kiasmos.aiff")], [])
     lookup = Reference()
 
     first, _ = pass_once(config, job, daemon, lookup, calls, shelf=shelf)
@@ -643,7 +643,7 @@ def test_a_track_with_no_reference_length_is_held_by_its_name(tmp_path):
     The name and the version are then the evidence there is, and a bare request takes only an original, so
     the collection's copy is the same track and fetching it again would duplicate the library."""
     config, job, daemon, calls = setup(tmp_path, results=GOOD)
-    shelf = library.Library([library.Held("Kiasmos", "Blurred", 449, path="/Library/Kiasmos.aiff")], [])
+    shelf = library.Library([lanes.Held("Kiasmos", "Blurred", 449, path="/Library/Kiasmos.aiff")], [])
 
     summary, quiet = pass_once(config, job, daemon, Nothing(), calls, shelf=shelf)
 
@@ -656,7 +656,7 @@ def test_a_named_version_held_is_not_the_original_asked_for(tmp_path):
     """A bare request means the original. The collection holding the extended mix is not the track asked
     for, and with no length to say so the version is what says it."""
     config, job, daemon, calls = setup(tmp_path, results=GOOD)
-    shelf = library.Library([library.Held("Kiasmos", "Blurred", 449, mix="Extended Mix")], [])
+    shelf = library.Library([lanes.Held("Kiasmos", "Blurred", 449, mix="Extended Mix")], [])
 
     summary, quiet = pass_once(config, job, daemon, Nothing(), calls, shelf=shelf)
 
@@ -666,7 +666,7 @@ def test_a_named_version_held_is_not_the_original_asked_for(tmp_path):
 
 def test_a_track_the_library_holds_at_another_length_is_still_fetched(tmp_path):
     config, job, daemon, calls = setup(tmp_path, results=GOOD)
-    shelf = library.Library([library.Held("Kiasmos", "Blurred", 520)], [])
+    shelf = library.Library([lanes.Held("Kiasmos", "Blurred", 520)], [])
 
     summary, quiet = pass_once(config, job, daemon, Reference(), calls, shelf=shelf)
 

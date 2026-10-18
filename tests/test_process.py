@@ -13,7 +13,7 @@ from pathlib import Path
 from audio_files import aiff, mp4
 
 from music_agent import config as config_module
-from music_agent import identify, process, state, tag
+from music_agent import identify, lanes, process, state, tag
 from music_agent.parsing import fold
 
 
@@ -98,27 +98,27 @@ def staged(tmp_path: Path, name: str, content: bytes = b"audio") -> str:
 
 def test_the_name_follows_the_house_convention():
     record = state.Record(idx=1, artist="Kiasmos", title="Blurred")
-    assert process.filename_for(record, ".aiff") == "Kiasmos - Blurred.aiff"
+    assert lanes.filename_for(record, ".aiff") == "Kiasmos - Blurred.aiff"
 
 
 def test_the_mix_goes_in_parentheses():
     record = state.Record(idx=1, artist="Kiasmos", title="Blurred", mix="Extended Mix")
-    assert process.filename_for(record, ".flac") == "Kiasmos - Blurred (Extended Mix).flac"
+    assert lanes.filename_for(record, ".flac") == "Kiasmos - Blurred (Extended Mix).flac"
 
 
 def test_a_whitelabel_is_named_by_its_title_alone():
     record = state.Record(idx=1, artist="", title="Untitled Dubplate")
-    assert process.filename_for(record, ".wav") == "Untitled Dubplate.wav"
+    assert lanes.filename_for(record, ".wav") == "Untitled Dubplate.wav"
 
 
 def test_characters_a_filesystem_will_not_take_are_replaced():
     """Replaced rather than dropped, so two differently punctuated titles cannot collapse onto one name."""
     record = state.Record(idx=1, artist="AC/DC", title="Who Made Who: Live")
-    assert process.filename_for(record, ".aiff") == "AC-DC - Who Made Who- Live.aiff"
+    assert lanes.filename_for(record, ".aiff") == "AC-DC - Who Made Who- Live.aiff"
 
 
 def test_a_name_with_nothing_in_it_still_has_one():
-    assert process.filename_for(state.Record(idx=1, artist="", title="   "), ".aiff") == "untitled.aiff"
+    assert lanes.filename_for(state.Record(idx=1, artist="", title="   "), ".aiff") == "untitled.aiff"
 
 
 # ── the lanes ────────────────────────────────────────────────────────────────

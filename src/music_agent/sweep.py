@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import state
+from . import lanes
 from .config import Config
 
 PART = ".part"
@@ -50,20 +50,10 @@ class Leftovers:
         return "\n".join(lines)
 
 
-def named_by_records(config: Config) -> set[Path]:
-    """Every path any run's records name, so a file a pass still owes is never mistaken for debris."""
-    named = set()
-    for job in state.all_jobs(config):
-        for record in job.records():
-            if record.local_path:
-                named.add(Path(record.local_path).resolve())
-    return named
-
-
 def find(config: Config) -> Leftovers:
     if not config.staging.is_dir():
         return Leftovers((), ())
-    named = named_by_records(config)
+    named = lanes.claimed(config)
     partial: list[Path] = []
     loose: list[Path] = []
     for path in sorted(config.staging.iterdir()):

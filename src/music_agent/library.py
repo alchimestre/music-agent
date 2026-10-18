@@ -7,55 +7,18 @@ holds the whole file path despite its name, and `Length` is already in seconds.
 
 from __future__ import annotations
 
-import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import Config
-from .parsing import bare_title, extract_mix, fold, parse_filename, same_credit
-from .rules import AUDIO_EXTENSIONS, DURATION_WINDOW, LOSSLESS_EXTENSIONS
+from .lanes import Held, path_key, read_directories
+from .parsing import bare_title, extract_mix, fold, same_credit
+from .rules import DURATION_WINDOW
 
 
 class Unreadable(RuntimeError):
     """The collection could not be read — the database is missing, locked, or not what it should be."""
-
-
-@dataclass(frozen=True)
-class Held:
-    """One track the collection holds, whether from the database or from the directories.
-
-    `title` is the bare title and `mix` the version beside it, the same split the tracklist reader makes of a
-    request — the two sides are looked up against each other by name, so a row titled `Galbi (feat Leïla
-    Koumiya)` and a request titled `Galbi` have to arrive at the same key (2026-10-13).
-    """
-    artist: str
-    title: str
-    seconds: int | None = None
-    path: str = ""
-    genre: str = ""
-    content_id: int | None = None
-    mix: str = ""
-
-    @property
-    def key(self) -> str:
-        """The identity a match is made on — the title, folded, so accents and case cannot break it.
-
-        The credit is deliberately not part of it. `A x B`, `A & B` and `A, B` are one collaboration written
-        three ways, the files themselves disagree about which, and a key that spells the credit out holds
-        one track twice. The credit is compared by name instead, once the title has narrowed the field.
-        """
-        return fold(self.title)
-
-    @property
-    def lossless(self) -> bool:
-        """Which lane this copy is in, from its extension."""
-        return Path(self.path).suffix.lower().lstrip(".") in LOSSLESS_EXTENSIONS
-
-
-def path_key(path: str | Path) -> str:
-    """NFC and casefolded: raw equality matches only 1342 of the 1627 library paths."""
-    return unicodedata.normalize("NFC", str(path)).casefold()
 
 
 class Library:
@@ -101,47 +64,6 @@ class Library:
         return sum(len(rows) for rows in self._by_key.values())
 
 
-@dataclass(frozen=True)
-class Sound:
-    """What a header says about a file, which is all the import needs of it."""
-
-    seconds: int | None = None
-    sample_rate: int | None = None
-    bit_rate: int | None = None
-    bit_depth: int | None = None
-
-
-def sound_of(path: Path) -> Sound:
-    """A file's length, sample rate and bit rate, read from its header.
-
-    Read rather than measured: a header costs about a millisecond where decoding the audio would cost a
-    great deal more. `bit_rate` is bits per second as the header gives it, and the import — which writes
-    these into the collection — converts it to the kbps the collection wants.
-    """
-    from mutagen import File as MutagenFile
-
-    try:
-        audio = MutagenFile(path)
-        info = getattr(audio, "info", None)
-    except Exception:
-        return Sound()
-    if info is None:
-        return Sound()
-    seconds = getattr(info, "length", None)
-    bits = getattr(info, "bits_per_sample", None) or getattr(info, "sample_size", None)
-    return Sound(
-        seconds=round(seconds) if seconds else None,
-        sample_rate=getattr(info, "sample_rate", None),
-        bit_rate=getattr(info, "bitrate", None),
-        bit_depth=int(bits) if bits else None,
-    )
-
-
-def seconds_of(path: Path) -> int | None:
-    """A file's length alone, for the places that want nothing else."""
-    return sound_of(path).seconds
-
-
 def read_database() -> tuple[list[Held], list[str]]:
     """Every row the collection holds, and its genre vocabulary.
 
@@ -174,21 +96,6 @@ def read_database() -> tuple[list[Held], list[str]]:
         ))
     genres = [genre.Name for genre in database.get_genre() if genre.Name]
     return rows, genres
-
-
-def read_directories(config: Config) -> list[Held]:
-    """The files themselves, for what the database has not got."""
-    found: list[Held] = []
-    for folder in (config.lossless, config.lossy):
-        if not folder.is_dir():
-            continue
-        for path in sorted(folder.rglob("*")):
-            if not path.is_file() or path.suffix.lower().lstrip(".") not in AUDIO_EXTENSIONS:
-                continue
-            parsed = parse_filename(path.name)
-            found.append(Held(artist=parsed.artist, title=parsed.title, mix=parsed.mix,
-                              seconds=seconds_of(path), path=str(path)))
-    return found
 
 
 def _target_rows(config: Config) -> tuple[list[Held], list[str], bool]:
