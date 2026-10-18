@@ -17,7 +17,7 @@ from . import peers, progress, reference, rules, slsk, state
 from .config import Config
 from .lanes import Held
 from .library import Library
-from .parsing import mix_matches, search_query
+from .parsing import search_query
 from .reference import Lookup
 from .rules import Candidate
 from .slsk import Daemon, DaemonError
@@ -548,24 +548,10 @@ def _prepare(
 
     # Nothing is fetched that the collection already holds, unless the copy it holds is lossy and a lossless
     # one can be had — and that is asked before the search, so a track already held costs no request either.
-    held = library.held(record.artist, record.title, record.duration_s)
-    if held is None:
-        # The length may be the only reason that missed, and for an upgrade there may be no MusicBrainz
-        # length at all. So the name is asked on its own — but the *version* still has to agree, or a remix
-        # would repoint the row that holds the original, and a row whose length rekordbox never had is still
-        # the copy this track would replace (2026-10-13: three tracks went unmatched that way and were
-        # searched as if the collection did not hold them).
-        #
-        # With no length at all, `held` answered nothing: there was nothing to compare, not a mismatch. The
-        # name and the version are then the evidence there is, and a bare request takes only an original —
-        # so the collection's copy is the same track and fetching it again duplicates the library.
-        for row in library.rows_for(record.artist, record.title):
-            if mix_matches(record.mix, row.mix) and (
-                    record.duration_s is None or row.seconds is None):
-                held = row
-                break
-    if held is None:
+    matched = library.match(record.artist, record.title, record.mix, record.duration_s)
+    if matched is None:
         return None, None
+    held = matched.held
     if held.lossless:
         record.status = state.FOUND_IN_LIBRARY
         record.notes = f"already held at {held.path}" if held.path else "already held"
