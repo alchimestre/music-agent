@@ -13,12 +13,24 @@ from pathlib import Path
 
 from .config import Config
 from .lanes import Held, path_key, read_directories
-from .parsing import bare_title, extract_mix, fold, same_credit
+from .parsing import bare_title, extract_mix, fold, mix_matches, same_credit
 from .rules import DURATION_WINDOW
 
 
 class Unreadable(RuntimeError):
     """The collection could not be read — the database is missing, locked, or not what it should be."""
+
+
+LENGTH = "length"
+NAME = "name"
+
+
+@dataclass(frozen=True)
+class Match:
+    """A row the collection holds, and what says it is this track: the length, or the name alone."""
+
+    held: Held
+    basis: str
 
 
 class Library:
@@ -49,6 +61,22 @@ class Library:
             if (row.seconds is not None and abs(row.seconds - seconds) <= DURATION_WINDOW
                     and same_credit(row.artist, artist)):
                 return row
+        return None
+
+    def match(self, artist: str, title: str, mix: str, seconds: int | None) -> Match | None:
+        """The row for this track, and the evidence: the length, or the name when no length can decide.
+
+        The length may be the only reason `held` missed, and for an upgrade there may be no MusicBrainz
+        length at all. So the name is asked on its own — but the version still has to agree, or a remix
+        would repoint the row that holds the original — and a row whose length rekordbox never had is still
+        the copy this track would replace.
+        """
+        held = self.held(artist, title, seconds)
+        if held is not None:
+            return Match(held, LENGTH)
+        for row in self.rows_for(artist, title):
+            if mix_matches(mix, row.mix) and (seconds is None or row.seconds is None):
+                return Match(row, NAME)
         return None
 
     def rows_for(self, artist: str, title: str) -> list[Held]:
