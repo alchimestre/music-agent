@@ -109,4 +109,6 @@ and the rare track the queue asks about.
 uv run pytest -q
 ```
 
+No `.env` is needed: the suite supplies a generic MusicBrainz contact.
+
 MIT licensed.
