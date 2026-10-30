@@ -113,6 +113,8 @@ class Record:
     # The candidates we have already asked a peer for, as `user:path`. Recorded so a retry pass moves on
     # to the next one rather than asking the same peer the same question.
     tried: list[str] = field(default_factory=list)
+    # The tried candidates the peer itself failed to deliver, as `user:path`: a rotate we chose is not one.
+    refused: list[str] = field(default_factory=list)
 
     @property
     def label(self) -> str:

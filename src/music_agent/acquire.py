@@ -230,6 +230,12 @@ def identifier(candidate: Candidate) -> str:
     return f"{candidate.user}:{candidate.path}"
 
 
+def in_a_lane(lanes: tuple[Path, Path], local_path: str) -> bool:
+    """Whether the file already sits in a lane a placed download would land in, rather than in staging."""
+    path = Path(local_path)
+    return any(path.is_relative_to(lane) for lane in lanes)
+
+
 class Outcome(Enum):
     """Where a track belongs in the pass's summary."""
 
@@ -513,7 +519,7 @@ def record_taken(
 
 
 def drop_exhausted(job: state.Job, log=print) -> list[int]:
-    """Close every track whose every candidate was tried and refused.
+    """Close every track whose every candidate was refused.
 
     Nothing is left to try, so the track is settled rather than left in the queue: a pass that ended with a
     peer's queue full is worth another pass, and a track with one untried candidate is left alone. A track a
@@ -524,13 +530,13 @@ def drop_exhausted(job: state.Job, log=print) -> list[int]:
     for record in records:
         if record.decided() or record.status != state.RETRY_LATER:
             continue
-        tried = set(record.tried)
-        if not tried or any(identifier(candidate) not in tried for candidate in record.candidates):
+        refused = set(record.refused)
+        if not refused or any(identifier(candidate) not in refused for candidate in record.candidates):
             continue
         record.decision = state.DECLINED
         record.status = state.NOT_FOUND
         record.notes = "every offer was refused"
-        job.append_event("dropped", idx=record.idx, tried=len(tried))
+        job.append_event("dropped", idx=record.idx, tried=len(record.tried))
         dropped.append(record.idx)
     if dropped:
         job.write_records(records)
@@ -609,6 +615,7 @@ class Pass:
         self.sleep = sleep or daemon.settle
         self.clock = clock
         self.retry = retry
+        self.lanes = (config.lossless, config.lossy)
         self.watch = Watch(daemon=daemon)
         # A daemon that lost its session before this pass started is not worth one search: every answer
         # would be an ordinary success with nothing in it, which is what a tracklist of rare tracks is.
@@ -641,7 +648,9 @@ class Pass:
         if record.local_path and Path(record.local_path).is_file():
             # The file is the truth, not the status: a record this run has already placed must not be searched
             # for again, because until the import runs the collection still points at the copy it replaces.
-            if record.status in {state.DOWNLOADED, state.NORMALIZED, state.TAGGED, state.IMPORTED}:
+            # A file already in its lane had this download: a second copy is refused by `place` as a name taken.
+            if record.status in {state.CONVERTED, state.DOWNLOADED, state.NORMALIZED, state.TAGGED,
+                                 state.IMPORTED} or in_a_lane(self.lanes, record.local_path):
                 return Outcome.ALREADY_DOWNLOADED
 
         if record.status == state.FOUND_IN_LIBRARY:
@@ -729,6 +738,8 @@ class Pass:
                 return Outcome.DOWNLOADED
 
             why = offence(decision, report)
+            if why is not None:
+                record.refused.append(identifier(candidate))
             if decision is Move.ROTATE:
                 give_up(daemon, candidate, log)
                 log(f"      {candidate.user} went nowhere; rotating ({len(record.tried)} tried)")
