@@ -60,26 +60,38 @@ command's output is written in it, and a report in those words is the difference
 One `Artist - Title` per line, or a CSV whose header names both columns. A file, because the CLI owns parsing
 it and there is then exactly one reading of the input.
 
-A **public Spotify or Deezer playlist** goes where the file goes, and needs nothing configured — no account,
-no app, no key:
+A **public Spotify, Deezer or YouTube playlist** goes where the file goes. Spotify and Deezer need nothing
+configured — no account, no app, no key:
 
 ```sh
 music-agent acquire --tracks https://open.spotify.com/playlist/37i9dQZF1DWXRqgorJj26U
 music-agent acquire --tracks https://www.deezer.com/playlist/66079435
+music-agent acquire --tracks https://music.youtube.com/playlist?list=PLX4mtKna7vU975Z3p7wfL7xhZxGNuCvdt
 ```
 
-It takes either URL, a `spotify:playlist:` or `deezer:playlist:` URI, or a file, and the run is named after
-the playlist instead of after a file's stem. Deezer also answers the share link a phone hands over
-(`https://link.deezer.com/s/…`): it carries no id, so the CLI follows it to the playlist before asking.
+YouTube needs **`yt-dlp`** on `PATH` (`brew install yt-dlp`): a YouTube playlist is a page assembled by
+YouTube's own scripts, and `yt-dlp` is the interface that does not change with it. `--flat-playlist` lists the
+entries without fetching a single video.
 
-A store writes what the entry *is* into its own title, and the CLI reads it back to the track.
+It takes either URL, a `spotify:playlist:`, `deezer:playlist:` or `list=` link, or a file, and the run is
+named after the playlist instead of after a file's stem. Deezer also answers the share link a phone hands over
+(`https://link.deezer.com/s/…`): it carries no id, so the CLI follows it to the playlist before asking.
+YouTube answers both the `watch?v=…&list=…` form the address bar gives and the `music.youtube.com/playlist`
+form; a link with no `list=` is one video, not a tracklist, and is refused.
+
+A store or a video site writes what the entry *is* into its own title, and the CLI reads it back to the track.
 Spotify's dash tail (`Dreams - 2004 Remaster`) comes off, because MusicBrainz holds those recordings bare and
 a title that keeps the tail resolves nothing at all. A parenthesised or bracketed version is read for what it
 is: a master naming (`Original Mix`, `Album Version`, `Remastered 2018`, `Mixed`), a source
-(`From "Men In Black" Soundtrack`) come off, and a version that is its own recording survives
+(`From "Men In Black" Soundtrack`) and a video's own label (`Official Video`, `[Official Video]`,
+`Full Album Stream`) come off, and a version that is its own recording survives
 (`23 (Zinc VIP)`, `Bullit (Radio Edit)`, `Spaceman (Drown The Fish Remix)`). A request that demanded
 `Official Video` as its mix would match no file a peer holds; one that dropped `(Zinc VIP)` would resolve the
 reference to the original's length and then refuse the VIP file as too long.
+
+A video's channel is the publisher, not the artist — `Mort Garson - Topic` is Music's own channel for the
+artist and `ArtistVEVO` is the label's — so the artist comes from a credit the title writes
+(`Timboletti - Helva Selva`) and from the channel otherwise, with `- Topic` and `VEVO` taken off.
 
 There is no separate command for a playlist and no file to write first: the URL is the tracklist, and it is
 read once, by the same reader. To read back what a run holds, its own list is `tracks.jsonl` beside its

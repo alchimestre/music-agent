@@ -41,8 +41,9 @@ ship here; `[tools]` in `config.toml` can point at other copies.
 | `tidy` | every leftover check: staging, unpointed files, duplicate rows, gone rows | seconds |
 | `peers` | peers that never deliver; `--unban USER` asks again | seconds |
 
-`FILE` is a path, or the URL or share link of a public Spotify or Deezer playlist. `--job ID` picks a
-run; the default is the newest unfinished one, else the newest.
+`FILE` is a path, or the URL or share link of a public Spotify, Deezer or YouTube playlist. `--job ID`
+picks a run; the default is the newest unfinished one, else the newest. A YouTube playlist needs
+`yt-dlp` on `PATH` (`brew install yt-dlp`); the other two need nothing configured.
 
 Use the stage commands only for an interrupted run or a failed stage; `run` is the normal path.
 
