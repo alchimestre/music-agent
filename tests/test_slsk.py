@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import signal
 import tempfile
 from pathlib import Path
 
@@ -12,6 +13,8 @@ from music_agent import config as config_module
 from music_agent import slsk
 
 from fake_server import Fake
+
+from test_processes import machine  # the process table the kill policy is read against
 
 ONE = [{"username": "peer", "filename": "Music\\Artist - Title.flac", "filesize": 100,
         "bitrate": 855, "duration_sec": 449, "has_free_slots": True, "avg_speed": 500_000}]
@@ -236,3 +239,53 @@ def test_an_error_from_the_daemon_keeps_its_exit_code(tmp_path, creds):
         shutil.rmtree(directory, ignore_errors=True)
 
     assert caught.value.exit_status == 3
+
+
+def test_free_ports_stops_the_client_and_spares_the_log_reader(tmp_path, machine):
+    """A client left logged in takes every search reply, so it goes. A reader of its log is a stranger."""
+    box = machine({500: "tail -f /tmp/sldl.log", 501: "/opt/homebrew/bin/sldl --random", 502: "nicotine"})
+    said = []
+
+    stopped = slsk.free_ports(make_config(tmp_path), log=said.append)
+
+    assert stopped == [502, 501]
+    assert {500} == box.alive
+    assert said == ["stopped nicotine (pid 502)", "stopped sldl (pid 501)"]
+
+
+def test_free_ports_stops_the_daemon_that_stopped_answering(tmp_path, machine):
+    """Our own daemon holds the port too, and killing it is right once the caller's connects have missed."""
+    config = make_config(tmp_path)
+    box = machine({601: "/opt/homebrew/bin/soulseek-rs daemon"}, {config.soulseek_listen_port: [601]})
+    said = []
+
+    stopped = slsk.free_ports(config, log=said.append)
+
+    assert stopped == [601]
+    assert box.alive == set()
+    assert said == [f"stopped the Soulseek daemon that stopped answering port "
+                    f"{config.soulseek_listen_port} (pid 601)"]
+
+
+def test_free_ports_leaves_a_stranger_holding_the_port_alone(tmp_path, machine):
+    """Anything else on the port is named and left alone: this is not the place to kill a stranger."""
+    config = make_config(tmp_path)
+    box = machine({600: "/usr/local/bin/some-other-server --port 20000"},
+                  {config.soulseek_listen_port: [600]})
+    said = []
+
+    stopped = slsk.free_ports(config, log=said.append)
+
+    assert stopped == []
+    assert box.signalled == []
+    assert said == [f"port {config.soulseek_listen_port} is held by another process (pid 600) — left alone"]
+
+
+def test_a_squatter_that_will_not_go_is_a_port_busy(tmp_path, machine):
+    box = machine({502: "sldl"})
+    box.will_not_go = {502}
+
+    with pytest.raises(slsk.PortBusy, match="502"):
+        slsk.free_ports(make_config(tmp_path), log=lambda _line: None)
+
+    assert [number for _, number in box.signalled] == [signal.SIGTERM, signal.SIGKILL]
