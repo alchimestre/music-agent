@@ -17,6 +17,15 @@ def test_a_mix_suffix_becomes_the_mix_not_the_title():
     assert (request.title, request.mix) == ("Blurred", "Extended Mix")
 
 
+def test_a_dash_written_version_becomes_the_mix():
+    """A line written the way a shop writes it carries its version after a dash, and the version has to
+    reach the mix or the file that is the entry is refused as a different version."""
+    (request,) = tracklist.parse("Kiasmos - Faded - Extended Mix")
+    assert (request.title, request.mix) == ("Faded", "Extended Mix")
+    (master,) = tracklist.parse("Kiasmos - Dreams - 2004 Remaster")
+    assert (master.title, master.mix) == ("Dreams", "")
+
+
 def test_a_label_code_tail_is_dropped_from_the_title():
     (request,) = tracklist.parse("Lask - Black Ibis [PRA005]")
     assert request.title == "Black Ibis"

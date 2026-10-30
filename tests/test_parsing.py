@@ -15,6 +15,7 @@ from music_agent.parsing import (
     extract_mix,
     fold,
     mix_matches,
+    names_the_master,
     parse_filename,
     render,
     primary_artist,
@@ -334,3 +335,34 @@ def test_a_title_that_begins_with_a_number_keeps_both_readings():
 
 def test_control_characters_a_peer_sent_are_dropped_before_printing():
     assert render("p\x1b[31meer\x00") == "p[31meer"
+
+
+# -- the mix survives a dot, a word that merely holds a noise word, and a dash -----
+
+
+def test_a_dotted_title_keeps_its_mix():
+    """The mix was read off a filename stem, so `E.T. (Tiesto Remix)` came back bare: the request asked for
+    the original and the peer's remix file was refused against it."""
+    assert extract_mix("E.T. (Tiesto Remix)") == "Tiesto Remix"
+    assert track_title("Mr. Brightside (Jacques Lu Cont Remix)") == (
+        "Mr. Brightside (Jacques Lu Cont Remix)"
+    )
+
+
+def test_a_remix_is_not_read_as_a_master_naming():
+    """`live`, `video`, `audio` and `stream` matched inside `Alive`, `Videodrome`, `Audiophile` and
+    `Streamline`, so a real remix was taken for the video's label: the version went, the reference resolved
+    to the original's length, and the track's own file was refused as a length mismatch."""
+    for version in ("Deliverance Remix", "Videodrome Remix", "Audiophile Remix", "Alive Remix",
+                    "Streamline Rework"):
+        assert names_the_master(version) is False
+        assert track_title(f"Title ({version})") == f"Title ({version})"
+
+
+def test_a_dash_written_version_becomes_the_version():
+    """`song_title` dropped every dash tail, so on Spotify `Dreams (Remastered 2021)` kept `Remastered 2021`
+    as its mix and `mix_matches` refused every candidate by name, while Deezer and YouTube read the same
+    title correctly."""
+    assert song_title("Faded - Extended Mix") == "Faded (Extended Mix)"
+    assert track_title("Faded - Extended Mix") == "Faded (Extended Mix)"
+    assert song_title("White Wedding - Pt. 1") == "White Wedding"

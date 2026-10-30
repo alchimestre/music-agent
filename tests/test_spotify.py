@@ -53,6 +53,18 @@ def test_an_entry_is_its_credited_artists_and_its_title():
     assert spotify.entry_line(two) == "Fleetwood Mac, Stevie Nicks - Dreams"
 
 
+def test_a_title_reaches_the_tracklist_read_the_way_deezer_and_youtube_read_it():
+    """Spotify used to take only the dash tail off, so `(Remastered 2021)` stayed as the mix and every
+    candidate was refused by name. The three readers now give one reading: a master naming goes, a version
+    of the track stays."""
+    assert spotify.entry_line(entry("Fleetwood Mac", "Dreams (Remastered 2021)")) == (
+        "Fleetwood Mac - Dreams"
+    )
+    assert spotify.entry_line(entry("Kiasmos", "Blurred - Extended Mix")) == (
+        "Kiasmos - Blurred (Extended Mix)"
+    )
+
+
 def test_what_is_not_a_track_is_not_a_line():
     """A playlist can hold an episode, a local file or a gap, and none of those is a track to search for.
     A track with no artist keeps its title, which is the shape `tracklist` reads as a white label."""
