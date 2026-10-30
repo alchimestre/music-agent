@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import replace
 
 import pytest
@@ -102,6 +103,41 @@ def test_an_unavailable_target_does_not_finish_alone():
     exporting.run(DEFAULTS, job, targets=[absent], log=lambda line: None)
 
     assert not job.finished
+
+
+def test_an_import_that_received_nothing_leaves_the_run_open(tmp_path, monkeypatch):
+    """Every track still pending meant `rekordbox 0 imported`, a `finished` event, and a run the next pass
+    skipped as done — though no collection had received it."""
+    from music_agent import importing, state
+
+    @contextlib.contextmanager
+    def empty_database(config):
+        yield object()
+
+    monkeypatch.setattr(importing, "is_running", lambda: False)
+    monkeypatch.setattr(importing.processes, "stop_named", lambda *args, **kwargs: None)
+    monkeypatch.setattr(importing, "database", empty_database)
+
+    config = replace(DEFAULTS, state_root=tmp_path / "state")
+    job = state.create(config, "test")
+    job.write_records([state.Record(idx=1, artist="Kiasmos", title="Blurred", status=state.PENDING)])
+
+    results = exporting.run(config, job, targets=[exporting.Rekordbox()], log=lambda line: None)
+
+    assert [result.ran for result in results] == [False]
+    assert not job.finished()
+
+
+def test_a_traktor_plan_that_changes_nothing_did_not_run(monkeypatch):
+    """The tool prints its plan whether or not it has anything to do, so a plan of zeros is not a target
+    that received the run."""
+    from music_agent import traktor
+
+    monkeypatch.setattr(traktor, "sync", lambda config, log=print: "0 to repoint · 0 to add")
+    assert exporting.Traktor().import_run(DEFAULTS, FakeJob()).ran is False
+
+    monkeypatch.setattr(traktor, "sync", lambda config, log=print: "2 to repoint · 0 to add")
+    assert exporting.Traktor().import_run(DEFAULTS, FakeJob()).ran is True
 
 
 def test_library_rows_come_from_reading_targets_only(registry):
