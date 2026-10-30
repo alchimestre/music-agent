@@ -82,10 +82,32 @@ def choose(record: state.Record, number: int | None = None) -> Verdict:
     return offered[number - 1]
 
 
+def _settled_from_disk(record: state.Record, staging: Path) -> str | None:
+    """The file the record already points at in staging, or None when it has none to settle from.
+
+    A record can point at a file that was already placed in a lane — a failed normalize leaves it there — and
+    settling that from disk rewinds it to downloaded, so the next `process` places the lane file over itself
+    and deletes the only copy.
+    """
+    if not record.local_path:
+        return None
+    path = Path(record.local_path)
+    if not path.is_file():
+        return None
+    if path.parent.resolve() != Path(staging).resolve():
+        raise NotAccepted(
+            f"track {record.idx}: {path.name} is in {path.parent.name or path.parent}, not staging — "
+            f"accepting it would make the next process delete it. Move it back into "
+            f"{Path(staging).name or staging} to take it again."
+        )
+    return record.local_path
+
+
 def accept(
     job: state.Job,
     idx: int,
     *,
+    staging: Path,
     number: int | None = None,
     daemon_factory=None,
     log=print,
@@ -103,9 +125,9 @@ def accept(
     verdict = choose(record, number)
     candidate = verdict.candidate
 
-    settled_from_disk = bool(record.local_path) and Path(record.local_path).is_file()
-    if settled_from_disk:
-        path = record.local_path
+    from_disk = _settled_from_disk(record, staging)
+    if from_disk is not None:
+        path = from_disk
         log(f"[{record.idx}] {record.label}: the file is already in staging — not fetching it again")
     else:
         if daemon_factory is None:
@@ -122,7 +144,7 @@ def accept(
                 f"track {record.idx}: {candidate.user} did not hand the file over ({decision.value})"
             )
 
-    return _take(job, records, record, candidate, path, from_disk=settled_from_disk)
+    return _take(job, records, record, candidate, path, from_disk=from_disk is not None)
 
 
 def _take(job, records, record, candidate, path: str, *, from_disk: bool) -> Settled:
@@ -148,6 +170,7 @@ def accept_many(
     job: state.Job,
     picks: Sequence[tuple[int, int | None]],
     *,
+    staging: Path,
     workers: int = 8,
     daemon_factory=None,
     log=print,
@@ -167,9 +190,10 @@ def accept_many(
     for idx, number in picks:
         record = _record(records, idx)
         candidate = choose(record, number).candidate
-        if record.local_path and Path(record.local_path).is_file():
+        here = _settled_from_disk(record, staging)
+        if here is not None:
             log(f"[{record.idx}] {record.label}: the file is already in staging — not fetching it again")
-            settled.append(_take(job, records, record, candidate, record.local_path, from_disk=True))
+            settled.append(_take(job, records, record, candidate, here, from_disk=True))
         else:
             fetching.append((record, candidate))
 

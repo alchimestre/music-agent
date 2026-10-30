@@ -168,6 +168,41 @@ def _names(value) -> tuple[str, ...]:
     return tuple(value)
 
 
+class _Section:
+    """One TOML table, recording which of its keys `load` read, so the rest can be refused."""
+
+    def __init__(self, name: str, data: dict) -> None:
+        self.name = name
+        self.data = data
+        self.read: set[str] = set()
+
+    def get(self, key: str, default=None):
+        self.read.add(key)
+        return self.data.get(key, default)
+
+    def unread(self) -> list[str]:
+        return sorted(set(self.data) - self.read)
+
+
+def _refuse_unknown(known: tuple[str, ...], data: dict, sections: dict[str, _Section]) -> None:
+    """A misspelled section or key would otherwise run the pipeline against the default directories."""
+    unknown = sorted(set(data) - set(known))
+    if unknown:
+        raise ValueError(f"unknown section {', '.join(unknown)} — this build reads "
+                         f"{', '.join(known)}")
+    for section in sections.values():
+        unread = section.unread()
+        if unread:
+            raise ValueError(
+                f"unknown key {', '.join(unread)} in [{section.name}] — this build reads "
+                f"{', '.join(sorted(section.read))}"
+            )
+
+
+# Every table `load` reads, so a misspelled one is refused rather than silently left unread.
+SECTIONS = ("paths", "loudness", "credentials", "soulseek", "traktor", "export", "genres", "tools")
+
+
 def load(path: Path | None = None) -> Config:
     """Read the config, falling back to the defaults for anything it does not set.
 
@@ -189,16 +224,18 @@ def load(path: Path | None = None) -> Config:
     with path.open("rb") as handle:
         data = tomllib.load(handle)
 
-    paths = data.get("paths", {})
-    loudness = data.get("loudness", {})
-    credentials = data.get("credentials", {})
-    soulseek = data.get("soulseek", {})
-    traktor = data.get("traktor", {})
-    export = data.get("export", {})
-    genres = data.get("genres", {})
-    tools = data.get("tools", {})
+    sections = {name: _Section(name, data.get(name, {})) for name in SECTIONS}
+    paths = sections["paths"]
+    loudness = sections["loudness"]
+    credentials = sections["credentials"]
+    soulseek = sections["soulseek"]
+    traktor = sections["traktor"]
+    export = sections["export"]
+    genres = sections["genres"]
+    tools = sections["tools"]
 
-    return Config(
+    taxonomy = genres.get("taxonomy")
+    config = Config(
         staging=_resolve(paths.get("staging", str(DEFAULTS.staging)), base),
         lossless=_resolve(paths.get("lossless", str(DEFAULTS.lossless)), base),
         lossy=_resolve(paths.get("lossy", str(DEFAULTS.lossy)), base),
@@ -224,7 +261,9 @@ def load(path: Path | None = None) -> Config:
         bantime_days=int(soulseek.get("bantime_days", DEFAULTS.bantime_days)),
         slsk_username_env=credentials.get("soulseek_user", DEFAULTS.slsk_username_env),
         slsk_password_env=credentials.get("soulseek_password", DEFAULTS.slsk_password_env),
-        taxonomy=(_resolve(genres["taxonomy"], base) if genres.get("taxonomy") else DEFAULTS.taxonomy),
+        taxonomy=(_resolve(taxonomy, base) if taxonomy else DEFAULTS.taxonomy),
         convert_tool=_resolve(tools.get("convert", str(DEFAULTS.convert_tool)), base),
         normalize_tool=_resolve(tools.get("normalize", str(DEFAULTS.normalize_tool)), base),
     )
+    _refuse_unknown(SECTIONS, data, sections)
+    return config
