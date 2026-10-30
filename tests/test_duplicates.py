@@ -181,6 +181,40 @@ def test_a_merge_names_what_moves():
     assert "4 cues" in lines[1]
 
 
+def test_a_merge_keeps_the_only_file_when_the_keepers_is_gone(tmp_path):
+    """The survivor is decided on the row's own merits, not on its file existing: a row whose file was moved
+    still wins, and deleting the drop's copy then would leave the track with nothing at all."""
+    drop_file = tmp_path / "Perfect Stranger - Timewarp.mp3"
+    drop_file.write_bytes(b"the only copy")
+    kept = replace(copy(1, "Perfect Stranger - Timewarp.aiff"), path=tmp_path / "gone" / "Timewarp.aiff")
+    dropped = replace(copy(2, "Perfect Stranger - Timewarp.mp3"), path=drop_file)
+
+    class Nothing:
+        def fetchall(self):
+            return []
+
+        def scalar(self):
+            return 0
+
+    class Session:
+        def execute(self, *args, **kwargs):
+            return Nothing()
+
+        def commit(self):
+            pass
+
+    class Database:
+        session = Session()
+
+    summary = duplicates.Summary(merges=[duplicates.Merge(keep=kept, drops=[dropped])])
+    duplicates.merge(replace(config_module.DEFAULTS, lossless=tmp_path, lossy=tmp_path), summary,
+                     db=Database(), log=lambda line: None)
+
+    assert drop_file.is_file(), "the keeper's file is missing, so this one is all the track has"
+    assert summary.files == [], "nothing was removed"
+    assert any("is not on disk" in line for line in summary.lines()), "and the report says which row it is"
+
+
 # --- against a copy of the real collection ----------------------------------------------------------------
 
 
