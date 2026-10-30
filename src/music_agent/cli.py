@@ -30,6 +30,7 @@ from . import state
 from . import sweep
 from . import tidy
 from . import tracklist
+from . import youtube
 from . import traktor
 
 
@@ -116,7 +117,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="the whole pipeline in one command: acquire, process, import, sweep")
     run.add_argument("--tracks", default=None, metavar="FILE|DIR|URL",
                      help="the tracklist to start from — a file, a directory of audio files, or a public "
-                          "Spotify or Deezer playlist's URL or share link")
+                          "Spotify, Deezer or YouTube playlist's URL, share link or list link")
     run.add_argument("--name", default=None, metavar="NAME",
                      help="what to call the run (default: the tracklist's own name)")
     run.add_argument("--passes", type=int, default=1, metavar="N",
@@ -157,7 +158,7 @@ def _build_parser() -> argparse.ArgumentParser:
                                   help="search Soulseek for a tracklist, into staging")
     acquire.add_argument("--tracks", default=None, metavar="FILE|DIR|URL",
                          help="the tracklist to start a run from — a file, a directory of audio files, or "
-                              "the URL of a public Spotify or Deezer playlist; omit it to continue a run")
+                              "the URL of a public Spotify, Deezer or YouTube playlist; omit it to continue a run")
     acquire.add_argument("--name", default=None, metavar="NAME",
                          help="what to call the run (default: the tracklist's own name)")
     acquire.add_argument("--retry", action="store_true",
@@ -459,7 +460,7 @@ def _reconcile(config: config_module.Config, args: argparse.Namespace) -> int:
 # The services a `--tracks` argument can name. Each turns its own playlist into the text `tracklist` reads,
 # and each is asked whether the argument is its own before anything is fetched: the first that answers yes
 # reads it.
-_PLAYLIST_SOURCES = (deezer, spotify)
+_PLAYLIST_SOURCES = (deezer, spotify, youtube)
 
 
 def _start(config: config_module.Config, args: argparse.Namespace) -> state.Job | None:

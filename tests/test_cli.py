@@ -642,6 +642,23 @@ def test_a_deezer_share_link_starts_the_run_a_spotify_url_would_have(tmp_path, m
         ("Massive Attack", "Teardrop")]
 
 
+def test_a_youtube_playlist_url_starts_the_run_a_spotify_url_would_have(tmp_path, monkeypatch):
+    """The third source reaches a run the same way, whichever of the two link forms it is given: the list id
+    is what a run reads, and it is the same in both."""
+    config = config_module.load(make_paths_config(tmp_path))
+    monkeypatch.setattr(cli_module.youtube, "playlist",
+                        lambda source, timeout=None: playlists.Playlist(
+                            name="Couscoussière", lines=("Tangerine Dream - Stratosfear",)))
+
+    job = cli_module._start(config, Namespace(
+        tracks="https://music.youtube.com/playlist?list=PLX4mtKna7vU975Z3p7wfL7xhZxGNuCvdt",
+        name=None))
+
+    assert "couscoussi" in job.id
+    assert [(record.artist, record.title) for record in job.records()] == [
+        ("Tangerine Dream", "Stratosfear")]
+
+
 def test_a_file_still_starts_its_run_the_way_it_always_did(tmp_path):
     """The path branch is the one that was there first, and a URL is not allowed to disturb it."""
     config = config_module.load(make_paths_config(tmp_path))
