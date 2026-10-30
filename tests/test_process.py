@@ -10,6 +10,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from audio_files import aiff, mp4
 
 from music_agent import config as config_module
@@ -49,11 +51,14 @@ class FakeRunner:
     """
 
     def __init__(self, *, fails_conversion: bool = False, fails_normalize: bool = False,
-                 unreadable: bool = False) -> None:
+                 unreadable: bool = False, normalizer_errors: int = 0,
+                 normalizer_failed: tuple[str, ...] = ()) -> None:
         self.commands: list[list[str]] = []
         self.fails_conversion = fails_conversion
         self.fails_normalize = fails_normalize
         self.unreadable = unreadable
+        self.normalizer_errors = normalizer_errors
+        self.normalizer_failed = normalizer_failed
 
     def __call__(self, argv: list[str]) -> subprocess.CompletedProcess:
         self.commands.append(argv)
@@ -71,7 +76,13 @@ class FakeRunner:
         if any("fake-normalize" in part for part in argv):
             if self.fails_normalize:
                 return subprocess.CompletedProcess(argv, 1, "", "ffmpeg not found")
-            return subprocess.CompletedProcess(argv, 0, "normalized 1 file", "")
+            errors = max(self.normalizer_errors, len(self.normalizer_failed))
+            said = f"Finished. 1 normalized, 0 already at target (skipped), 1 left untouched (see warnings), " \
+                   f"{errors} error(s)."
+            named = self.normalizer_failed or (("Blurred.aiff",) if self.normalizer_errors else ())
+            for name in named:
+                said = f"\nERROR: {name}\nEncoding failed:\nffmpeg exited 1\n{said}"
+            return subprocess.CompletedProcess(argv, 0, said, "")
         raise AssertionError(f"unexpected command: {argv}")
 
     def conversions(self) -> list[list[str]]:
@@ -336,6 +347,49 @@ def test_a_normalize_failure_leaves_those_records_to_retry(tmp_path):
     assert summary.failed == [1]
     assert job.records()[0].status == state.RETRY_LATER
     assert not job.finished()
+    assert (config.lossless / "Kiasmos - Blurred.aiff").is_file(), "it is placed either way"
+
+
+def test_a_normalizer_that_counts_an_error_is_not_taken_as_success(tmp_path):
+    """The script counts its own failures and returns 0 regardless, so an unencodable file would otherwise
+    ship at its downloaded loudness with the record marked NORMALIZED."""
+    config = make_config(tmp_path)
+    runner = FakeRunner(normalizer_errors=1)
+    record = state.Record(idx=1, artist="Kiasmos", title="Blurred",
+                          local_path=str(aiff(tmp_path / "staging" / "Kiasmos - Blurred.aiff")),
+                          status=state.DOWNLOADED, format="aiff")
+    job = job_with(config, [record])
+
+    summary = process.run(config, job, tools=process.Tools(runner=runner), log=lambda *_: None)
+
+    assert summary.normalized == []
+    assert summary.failed == [1]
+    assert job.records()[0].status == state.RETRY_LATER
+    assert "1 file(s)" in job.records()[0].notes, job.records()[0].notes
+
+
+def test_a_normalizer_failure_is_pinned_on_the_file_it_names(tmp_path):
+    """One unencodable file must not strand the track beside it. The tool counts its own failures and exits
+    0, so its ERROR line is what decides which record stays open and which is at target."""
+    config = make_config(tmp_path)
+    runner = FakeRunner(normalizer_failed=("Kiasmos - Blurred.aiff",))
+    records = [
+        state.Record(idx=1, artist="Kiasmos", title="Blurred",
+                     local_path=str(aiff(tmp_path / "staging" / "Kiasmos - Blurred.aiff")),
+                     status=state.DOWNLOADED, format="aiff"),
+        state.Record(idx=2, artist="UFO95", title="Solution",
+                     local_path=str(aiff(tmp_path / "staging" / "UFO95 - Solution.aiff")),
+                     status=state.DOWNLOADED, format="aiff"),
+    ]
+    job = job_with(config, records)
+
+    summary = process.run(config, job, tools=process.Tools(runner=runner), log=lambda *_: None)
+
+    assert summary.failed == [1]
+    assert summary.normalized == [2], "the same lane, a different file"
+    assert job.records()[0].status == state.RETRY_LATER
+    assert job.records()[1].status == state.TAGGED
+    assert "Encoding failed" in job.records()[0].notes, job.records()[0].notes
     assert (config.lossless / "Kiasmos - Blurred.aiff").is_file(), "it is placed either way"
 
 
@@ -653,6 +707,29 @@ def test_a_re_tag_that_could_not_ask_leaves_the_name_alone(tmp_path):
     assert any("could not be asked" in line for line in said), said
 
 
+def test_a_re_tag_with_no_taxonomy_leaves_the_genre_on_the_file(tmp_path):
+    """An unset taxonomy builds an empty vocabulary, so every track resolves to nothing; writing that blank
+    took the genre off the whole imported collection and reported it as cleared."""
+    config = make_config(tmp_path)
+    config.lossless.mkdir(parents=True, exist_ok=True)
+    path = aiff(config.lossless / "Kiasmos - Blurred.aiff")
+    tag.write(path, tag.Tags(title="Blurred", artist="Kiasmos", genre="Techno"))
+    record = state.Record(idx=1, artist="Kiasmos", title="Blurred", local_path=str(path),
+                          status=state.TAGGED, genre="Techno")
+    job = job_with(config, [record])
+    hearing, matches, brainz, discogs = identification(genres=("techno",))
+    tools = process.Tools(hearing=hearing, matches=matches, brainz=brainz, discogs=discogs)
+    said: list[str] = []
+
+    summary = process.retag(job, tools=tools, log=said.append)
+
+    assert tag.read(path).genre == "Techno", "nothing was consulted, so nothing is the verdict"
+    assert job.records()[0].genre == "Techno"
+    assert summary.unasked == [1]
+    assert summary.cleared == [] and summary.retagged == []
+    assert any("taxonomy" in line for line in said), said
+
+
 def test_a_name_that_fitted_nothing_is_recorded_so_it_can_be_counted(tmp_path):
     """Five tracks carrying a name that fits nothing is what turns it into a proposal."""
     config = make_config(tmp_path)
@@ -667,3 +744,12 @@ def test_a_name_that_fitted_nothing_is_recorded_so_it_can_be_counted(tmp_path):
     recorded = [entry for entry in job.events() if entry["event"] == state.UNGENERED_EVENT]
     assert len(recorded) == 1
     assert recorded[0]["names"] == ["Krautrock", "Kosmische"]
+
+
+# ── the canonical tools ──────────────────────────────────────────────────────
+
+
+def test_a_binary_that_is_not_installed_is_a_process_error():
+    """ffprobe is the first thing the stage runs, and subprocess raises FileNotFoundError for it."""
+    with pytest.raises(process.ProcessError, match="cannot run ffprobe-not-installed"):
+        process.execute(["ffprobe-not-installed", "-version"])

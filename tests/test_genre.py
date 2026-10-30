@@ -153,6 +153,11 @@ def test_an_empty_offer_is_a_blank(tmp_path):
     assert choice.considered == ()
 
 
+def test_a_blank_from_a_consulted_table_is_still_an_answer(tmp_path):
+    assert resolved(tmp_path, "Krautrock").asked is True
+    assert genre.Choice().asked is True
+
+
 def test_specificity_is_words_first():
     assert genre.specificity("Minimal Techno") > genre.specificity("Techno")
 

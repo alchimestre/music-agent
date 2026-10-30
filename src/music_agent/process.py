@@ -7,6 +7,7 @@ fingerprint is of the file as downloaded. Lossy files are never converted; both 
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -60,12 +61,36 @@ def execute(argv: list[str]) -> subprocess.CompletedProcess:
         return subprocess.run(argv, capture_output=True, text=True, check=False, timeout=TOOL_TIMEOUT)
     except subprocess.TimeoutExpired as error:
         raise ProcessError(f"{Path(argv[0]).name} gave no answer in {int(TOOL_TIMEOUT)} s") from error
+    except OSError as error:
+        raise ProcessError(f"cannot run {Path(argv[0]).name}: {error.strerror or error}") from error
 
 
 def _failure_detail(result: subprocess.CompletedProcess) -> str:
     """The last thing the tool said, for a failure message."""
     lines = (result.stderr or result.stdout or "").strip().splitlines()
     return lines[-1] if lines else "no output"
+
+
+# The normalizer counts its own failures and exits 0 anyway, so the lines it prints are the only report of
+# them: `ERROR: <path>` names the file, and the summary counts them.
+_NORMALIZER_COUNT = re.compile(r"(\d+)\s+errors?\b")
+
+
+def _normalizer_failures(stdout: str, folder: Path) -> tuple[dict[Path, str], int, str]:
+    """Each file the normalizer failed with the line it printed under it, the count it reported, and the
+    last complaint — which is all that is left when the count and the names disagree."""
+    text = stdout or ""
+    lines = [line.rstrip() for line in text.splitlines()]
+    failed: dict[Path, str] = {}
+    complaint = "no output"
+    for position, line in enumerate(lines):
+        if not line.startswith("ERROR:"):
+            continue
+        detail = lines[position + 1].strip() if position + 1 < len(lines) else ""
+        failed[(folder / Path(line[len("ERROR:"):].strip())).resolve()] = detail or "failed"
+        complaint = f"{line.strip()} {detail}".strip()
+    counted = _NORMALIZER_COUNT.findall(text)
+    return failed, int(counted[-1]) if counted else 0, complaint
 
 
 @dataclass
@@ -150,7 +175,7 @@ def apply_genre(record: state.Record, found: identify.Identified, tools: Tools, 
     if tools.vocabulary:
         choice = genre.resolve(offered, vocabulary=tools.vocabulary, mappings=tools.mappings)
     else:
-        choice = genre.Choice(considered=tuple(offered))
+        choice = genre.Choice(considered=tuple(offered), asked=False)
 
     record.genre = choice.genre
     if choice.genre:
@@ -240,11 +265,13 @@ def place(config: Config, record: state.Record, *, run: Runner, log) -> Path:
     return target
 
 
-def normalize(config: Config, folder: Path, *, run: Runner, log) -> None:
-    """Let the canonical normalizer look at the whole directory.
+def normalize(config: Config, folder: Path, *, files: set[Path], run: Runner, log) -> dict[Path, str]:
+    """Let the canonical normalizer look at the whole directory, and say which of `files` it failed and why.
 
     A directory, not a file, because that is where it keeps its own state: re-measuring a whole lane to
-    loudness a handful of files would be the wrong trade.
+    loudness a handful of files would be the wrong trade. A file it could not normalise is that record's
+    failure and not the folder's — and it exits 0 either way, so a batch that trusted the exit code claimed
+    every one of its tracks was at target when only the tool's own lines say so.
     """
     result = run([
         sys.executable, str(config.normalize_tool), str(folder),
@@ -254,7 +281,13 @@ def normalize(config: Config, folder: Path, *, run: Runner, log) -> None:
     ])
     if result.returncode != 0:
         raise ProcessError(f"normalizing {folder} failed: {_failure_detail(result)}")
+    failed, reported, complaint = _normalizer_failures(result.stdout, folder)
+    mine = {path: why for path, why in failed.items() if path in files}
+    if reported > len(mine):
+        # It counted failures it never pinned on a file this pass placed, so no track here can claim a pass.
+        raise ProcessError(f"normalizing {folder} failed {reported} file(s): {complaint}")
     log(f"      normalized {folder}")
+    return mine
 
 
 @dataclass
@@ -263,7 +296,7 @@ class Retagged:
 
     retagged: list[int] = field(default_factory=list)   # a genre was resolved and written
     cleared: list[int] = field(default_factory=list)    # the old name came off and nothing replaced it
-    unasked: list[int] = field(default_factory=list)    # no service could be reached, so nothing was written
+    unasked: list[int] = field(default_factory=list)    # nothing was consulted, so nothing was written
     failed: list[int] = field(default_factory=list)
 
     def report(self) -> str:
@@ -271,7 +304,7 @@ class Retagged:
         if self.cleared:
             parts.append(f"{len(self.cleared)} cleared")
         if self.unasked:
-            parts.append(f"{len(self.unasked)} left alone, the services unreachable")
+            parts.append(f"{len(self.unasked)} left alone, nothing asked")
         if self.failed:
             parts.append(f"{len(self.failed)} failed")
         return " · ".join(parts)
@@ -283,7 +316,8 @@ def retag(job: state.Job, *, tools: Tools | None = None, log=print) -> Retagged:
     A run never re-genres a track, because a genre cannot be undone after import, so changing one has to be
     deliberate: the table has changed, and the tracks tagged under the old one carry names the collection no
     longer has. When the services answer that nothing resolves, the old name comes off, because the import
-    reads the *file*; when they cannot be reached at all, nothing is written.
+    reads the *file*; when they cannot be reached at all, or there is no taxonomy to resolve against, nothing
+    is written.
     """
     tools = tools or Tools()
     summary = Retagged()
@@ -300,21 +334,23 @@ def retag(job: state.Job, *, tools: Tools | None = None, log=print) -> Retagged:
             continue
 
         found = identify_one(record, tools, log)
-        if not found.asked:
+        # No ungenred event here: those names were counted when the run first genred these tracks, and
+        # counting them again would inflate a genre proposal rather than inform one.
+        choice = apply_genre(record, found, tools, log) if found.asked else None
+        if choice is None or not choice.asked:
             # 2026-10-15: a service that could not be reached is not an answer, and the blank it leaves is not
             # the taxonomy's verdict. Two passes over the same 287 records disagreed on 23 of them, every one a
             # lookup that failed; the second pass took off names the first had read off the same services. So
-            # nothing is written here, and the record keeps what its file says.
+            # nothing is written here, and the record keeps what its file says. A missing taxonomy is the same
+            # blank one layer down: an empty vocabulary resolves every track to nothing, and writing that
+            # would take the genre off the whole collection.
             record.genre = tag.read(path).genre
-            record.notes = "the services could not be asked — its genre stands"
+            record.notes = ("the services could not be asked — its genre stands" if choice is None
+                            else "no genre taxonomy is set — its genre stands")
             summary.unasked.append(record.idx)
-            log(f"[{record.idx}] {record.label}: the services could not be asked — "
-                f"{(record.genre or 'no genre')!r} stands")
+            log(f"[{record.idx}] {record.label}: {record.notes} ({(record.genre or 'no genre')!r})")
             job.write_records(records)
             continue
-        # No ungenred event here: those names were counted when the run first genred these tracks, and
-        # counting them again would inflate a genre proposal rather than inform one.
-        apply_genre(record, found, tools, log)
         try:
             tag.write(path, tags_for(found, genre_name=record.genre), replace_genre=True, log=log)
         except tag.TagError as error:
@@ -489,7 +525,8 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
     for folder in sorted({Path(record.local_path).parent for record in placed}):
         in_lane = [record for record in placed if Path(record.local_path).parent == folder]
         try:
-            normalize(config, folder, run=tools.runner, log=log)
+            files = {Path(record.local_path).resolve() for record in in_lane}
+            failed = normalize(config, folder, files=files, run=tools.runner, log=log)
         except ProcessError as error:
             for record in in_lane:
                 record.status = state.RETRY_LATER
@@ -499,6 +536,15 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
             summary.failed.extend(record.idx for record in in_lane)
             continue
         for record in in_lane:
+            complaint = failed.get(Path(record.local_path).resolve())
+            if complaint is not None:
+                record.status = state.RETRY_LATER
+                record.notes = f"the normalizer failed it: {complaint}"
+                summary.failed.append(record.idx)
+                job.append_event("normalize_failed", idx=record.idx, path=record.local_path,
+                                 error=complaint)
+                log(f"[{record.idx}] {record.label}: the normalizer failed it — {complaint}")
+                continue
             record.status = state.NORMALIZED
             summary.normalized.append(record.idx)
 

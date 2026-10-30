@@ -26,6 +26,7 @@ class Choice:
     genre: str = ""
     source: str = ""
     considered: tuple[str, ...] = ()
+    asked: bool = True      # False when there was no table to consult, so the blank is not a verdict
 
     @property
     def found(self) -> bool:
