@@ -108,7 +108,7 @@ def free_ports(config: Config, *, log=print) -> list[int]:
     """
     stopped = []
     for name in SQUATTERS:
-        pids = [pid for pid in processes.named(name) if pid != os.getpid()]
+        pids = processes.named(name)
         if pids:
             stubborn = processes.stop(pids)
             if stubborn:
@@ -125,13 +125,7 @@ def free_ports(config: Config, *, log=print) -> list[int]:
     # caller has already tried to connect twice. It is named apart, because the log otherwise reads like a
     # stranger was killed.
     ours = Path(config.soulseek_command[0]).name
-
-    def is_ours(pid: int) -> bool:
-        # The executable, not the command line: `tail -f sldl.log` mentions the client without being it.
-        command = processes.command_of(pid)
-        return bool(command) and Path(command.split()[0]).name == ours
-
-    mine = [pid for pid in held if is_ours(pid)]
+    mine = [pid for pid in held if processes.runs(pid, ours)]
     others = [pid for pid in held if pid not in mine]
     stubborn = processes.stop(mine)
     if stubborn:

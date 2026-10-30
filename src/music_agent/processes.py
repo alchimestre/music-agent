@@ -15,6 +15,7 @@ import os
 import signal
 import subprocess
 import time
+from pathlib import Path
 
 # How long a process has to go quietly before it is killed outright.
 GRACE = 3.0
@@ -32,14 +33,19 @@ def listeners(port: int) -> list[int]:
     return [int(line) for line in found.stdout.split() if line.strip().isdigit()]
 
 
-def command_of(pid: int) -> str:
-    """One process's command line, or '' when it is already gone."""
+def commands(selector: list[str]) -> dict[int, str]:
+    """`ps` over some processes: each pid and its command line."""
     try:
-        found = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+        found = subprocess.run(["ps", "-o", "pid=,command=", *selector],
                                capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
-        return ""
-    return found.stdout.strip()
+        return {}
+    table = {}
+    for line in found.stdout.splitlines():
+        pid, _, command = line.strip().partition(" ")
+        if pid.isdigit() and command.strip():
+            table[int(pid)] = command.strip()
+    return table
 
 
 def alive(pid: int) -> bool:
@@ -52,13 +58,47 @@ def alive(pid: int) -> bool:
     return True
 
 
+def spelling(name: str) -> str:
+    """What a program's name is once case and separators are dropped: `SoulseekQt` and `soulseek-qt` agree."""
+    return "".join(character for character in name.casefold() if character.isalnum())
+
+
+# Executables whose first argument is the program they are running. A client started through one of these is
+# that client, and its `ps` name is the interpreter.
+LAUNCHERS = ("python", "node")
+
+
+def program(command: str) -> str:
+    """The basename of what one command line runs.
+
+    The executable decides, never a name further along the line: `tail -f sldl.log` runs `tail`, and an editor
+    open on `notes/nicotine/setup.md` runs the editor. An interpreter is the exception, because the script it
+    was handed is the program.
+    """
+    words = command.split()
+    if not words:
+        return ""
+    executable = Path(words[0]).name
+    launcher = executable.casefold()
+    if len(words) > 1 and any(launcher.startswith(name) for name in LAUNCHERS):
+        script = words[1]
+        if not script.startswith("-"):
+            return Path(script).stem
+    return executable
+
+
+def runs(pid: int, name: str) -> bool:
+    """Whether this pid *is* that program."""
+    command = commands(["-p", str(pid)]).get(pid, "")
+    return bool(command) and spelling(program(command)) == spelling(name)
+
+
 def named(name: str) -> list[int]:
-    """Every running process whose command line contains `name`."""
-    try:
-        found = subprocess.run(["pgrep", "-f", name], capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    return [int(line) for line in found.stdout.split() if line.strip().isdigit()]
+    """Every running process whose own program is `name`, this process excluded."""
+    wanted = spelling(name)
+    ours = os.getpid()
+    return [pid for pid, command in commands(["-A"]).items()
+            if pid != ours and spelling(program(command)) == wanted]
 
 
 def stop(pids: list[int], *, grace: float = GRACE) -> list[int]:
@@ -82,7 +122,7 @@ def stop(pids: list[int], *, grace: float = GRACE) -> list[int]:
 
 
 def stop_named(names: tuple[str, ...], *, log=print) -> list[int]:
-    """Stop every process whose command line contains one of these names, saying which it stopped."""
+    """Stop every process whose own program is one of these names, saying which it stopped."""
     for name in names:
         found = named(name)
         if not found:
