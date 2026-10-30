@@ -23,7 +23,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .parsing import song_title
+from .parsing import track_title
 from .playlists import Playlist, PlaylistError, id_in
 
 TOKEN_URL = "https://open.spotify.com/api/token"
@@ -115,7 +115,7 @@ def entry_line(entry: dict) -> str:
     the primary artist is the one a search leads with.
     """
     track = ((entry.get("itemV2") or {}).get("data")) or {}
-    title = song_title(str(track.get("name") or ""))
+    title = track_title(str(track.get("name") or ""))
     if not title:
         return ""
     artists = ((track.get("artists") or {}).get("items")) or []

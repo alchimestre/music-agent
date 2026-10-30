@@ -12,7 +12,7 @@ import csv
 import re
 from pathlib import Path
 
-from .parsing import bare_title, extract_mix, fold, parse_filename
+from .parsing import bare_title, extract_mix, fold, parse_filename, split_version
 from .rules import AUDIO_EXTENSIONS, Request
 
 _COMMENT = "#"
@@ -37,8 +37,8 @@ def header_columns(line: str) -> tuple[int, int] | None:
 
 def request_for(artist: str, title: str) -> Request:
     """A request from two strings, with the version read off the title rather than left in it."""
-    title = title.strip()
-    mix = extract_mix(title)
+    title, version = split_version(title.strip())
+    mix = version or extract_mix(title)
     bare = bare_title(title)
     if not bare:
         # The whole title was parenthesised, so it is a title and not a version suffix.

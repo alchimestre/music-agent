@@ -60,9 +60,12 @@ _CREDITS = frozenset({"feat", "ft", "featuring", "with"})
 def extract_mix(name: str) -> str:
     """The trailing parenthesised mix — 'Original Mix', a remixer's name, or ''.
 
+    Read from the whole string, never from a filename stem: a title holds dots of its own, and taking
+    `E.T. (Tiesto Remix)` for a file name lost the version, so the request asked for the original.
+
     A credit is not a mix: `(feat X)` and `(ft. X)` return ''.
     """
-    groups = _PARENTHESISED.findall(name.rsplit(".", 1)[0])
+    groups = _PARENTHESISED.findall(name)
     if not groups:
         return ""
     trailing = groups[-1].strip()
@@ -162,6 +165,22 @@ def bare_title(text: str) -> str:
     return _TRAILING_PARENS.sub("", strip_code_tail(text)).strip()
 
 
+def split_version(title: str) -> tuple[str, str]:
+    """A title split at the dash a shop or a video site writes its version after: (title, version).
+
+    `Faded - Extended Mix` → (`Faded`, `Extended Mix`), so the version reaches `extract_mix` instead of being
+    dropped. A tail that names the master (`Dreams - 2004 Remaster`) goes, and one that names no version at
+    all (`White Wedding - Pt. 1`, `Perfect Exceeder - (Tribute To …)`) goes as before, because becoming a mix
+    would ask a peer for a version nobody wrote.
+    """
+    title = title.strip()
+    head, _, tail = title.partition(" - ")
+    head, tail = head.strip(), tail.strip()
+    if not tail or not names_a_version(tail) or names_the_master(tail):
+        return head or title, ""
+    return head, tail
+
+
 def song_title(name: str) -> str:
     """A store's title with the master it was drawn from taken off: `Dreams - 2004 Remaster` → `Dreams`.
 
@@ -174,11 +193,11 @@ def song_title(name: str) -> str:
     master, a version or a source rather than the song's name; and over ten of them the verbatim title
     matched **0** MusicBrainz recordings against **208** for the same ten once the tail was off.
 
-    So the tail goes, and what is left is the bare request — any version that is not somebody else's remix,
-    checked against the reference. A tail that is genuinely part of a title
-    (`White Wedding - Pt. 1` is the one such entry in those playlists) resolves to the song either way.
+    So a master naming goes, a version of the track is written as `(version)` — the same reading
+    `track_title` gives a parenthetical — and a tail that names no version goes as it always has.
     """
-    return name.split(" - ")[0].strip() or name.strip()
+    title, version = split_version(name)
+    return f"{title} ({version})" if version else title
 
 
 # A version a shop or a video site appends that names the record's own master (`Original Mix`,
@@ -192,16 +211,23 @@ _MASTER_NAMINGS = frozenset({
 
 _SOURCE_PREFIXES = ("from ", "music from ", "theme from ")
 
-_NOISE_WORDS = ("official", "video", "audio", "lyric", "stream", "live", "remaster", "topic", "visualis")
+# Whole words, never substrings: `Videodrome` holds `video` and `Alive` holds `live`, and reading either as
+# the video's own label dropped a remix's version.
+_NOISE_WORDS = frozenset({
+    "official", "video", "audio", "lyric", "lyrics", "stream", "live", "topic",
+    "remaster", "remastered", "visual", "visualiser", "visualizer",
+})
 
 
 def names_the_master(version: str) -> bool:
     """Whether a version names the record's own master, its source, or the video — not another recording."""
+    if is_remix(version):
+        return False
     text = fold(version)
     return (
         text in _MASTER_NAMINGS
         or text.startswith(_SOURCE_PREFIXES)
-        or any(word in text for word in _NOISE_WORDS)
+        or any(word in _NOISE_WORDS for word in text.split())
     )
 
 
@@ -260,6 +286,19 @@ def is_remix(mix: str) -> bool:
     """Whether this names somebody else's version of the track."""
     text = fold(mix)
     return any(marker in text for marker in _REMIX_MARKERS)
+
+
+# What a version calls itself when nobody else is credited: `Extended Mix`, `Radio Edit`, `Acoustic
+# Version`. A tail holding none of these words (`Pt. 1`) is not a version to ask a peer for.
+_VERSION_WORDS = frozenset({
+    "mix", "version", "edit", "dub", "instrumental", "acapella", "cappella", "vip",
+    "bootleg", "mashup", "flip", "rework", "refix", "remix",
+})
+
+
+def names_a_version(version: str) -> bool:
+    """Whether a version names a version of the track — its own re-cut, or somebody else's edit."""
+    return is_remix(version) or any(word in _VERSION_WORDS for word in fold(version).split())
 
 
 def mix_matches(wanted: str, have: str) -> bool:
