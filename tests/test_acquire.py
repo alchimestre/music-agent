@@ -405,7 +405,7 @@ def test_a_transfer_is_asked_about_on_the_passs_own_interval(tmp_path):
     summary = acquire.run(config, job, daemon, Reference(), log=lambda line: None,
                           sleep=sleep, clock=clock)
 
-    assert summary.dropped == [1]
+    assert summary.failed == [1], "a queue we stopped waiting on is not a refusal"
     assert max(slept) <= acquire.POLL_INTERVAL, "no wait longer than one poll"
     assert max(slept) < 30, "the server's own thirty-second ask is not obeyed"
     assert sum(slept) == pytest.approx(acquire.QUEUE_BUDGET, abs=0.05), \
@@ -427,7 +427,7 @@ def test_a_finished_transfer_whose_file_never_appears_is_given_its_grace(tmp_pat
     summary = acquire.run(config, job, daemon, Reference(), log=lambda line: None,
                           sleep=sleep, clock=clock)
 
-    assert summary.dropped == [1]
+    assert summary.failed == [1], "a completed transfer with no file is not the peer's refusal"
     assert sum(slept) == pytest.approx(acquire.FINISHED_GRACE, abs=0.01)
     assert tools_called(calls).count("download.list") == 2, "asked again, then given up on"
 
@@ -466,8 +466,37 @@ def test_a_track_with_a_candidate_left_untried_is_left_alone(tmp_path):
     records = job.records()
     records[0].tried = [acquire.identifier(first), acquire.identifier(second)]
     job.write_records(records)
+    assert acquire.drop_exhausted(job, log=lambda line: None) == [], "tried is not refused"
+
+    records = job.records()
+    records[0].refused = [acquire.identifier(first), acquire.identifier(second)]
+    job.write_records(records)
     assert acquire.drop_exhausted(job, log=lambda line: None) == [1]
     assert job.records()[0].status == state.NOT_FOUND
+
+
+def test_a_rotate_for_a_full_peer_queue_leaves_the_track_open(tmp_path):
+    """`tried` is written before the transfer, so "every candidate tried" is also true of a peer we stopped
+    waiting on: closing that as a decision by hand settled the track for good, and no later pass asked again."""
+    config, job, daemon, calls = setup(tmp_path, results=GOOD, download="queued:waiting_for_peer:0:")
+    summary, quiet = pass_once(config, job, daemon, Reference(), calls)
+
+    record = job.records()[0]
+    assert summary.dropped == [], quiet.lines
+    assert summary.failed == [1]
+    assert record.status == state.RETRY_LATER, "a queue we chose to leave is worth another pass"
+    assert record.decision == state.UNDECIDED, "review is the only writer of the decision axis"
+    assert record.refused == []
+
+
+def test_a_peer_that_delivered_nothing_is_recorded_as_a_refusal(tmp_path):
+    config, job, daemon, calls = setup(tmp_path, results=TWO_PEERS, download="failed::0:")
+    pass_once(config, job, daemon, Reference(), calls)
+
+    record = job.records()[0]
+    assert set(record.refused) == {"peerA:Music\\Kiasmos - Blurred.flac",
+                                  "peerB:Other\\Kiasmos - Blurred.flac"}
+    assert record.decision == state.DECLINED
 
 
 def test_the_reference_is_resolved_once_and_only_once(tmp_path):
@@ -516,6 +545,41 @@ def test_a_track_this_run_already_placed_and_tagged_is_not_searched_again(tmp_pa
     assert summary.already_downloaded == [1], quiet.lines
     assert tools_called(calls) == [], "not even a search: the file it produced is right there"
     assert job.records()[0].status == state.TAGGED, "and its status is left where it was"
+
+
+def test_a_converted_record_is_not_fetched_a_second_time(tmp_path):
+    """`place` sets CONVERTED with the file already in the staging lane, so a retry that searched again
+    downloaded a second copy, had it refused as a name taken, and filed the track as held by nothing."""
+    config, job, daemon, calls = setup(tmp_path, results=GOOD)
+    converted = config.staging / "Kiasmos - Blurred.aiff"
+    converted.write_bytes(b"audio")
+    record = job.records()[0]
+    record.status = state.CONVERTED
+    record.local_path = str(converted)
+    job.write_records([record])
+
+    summary, quiet = pass_once(config, job, daemon, Reference(), calls)
+
+    assert summary.already_downloaded == [1], quiet.lines
+    assert tools_called(calls) == [], "the file is in hand; there is nothing to search for"
+
+
+def test_a_retry_later_record_whose_file_is_in_its_lane_is_not_fetched_again(tmp_path):
+    """A normalize or tagging failure leaves RETRY_LATER with the placed file still in its lane, which the
+    status guard did not cover: the retry downloaded a copy `place` then refused."""
+    config, job, daemon, calls = setup(tmp_path, results=GOOD)
+    placed = config.lossy / "Kiasmos - Blurred.aiff"
+    placed.parent.mkdir(parents=True, exist_ok=True)
+    placed.write_bytes(b"audio")
+    record = job.records()[0]
+    record.status = state.RETRY_LATER
+    record.local_path = str(placed)
+    job.write_records([record])
+
+    summary, quiet = pass_once(config, job, daemon, Reference(), calls)
+
+    assert summary.already_downloaded == [1], quiet.lines
+    assert tools_called(calls) == [], "a file in its lane has already been downloaded"
 
 
 def test_a_later_pass_prefers_peers_with_free_slots(tmp_path):

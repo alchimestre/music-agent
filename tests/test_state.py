@@ -88,6 +88,21 @@ def test_a_record_written_with_an_unknown_field_still_loads(tmp_path):
     assert job.records()[0].title == "T"
 
 
+def test_a_refusal_round_trips_and_a_record_without_one_loads_empty(tmp_path):
+    """The refusal is the fact that closes a track, so it survives a write; a record from before the field
+    existed must not read as every candidate refused."""
+    job = state.create(make_config(tmp_path), "run")
+    refused = a_settled_track()
+    refused.refused = [r"vinyl_only:M\Kiasmos - Blurred.flac"]
+    job.write_records([refused])
+    assert job.records()[0].refused == refused.refused
+
+    job.tracks_path.write_text(
+        json.dumps({"idx": 2, "artist": "A", "title": "T", "tried": ["p:a.flac"]}) + "\n",
+        encoding="utf-8")
+    assert job.records()[0].refused == []
+
+
 def test_the_resume_target_is_the_newest_unfinished_run(tmp_path):
     config = make_config(tmp_path)
     first = state.create(config, "first")
