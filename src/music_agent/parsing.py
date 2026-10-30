@@ -162,6 +162,84 @@ def bare_title(text: str) -> str:
     return _TRAILING_PARENS.sub("", strip_code_tail(text)).strip()
 
 
+def song_title(name: str) -> str:
+    """A store's title with the master it was drawn from taken off: `Dreams - 2004 Remaster` → `Dreams`.
+
+    A shop writes which master, version or source an entry came from *after a dash* inside the title —
+    `Stairway to Heaven - Remaster`, `Paranoid - 2012 - Remaster`, `Danger Zone - From "Top Gun" Original
+    Soundtrack`. MusicBrainz carries these as bare titles, so a title kept whole resolves no reference at
+    all: the recording `Dreams - 2004 Remaster` does not exist, the query returns nothing, and with no
+    reference length to settle it the track stays review-only for good. Measured over three Spotify
+    editorial playlists — 450 titles — 105 carry such a tail in 52 distinct forms, every one of them a
+    master, a version or a source rather than the song's name; and over ten of them the verbatim title
+    matched **0** MusicBrainz recordings against **208** for the same ten once the tail was off.
+
+    So the tail goes, and what is left is the bare request — any version that is not somebody else's remix,
+    checked against the reference. A tail that is genuinely part of a title
+    (`White Wedding - Pt. 1` is the one such entry in those playlists) resolves to the song either way.
+    """
+    return name.split(" - ")[0].strip() or name.strip()
+
+
+# A version a shop or a video site appends that names the record's own master (`Original Mix`,
+# `Album Version`), where it was taken from (`From "Men In Black" Soundtrack`), or the video that carried it
+# (`Official Music Video`, `Remastered 2018`, `Full Album Stream`, `Mixed`). Not one of those is a recording
+# on MusicBrainz, so carried as the mix it resolves no reference and matches no file a peer holds.
+_MASTER_NAMINGS = frozenset({
+    "original", "original mix", "original version", "album version", "album mix", "single version",
+    "remaster", "remastered", "explicit", "clean", "mixed", "hd", "hq", "4k",
+})
+
+_SOURCE_PREFIXES = ("from ", "music from ", "theme from ")
+
+_NOISE_WORDS = ("official", "video", "audio", "lyric", "stream", "live", "remaster", "topic", "visualis")
+
+
+def names_the_master(version: str) -> bool:
+    """Whether a version names the record's own master, its source, or the video — not another recording."""
+    text = fold(version)
+    return (
+        text in _MASTER_NAMINGS
+        or text.startswith(_SOURCE_PREFIXES)
+        or any(word in text for word in _NOISE_WORDS)
+    )
+
+
+def track_title(name: str) -> str:
+    """A shop's or a video site's title as a request reads it: the bare name, plus a version when it is its
+    own edit.
+
+    A master naming has to come off, because carried as the mix it demands a file written `(Album Version)`,
+    which is a spelling most peers do not use; a source and the video's own labels have to come off for a
+    harder reason — no MusicBrainz recording carries one, so the request resolves nothing at all.
+
+    A version that *is* its own edit has to stay, because dropping it is worse: the reference then resolves
+    to the original's length, the entry's own file arrives at another length, and `rules` refuses it as
+    `runs +78 s against the reference`. `23 (Zinc VIP)` under the original's length is a track nobody ever
+    fetches.
+    """
+    title = song_title(name)
+    # A video says what it is in brackets as often as in parentheses — `Ardina [Official Video]` — and a
+    # bracket is also where a peer writes a label code, so only one that names the video comes off.
+    bracketed = _TRAILING_BRACKET.search(title)
+    if bracketed and names_the_master(bracketed.group(1)):
+        title = title[: bracketed.start()].strip()
+    if not title:
+        return ""
+    version = extract_mix(title)
+    bare = bare_title(title)
+    # The whole title was parenthesised, so it is the title and not a version suffix — the same reading
+    # `tracklist.request_for` makes. Appending the version there would write it twice.
+    if not bare:
+        return title
+    # A title can hold a bracket that is part of its name and a version besides — `Very Never (My Mind
+    # Extends) (feat. …)` reports `My Mind Extends` as the version — so a version the bare name already
+    # says is not written again.
+    if not version or names_the_master(version) or fold(version) in fold(bare):
+        return bare
+    return f"{bare} ({version})"
+
+
 # A bare title is the same version as `… (Original Mix)` / `… (Original Version)`, and every other suffix
 # is its own version. Peers write one version a dozen ways — `original_mix`, `Original Mix`, `ORIGINAL MIX`
 # — so the equivalence is on the folded text rather than on the spelling.

@@ -22,7 +22,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+
+from .parsing import song_title
+from .playlists import Playlist, PlaylistError, id_in
 
 TOKEN_URL = "https://open.spotify.com/api/token"
 GRAPHQL_URL = "https://api-partner.spotify.com/pathfinder/v2/query"
@@ -62,24 +64,6 @@ _HEADERS = {
 _ID = re.compile(r"[A-Za-z0-9]{22}\Z")
 
 
-class PlaylistError(RuntimeError):
-    """The playlist could not be read, with the reason a person can act on."""
-
-
-@dataclass(frozen=True)
-class Playlist:
-    """A playlist as a tracklist: its name, and one `Artist - Title` line per entry, in playlist order."""
-
-    name: str
-    lines: tuple[str, ...]
-
-    def text(self) -> str:
-        """The file's own text. The name rides in a comment, which `tracklist` skips, so it costs no track."""
-        count = len(self.lines)
-        header = f"# {self.name} · {count} track{'s' if count != 1 else ''}\n"
-        return header + "".join(f"{line}\n" for line in self.lines)
-
-
 def names_a_playlist(source: str) -> bool:
     """Whether an argument is a playlist rather than a path — a URL, or a `spotify:` URI.
 
@@ -94,25 +78,13 @@ def names_a_playlist(source: str) -> bool:
 
 
 def playlist_id(source: str) -> str:
-    """The id in a playlist URL or a `spotify:playlist:` URI.
-
-    A whole URL is taken apart rather than pattern-matched, because the path carries a market prefix
-    (`/intl-fr/playlist/…`) and a `?si=` tail, and neither belongs to the id.
-    """
-    text = source.strip()
-    if text.startswith("spotify:"):
-        parts = text.split(":")
-        if len(parts) > 2 and parts[1] == "playlist" and _ID.match(parts[2]):
-            return parts[2]
-    elif "spotify.com" in text:
-        segments = [segment for segment in urllib.parse.urlparse(text).path.split("/") if segment]
-        if "playlist" in segments:
-            candidate = segments[segments.index("playlist") + 1:]
-            if candidate and _ID.match(candidate[0]):
-                return candidate[0]
-    raise PlaylistError(
-        f"{source!r} is not a playlist — give its URL or its spotify:playlist: URI"
-    )
+    """The id in a playlist URL or a `spotify:playlist:` URI."""
+    identifier = id_in(source, host="spotify.com", kind="playlist", pattern=_ID)
+    if identifier is None:
+        raise PlaylistError(
+            f"{source!r} is not a playlist — give its URL or its spotify:playlist: URI"
+        )
+    return identifier
 
 
 def playlist(source: str, timeout: float = _TIMEOUT) -> Playlist:
@@ -152,25 +124,6 @@ def entry_line(entry: dict) -> str:
         if name
     )
     return f"{credit} - {title}" if credit else title
-
-
-def song_title(name: str) -> str:
-    """Spotify's title with the master it was drawn from taken off: `Dreams - 2004 Remaster` → `Dreams`.
-
-    Spotify writes which master, version or source an entry came from into the title itself — `Stairway to
-    Heaven - Remaster`, `Paranoid - 2012 - Remaster`, `Danger Zone - From "Top Gun" Original Soundtrack`.
-    MusicBrainz carries these as bare titles, so a title kept whole resolves no reference at all: the
-    recording `Dreams - 2004 Remaster` does not exist, the query returns nothing, and with no reference length
-    to settle it the track stays review-only for good. Measured over three editorial playlists — 450 titles —
-    105 carry such a tail in 52 distinct forms, every one of them a master, a version or a source rather than
-    the song's name; and over ten of them the verbatim title matched **0** MusicBrainz recordings against
-    **208** for the same ten once the tail was off.
-
-    So the tail goes, and what is left is the bare request — any version that is not somebody else's remix,
-    checked against the reference. A tail that is genuinely part of a title
-    (`White Wedding - Pt. 1` is the one such entry in those playlists) resolves to the song either way.
-    """
-    return name.split(" - ")[0].strip() or name.strip()
 
 
 def _key() -> bytes:

@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from music_agent import spotify, tracklist
+from music_agent import playlists, spotify, tracklist
 
 
 def entry(artist: str, name: str) -> dict:
@@ -41,22 +41,8 @@ def test_what_is_not_a_playlist_is_refused_by_name():
         "37i9dQZF1DWXRqgorJj26U",
         "",
     ):
-        with pytest.raises(spotify.PlaylistError):
+        with pytest.raises(playlists.PlaylistError):
             spotify.playlist_id(source)
-
-
-def test_a_title_keeps_its_master_and_loses_its_tail():
-    """MusicBrainz holds these recordings bare, and a title that kept the tail resolved nothing: over ten
-    tailed tracks it matched 0 recordings verbatim and 208 without the tail."""
-    assert spotify.song_title("Dreams - 2004 Remaster") == "Dreams"
-    assert spotify.song_title("Paranoid - 2012 - Remaster") == "Paranoid"
-    assert spotify.song_title('Danger Zone - From "Top Gun" Original Soundtrack') == "Danger Zone"
-    assert spotify.song_title("Bohemian Rhapsody - Remastered 2011") == "Bohemian Rhapsody"
-
-
-def test_a_title_without_a_tail_is_left_alone():
-    for title in ("Come As You Are", "Another Brick in the Wall, Pt. 2", "Song to the Siren"):
-        assert spotify.song_title(title) == title
 
 
 def test_an_entry_is_its_credited_artists_and_its_title():
@@ -143,7 +129,7 @@ def test_a_url_or_a_uri_is_a_playlist_where_a_path_is_a_path():
 def test_the_text_is_a_tracklist_the_reader_already_takes():
     """One file with one reader: the name rides in a comment, which `tracklist.parse` skips, so writing this
     out and handing it to `acquire --tracks` is the whole of the handover."""
-    found = spotify.Playlist(name="Rock Classics",
+    found = playlists.Playlist(name="Rock Classics",
                              lines=("Fleetwood Mac - Dreams", "Queen - Radio Ga Ga"))
     text = found.text()
 
@@ -163,12 +149,12 @@ def test_a_refusal_arrives_as_what_spotify_said(monkeypatch):
     monkeypatch.setattr(spotify.urllib.request, "urlopen", refuse)
     request = spotify.urllib.request.Request("https://open.spotify.com/api/token?totp=000000")
 
-    with pytest.raises(spotify.PlaylistError, match="400.*Unauthorized request"):
+    with pytest.raises(playlists.PlaylistError, match="400.*Unauthorized request"):
         spotify._json(request, 1.0)
 
 
 def test_a_token_response_without_a_token_names_the_likely_cause(monkeypatch):
     monkeypatch.setattr(spotify, "_json", lambda request, timeout: {"clientId": "x"})
 
-    with pytest.raises(spotify.PlaylistError, match="TOTP"):
+    with pytest.raises(playlists.PlaylistError, match="TOTP"):
         spotify._token(1.0)

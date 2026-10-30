@@ -13,11 +13,13 @@ from pathlib import Path
 
 from . import acquire
 from . import config as config_module
+from . import deezer
 from . import exporting
 from . import genre
 from . import importing
 from . import library
 from . import parsing
+from . import playlists
 from . import process
 from . import reference
 from . import review
@@ -114,7 +116,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="the whole pipeline in one command: acquire, process, import, sweep")
     run.add_argument("--tracks", default=None, metavar="FILE|DIR|URL",
                      help="the tracklist to start from — a file, a directory of audio files, or a public "
-                          "Spotify playlist's URL")
+                          "Spotify or Deezer playlist's URL or share link")
     run.add_argument("--name", default=None, metavar="NAME",
                      help="what to call the run (default: the tracklist's own name)")
     run.add_argument("--passes", type=int, default=1, metavar="N",
@@ -155,7 +157,7 @@ def _build_parser() -> argparse.ArgumentParser:
                                   help="search Soulseek for a tracklist, into staging")
     acquire.add_argument("--tracks", default=None, metavar="FILE|DIR|URL",
                          help="the tracklist to start a run from — a file, a directory of audio files, or "
-                              "the URL of a public Spotify playlist; omit it to continue a run")
+                              "the URL of a public Spotify or Deezer playlist; omit it to continue a run")
     acquire.add_argument("--name", default=None, metavar="NAME",
                          help="what to call the run (default: the tracklist's own name)")
     acquire.add_argument("--retry", action="store_true",
@@ -454,17 +456,26 @@ def _reconcile(config: config_module.Config, args: argparse.Namespace) -> int:
     return 0
 
 
+# The services a `--tracks` argument can name. Each turns its own playlist into the text `tracklist` reads,
+# and each is asked whether the argument is its own before anything is fetched: the first that answers yes
+# reads it.
+_PLAYLIST_SOURCES = (deezer, spotify)
+
+
 def _start(config: config_module.Config, args: argparse.Namespace) -> state.Job | None:
-    """The run `--tracks` starts: a file, or a public Spotify playlist read the same way one is.
+    """The run `--tracks` starts: a file, a directory, or a playlist from one of the services.
 
     A playlist is read here rather than written out first, because handing over a URL should cost no more
     than handing over a file — and the text it is parsed from is the text a tracklist file would have held.
     """
     name = None
-    if spotify.names_a_playlist(args.tracks):
+    reader = next(
+        (source for source in _PLAYLIST_SOURCES if source.names_a_playlist(args.tracks)), None
+    )
+    if reader is not None:
         try:
-            found = spotify.playlist(args.tracks)
-        except spotify.PlaylistError as error:
+            found = reader.playlist(args.tracks)
+        except playlists.PlaylistError as error:
             print(error, file=sys.stderr)
             return None
         requests, name = tracklist.parse(found.text()), found.name

@@ -1,9 +1,9 @@
 ---
 name: music-agent
 description: >
-  Drive the music-agent CLI: turn a tracklist — a file, or a public Spotify playlist — into tracks
-  acquired from Soulseek, processed once, and exported to every configured collection (`rekordbox` and
-  Traktor by default). Covers `run`, which does all of it in one command, the stage commands behind it,
+  Drive the music-agent CLI: turn a tracklist — a file, or a public Spotify or Deezer playlist — into
+  tracks acquired from Soulseek, processed once, and exported to every configured collection (`rekordbox`
+  and Traktor by default). Covers `run`, which does all of it in one command, the stage commands behind it,
   what each stage prints, and the rare track the queue still asks about. Use when a tracklist should become
   files in every configured collection, and when a run's state or its queue is the question.
 metadata:
@@ -60,17 +60,26 @@ command's output is written in it, and a report in those words is the difference
 One `Artist - Title` per line, or a CSV whose header names both columns. A file, because the CLI owns parsing
 it and there is then exactly one reading of the input.
 
-A **public Spotify playlist** goes where the file goes, and needs nothing configured — no account, no app, no
-key:
+A **public Spotify or Deezer playlist** goes where the file goes, and needs nothing configured — no account,
+no app, no key:
 
 ```sh
 music-agent acquire --tracks https://open.spotify.com/playlist/37i9dQZF1DWXRqgorJj26U
+music-agent acquire --tracks https://www.deezer.com/playlist/66079435
 ```
 
-It takes the URL, a `spotify:playlist:` URI, or a file, and the run is named after the playlist instead of
-after a file's stem. Spotify writes the master an entry came from into its own title (`Dreams - 2004
-Remaster`); the CLI takes those tails off, because MusicBrainz holds those recordings bare and a title that
-keeps the tail resolves nothing at all.
+It takes either URL, a `spotify:playlist:` or `deezer:playlist:` URI, or a file, and the run is named after
+the playlist instead of after a file's stem. Deezer also answers the share link a phone hands over
+(`https://link.deezer.com/s/…`): it carries no id, so the CLI follows it to the playlist before asking.
+
+A store writes what the entry *is* into its own title, and the CLI reads it back to the track.
+Spotify's dash tail (`Dreams - 2004 Remaster`) comes off, because MusicBrainz holds those recordings bare and
+a title that keeps the tail resolves nothing at all. A parenthesised or bracketed version is read for what it
+is: a master naming (`Original Mix`, `Album Version`, `Remastered 2018`, `Mixed`), a source
+(`From "Men In Black" Soundtrack`) come off, and a version that is its own recording survives
+(`23 (Zinc VIP)`, `Bullit (Radio Edit)`, `Spaceman (Drown The Fish Remix)`). A request that demanded
+`Official Video` as its mix would match no file a peer holds; one that dropped `(Zinc VIP)` would resolve the
+reference to the original's length and then refuse the VIP file as too long.
 
 There is no separate command for a playlist and no file to write first: the URL is the tracklist, and it is
 read once, by the same reader. To read back what a run holds, its own list is `tracks.jsonl` beside its

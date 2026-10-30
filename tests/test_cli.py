@@ -13,7 +13,7 @@ from audio_files import aiff
 from music_agent import acquire
 from music_agent import cli as cli_module
 from music_agent import config as config_module
-from music_agent import exporting, lanes, library, slsk, spotify, state, sweep
+from music_agent import exporting, lanes, library, playlists, slsk, state, sweep
 from music_agent.cli import main
 from fake_server import Direct
 from music_agent.rules import Candidate
@@ -614,7 +614,7 @@ def test_a_playlist_url_starts_the_run_a_file_would_have(tmp_path, monkeypatch):
     file's stem gave the run a playlist's own name gives it."""
     config = config_module.load(make_paths_config(tmp_path))
     monkeypatch.setattr(cli_module.spotify, "playlist",
-                        lambda source, timeout=None: spotify.Playlist(
+                        lambda source, timeout=None: playlists.Playlist(
                             name="Rock Classics",
                             lines=("Kiasmos - Blurred", "Ntogn - Ame No Hi (Original Mix)")))
 
@@ -624,6 +624,22 @@ def test_a_playlist_url_starts_the_run_a_file_would_have(tmp_path, monkeypatch):
     assert job.id.endswith("-rock-classics")
     assert [(record.artist, record.title, record.mix) for record in job.records()] == [
         ("Kiasmos", "Blurred", ""), ("Ntogn", "Ame No Hi", "Original Mix")]
+
+
+def test_a_deezer_share_link_starts_the_run_a_spotify_url_would_have(tmp_path, monkeypatch):
+    """The second source is read by the same command, and reaches a run the same way. A share link is what a
+    phone hands over, and it carries no id at all — the reader is the one that resolves it."""
+    config = config_module.load(make_paths_config(tmp_path))
+    monkeypatch.setattr(cli_module.deezer, "playlist",
+                        lambda source, timeout=None: playlists.Playlist(
+                            name="01", lines=("Massive Attack - Teardrop",)))
+
+    job = cli_module._start(config, Namespace(
+        tracks="https://link.deezer.com/s/34NKfa1yXrklFXuYlrljx", name=None))
+
+    assert job.id.endswith("-01")
+    assert [(record.artist, record.title) for record in job.records()] == [
+        ("Massive Attack", "Teardrop")]
 
 
 def test_a_file_still_starts_its_run_the_way_it_always_did(tmp_path):
@@ -643,7 +659,7 @@ def test_a_playlist_that_cannot_be_read_starts_nothing(tmp_path, monkeypatch, ca
     config = config_module.load(make_paths_config(tmp_path))
 
     def refuse(source, timeout=None):
-        raise spotify.PlaylistError("Spotify answered 400 for /api/token: Unauthorized request")
+        raise playlists.PlaylistError("Spotify answered 400 for /api/token: Unauthorized request")
 
     monkeypatch.setattr(cli_module.spotify, "playlist", refuse)
 
