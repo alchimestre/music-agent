@@ -746,6 +746,25 @@ def test_a_tracklist_on_the_command_line_runs_the_pass_on_the_run_it_started(tmp
     assert job.records()[0].status == state.PENDING, "the pass reached the track, and found nothing to take"
 
 
+def test_a_corrupt_peer_ledger_stops_the_pass_with_a_sentence(tmp_path, capsys, monkeypatch):
+    """`peers.Unreadable` is a class of its own, so a truncated ledger was not in the pass's error tuple and
+    ended the command in a traceback instead of the one line `peers` already prints."""
+    config_path = make_paths_config(tmp_path)
+    tracklist = tmp_path / "Kiasmos - Blurred.txt"
+    tracklist.write_text("Kiasmos - Blurred\n", encoding="utf-8")
+    (tmp_path / "peers.json").write_text("{not json", encoding="utf-8")
+
+    monkeypatch.setattr(cli_module.reference, "lookup", lambda config, limit=25: NoReference())
+    monkeypatch.setattr(cli_module.slsk, "Daemon", lambda config: Direct(results=[]))
+    monkeypatch.setattr(library, "open", lambda config: None)
+
+    assert main(["--config", str(config_path), "acquire", "--tracks", str(tracklist)]) == 1
+
+    err = capsys.readouterr().err
+    assert "cannot read the peer ledger" in err
+    assert "Traceback" not in err
+
+
 def test_a_batch_of_accepts_carries_a_candidate_per_track():
     assert cli_module._picks("12") == [(12, None)], "one track keeps its bare index"
     assert cli_module._picks("4:1, 5:2,9") == [(4, 1), (5, 2), (9, None)]

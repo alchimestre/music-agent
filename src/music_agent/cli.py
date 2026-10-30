@@ -19,6 +19,7 @@ from . import genre
 from . import importing
 from . import library
 from . import parsing
+from . import peers
 from . import playlists
 from . import process
 from . import reference
@@ -381,9 +382,9 @@ def _tools(config: config_module.Config) -> process.Tools:
 
 
 # Everything a pass can fail on that is worth one line and a stop: credentials, a port someone else holds,
-# a daemon that will not answer, a daemon that stopped answering, an unreadable collection.
+# a daemon that will not answer, a daemon that stopped answering, an unreadable collection or peer ledger.
 ACQUIRE_ERRORS = (slsk.MissingCredential, slsk.PortBusy, slsk.DaemonError, acquire.ServerStuck,
-                  library.Unreadable, exporting.UnknownTarget)
+                  library.Unreadable, peers.Unreadable, exporting.UnknownTarget)
 
 
 def _stage(name: str, detail: str = "") -> None:
@@ -696,11 +697,13 @@ def _review(config: config_module.Config, args: argparse.Namespace) -> int:
                 return daemon
 
             if len(picks) == 1:
-                settled = review.accept(job, picks[0][0], number=picks[0][1], daemon_factory=connect)
+                settled = review.accept(job, picks[0][0], staging=config.staging, number=picks[0][1],
+                                        daemon_factory=connect)
                 print(settled.report())
                 print(f"music-agent process --job {job.id}   # convert, place and normalize it")
                 return 0
-            batch = review.accept_many(job, picks, workers=config.workers, daemon_factory=connect)
+            batch = review.accept_many(job, picks, staging=config.staging, workers=config.workers,
+                                       daemon_factory=connect)
             for settled in batch.settled:
                 print(settled.report())
             for line in batch.refused:
@@ -881,7 +884,11 @@ def _peers(config: config_module.Config, args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    config = config_module.load(getattr(args, "config", None))
+    try:
+        config = config_module.load(getattr(args, "config", None))
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        return 1
     if args.command == "run":
         return _run(config, args)
     if args.command == "status":

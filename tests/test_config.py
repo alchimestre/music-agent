@@ -155,3 +155,27 @@ targets = "rekordbox"
 """))
 
     assert config.export_targets == ("rekordbox",)
+
+
+def test_a_misspelled_key_is_refused_and_named(tmp_path):
+    """`losless` loaded cleanly, and the run placed the AIFFs in the default lane instead of the one asked
+    for — the pipeline writing somewhere the config never said."""
+    with pytest.raises(ValueError) as refused:
+        load(write(tmp_path, '[paths]\nlosless = "/Volumes/Big/lossless"\n'))
+
+    assert "losless" in str(refused.value)
+    assert "paths" in str(refused.value)
+
+
+def test_a_misspelled_section_is_refused_and_named(tmp_path):
+    with pytest.raises(ValueError) as refused:
+        load(write(tmp_path, '[path]\nlossless = "/Volumes/Big/lossless"\n'))
+
+    assert "path" in str(refused.value)
+
+
+def test_every_key_the_template_sets_is_read(tmp_path):
+    """The template is what a person copies, so each of its keys has to be one `load` answers to."""
+    text = config_module.EXAMPLE_CONFIG_PATH.read_text(encoding="utf-8")
+
+    assert load(write(tmp_path, text)).lossless == DEFAULTS.lossless
