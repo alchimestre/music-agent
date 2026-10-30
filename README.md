@@ -41,8 +41,8 @@ ship here; `[tools]` in `config.toml` can point at other copies.
 | `tidy` | every leftover check: staging, unpointed files, duplicate rows, gone rows | seconds |
 | `peers` | peers that never deliver; `--unban USER` asks again | seconds |
 
-`FILE` is a path or a public Spotify playlist URL. `--job ID` picks a run; the default is the newest
-unfinished one, else the newest.
+`FILE` is a path, or the URL or share link of a public Spotify or Deezer playlist. `--job ID` picks a
+run; the default is the newest unfinished one, else the newest.
 
 Use the stage commands only for an interrupted run or a failed stage; `run` is the normal path.
 

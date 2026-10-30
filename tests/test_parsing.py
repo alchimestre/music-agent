@@ -20,6 +20,8 @@ from music_agent.parsing import (
     primary_artist,
     same_credit,
     search_query,
+    song_title,
+    track_title,
     strip_code_tail,
 )
 
@@ -164,6 +166,54 @@ def test_a_trailing_code_or_marker_is_stripped(name, expected):
 ])
 def test_a_bracket_that_is_part_of_the_name_survives(name):
     assert strip_code_tail(name) == name
+
+
+def test_a_store_title_keeps_its_master_and_loses_its_tail():
+    """MusicBrainz holds these recordings bare, and a title that kept the tail resolved nothing: over ten
+    tailed tracks it matched 0 recordings verbatim and 208 without the tail."""
+    assert song_title("Dreams - 2004 Remaster") == "Dreams"
+    assert song_title("Paranoid - 2012 - Remaster") == "Paranoid"
+    assert song_title('Danger Zone - From "Top Gun" Original Soundtrack') == "Danger Zone"
+    assert song_title("Bohemian Rhapsody - Remastered 2011") == "Bohemian Rhapsody"
+
+
+def test_a_store_title_without_a_tail_is_left_alone():
+    for title in ("Come As You Are", "Another Brick in the Wall, Pt. 2", "Song to the Siren"):
+        assert song_title(title) == title
+
+
+def test_a_title_is_read_back_to_the_track_and_not_the_video():
+    """A shop or a video site writes what the entry is, not what the recording is: a master naming, a source,
+    or the video's own label. None of those is a version to ask a peer for."""
+    for title, expected in (
+        ("Going Up (Remastered)", "Going Up"),
+        ("Taurus (Mixed)", "Taurus"),
+        ("All Star (Album Version)", "All Star"),
+        ("Lowdown (Original Mix)", "Lowdown"),
+        ('Men In Black (From "Men In Black" Soundtrack)', "Men In Black"),
+        ("Ardina [Official Video]", "Ardina"),
+        ("Ardina [PRA005]", "Ardina"),
+    ):
+        assert track_title(title) == expected
+
+
+def test_a_title_that_is_its_own_edit_keeps_it():
+    """Dropping one of these resolves the reference to the original's length, and the file that is the entry
+    is then refused as too long — the version has to survive to be asked for."""
+    for title, expected in (
+        ("23 (Zinc VIP)", "23 (Zinc VIP)"),
+        ("Bullit (Radio Edit)", "Bullit (Radio Edit)"),
+        ("Laba Staifia (Ammar 808 Remix)", "Laba Staifia (Ammar 808 Remix)"),
+        ("Everyday (Netsky Remix)", "Everyday (Netsky Remix)"),
+    ):
+        assert track_title(title) == expected
+
+
+def test_a_version_the_title_already_says_is_not_written_twice():
+    """`(My Mind Extends)` is part of the name, and the credit after it makes the split read it as the
+    version. Only the last parenthetical is ever the version."""
+    assert track_title("Very Never (My Mind Extends) (feat. Cathy Lucas)") == "Very Never (My Mind Extends)"
+    assert track_title("(Something Remix)") == "(Something Remix)"
 
 
 def test_the_mix_is_the_trailing_parenthesised_part():
