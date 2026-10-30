@@ -121,6 +121,7 @@ class Summary:
 
     merges: list[Merge] = field(default_factory=list)
     files: list[Path] = field(default_factory=list)
+    kept_missing: list[Path] = field(default_factory=list)
 
     def report(self) -> str:
         parts = [f"{len(self.merges)} duplicate group{'s' if len(self.merges) != 1 else ''}"]
@@ -134,6 +135,8 @@ class Summary:
             out += merge.lines()
         for path in self.files:
             out.append(f"file     {path.name} left the lanes")
+        for path in self.kept_missing:
+            out.append(f"kept     {path} is not on disk — its duplicate was left in the lanes")
         return out
 
 
@@ -252,7 +255,7 @@ def merge(config: Config, summary: Summary, *, db, remove_files: bool = True, lo
 
     session = db.session
     rest = followers(db)
-    doomed: list[Path] = []
+    doomed: list[tuple[Path, Path]] = []
     for merge in summary.merges:
         keep = merge.keep.content_id
         for drop in merge.drops:
@@ -267,12 +270,18 @@ def merge(config: Config, summary: Summary, *, db, remove_files: bool = True, lo
             session.execute(text("delete from djmdContent where ID = :i"), {"i": drop.content_id})
             log(f"merged {drop.path.name} into {merge.keep.path.name}")
             if remove_files and path_key(drop.path) != path_key(merge.keep.path):
-                doomed.append(drop.path)
+                doomed.append((drop.path, merge.keep.path))
     db.session.commit()
     # The file goes only after the commit: a failed commit must not leave the collection pointing at a
     # path this removed, the way `importing.run` orders it.
-    for path in doomed:
+    for path, keeper in doomed:
         if not path.is_file():
+            continue
+        if not keeper.is_file():
+            # The surviving row names a file that is not on disk, so this file is the last copy of the track.
+            if keeper not in summary.kept_missing:
+                summary.kept_missing.append(keeper)
+                log(f"      {path.name} left in the lanes: {keeper.name} is not on disk")
             continue
         path.unlink()
         summary.files.append(path)
