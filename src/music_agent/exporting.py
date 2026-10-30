@@ -78,7 +78,8 @@ class Rekordbox:
 
         with importing.database(config) as database:
             result = importing.run(config, job, db=database, backup_first=backup_first, log=log)
-        return Summary(lines=[result.report()], failed=len(result.failed))
+        return Summary(lines=[result.report()], failed=len(result.failed),
+                       ran=bool(result.imported or result.repointed or result.already))
 
 
 class Traktor:
@@ -103,7 +104,8 @@ class Traktor:
             plan = traktor.sync(config, log=log)
         except traktor.Failed as error:
             return Summary(lines=[str(error)], failed=1, ran=False)
-        return Summary(lines=[plan] if plan else [], ran=plan is not None)
+        return Summary(lines=[plan] if plan else [],
+                       ran=plan is not None and not traktor.nothing_to_do(plan))
 
 
 REGISTRY: dict[str, Target] = {

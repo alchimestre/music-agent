@@ -48,7 +48,7 @@ def _run(argv: list[str], verb: str, timeout: float = 900.0) -> tuple[bool, str]
 _COUNTED = re.compile(r"(\d+) to ([a-z][a-z ]*)")
 
 
-def _nothing_to_do(plan: str) -> bool:
+def nothing_to_do(plan: str) -> bool:
     """Whether the plan would change nothing. Any count above zero means it would."""
     counted = _COUNTED.findall(plan)
     return bool(counted) and all(int(number) == 0 for number, _ in counted)
@@ -70,7 +70,7 @@ def sync(config: Config, *, log=print) -> str | None:
     log("traktor: " + plan.replace("\n", "\n         "))
     if not ok:
         raise Failed(f"plan failed · {plan}")
-    if _nothing_to_do(plan):
+    if nothing_to_do(plan):
         return plan
 
     ok, said = _run(argv, "apply")
