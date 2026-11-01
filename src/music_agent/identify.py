@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Protocol
 
 from . import reference
-from .config import ENV_HINT, Config, MissingCredential
+from .config import Config, MissingCredential
 from .rules import Request
 
 # A fingerprint match below this is not trusted: the one sub-0.9 match that was checked resolved to a
@@ -269,12 +269,15 @@ def _in_full(candidate: Candidate, brainz: Brainz, *, discogs: Discogs | None = 
 class Fingerprints:
     """fpcalc, chromaprint's own tool."""
 
+    def __init__(self, executable: str = "fpcalc") -> None:
+        self.executable = executable
+
     def listen(self, path: Path) -> tuple[str, int]:
         import json
         import subprocess
 
         try:
-            result = subprocess.run(["fpcalc", "-json", str(path)], capture_output=True, text=True,
+            result = subprocess.run([self.executable, "-json", str(path)], capture_output=True, text=True,
                                     timeout=FPCALC_TIMEOUT)
         except subprocess.TimeoutExpired:
             raise IdentifyError(f"fpcalc did not finish in {FPCALC_TIMEOUT:g}s") from None
@@ -293,7 +296,7 @@ class AcoustIDMatches:
 
     @classmethod
     def from_environment(cls, config: Config) -> AcoustIDMatches:
-        return cls(required(config.acoustid_key_env))
+        return cls(required(config, config.acoustid_key_env))
 
     def match(self, fingerprint: str, seconds: int) -> list[Match]:
         import acoustid
@@ -316,7 +319,7 @@ class DiscogsStyles:
 
     @classmethod
     def from_environment(cls, config: Config) -> DiscogsStyles:
-        return cls(required(config.discogs_token_env))
+        return cls(required(config, config.discogs_token_env))
 
     def styles(self, artist: str, title: str) -> tuple[str, ...]:
         import json
@@ -376,7 +379,7 @@ class MusicBrainz:
 
     @classmethod
     def from_environment(cls, config: Config) -> MusicBrainz:
-        return cls(required(config.musicbrainz_contact_env))
+        return cls(required(config, config.musicbrainz_contact_env))
 
     def recording(self, recording_id: str) -> Candidate | None:
         """The recording in full, with the releases it appears on.
@@ -453,17 +456,17 @@ class MusicBrainz:
         )
 
 
-def required(name: str) -> str:
-    """A credential the environment must carry, named in the error so the fix is obvious."""
-    import os
-
-    value = os.environ.get(name)
+def required(config: Config, name: str) -> str:
+    """Resolve an explicit session credential before its legacy environment variable."""
+    value = config.credential(name)
     if not value:
-        raise MissingCredential(f"{name} is not set — add it to .env, or run: {ENV_HINT}")
+        raise MissingCredential(f"{name} is not configured; enter it in Settings or set its environment variable.")
     return value
 
 
-def live(config: Config) -> tuple[Fingerprints, AcoustIDMatches, MusicBrainz, DiscogsStyles]:
-    """The four seams as they really are, for whatever stage identifies files."""
-    return (Fingerprints(), AcoustIDMatches.from_environment(config),
-            MusicBrainz.from_environment(config), DiscogsStyles.from_environment(config))
+def live(config: Config) -> tuple[Fingerprints, AcoustIDMatches, MusicBrainz, DiscogsStyles | None]:
+    """The configured identification providers; Discogs is optional."""
+    discogs = (DiscogsStyles.from_environment(config)
+               if config.credential(config.discogs_token_env) else None)
+    return (Fingerprints(config.fpcalc), AcoustIDMatches.from_environment(config),
+            MusicBrainz.from_environment(config), discogs)

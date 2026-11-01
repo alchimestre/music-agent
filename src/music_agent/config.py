@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 # One string, so every credential tells the human the same thing.
@@ -82,8 +82,26 @@ class Config:
     # The genre vocabulary's mapping table, which lives in music-tagger: its taxonomy maps the names the
     # rest of the world uses onto the families this collection has. Unset means no genres are assigned.
     taxonomy: Path | None
-    convert_tool: Path
     normalize_tool: Path
+    shared_dirs: tuple[Path, ...] | None = None
+    soulseek_server: str = ""
+    upload_slots: int = 2
+    daemon_address: str = ""
+    soulseek_username: str = ""
+    musicbrainz_contact: str = ""
+    secrets: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
+    ffmpeg: str = "ffmpeg"
+    ffprobe: str = "ffprobe"
+    fpcalc: str = "fpcalc"
+
+    def credential(self, name: str) -> str:
+        if name in self.secrets:
+            return self.secrets[name]
+        if name == self.slsk_username_env and self.soulseek_username:
+            return self.soulseek_username
+        if name == self.musicbrainz_contact_env and self.musicbrainz_contact:
+            return self.musicbrainz_contact
+        return os.environ.get(name, "")
 
 
 def _resolve(value: str, base: Path) -> Path:
@@ -148,8 +166,6 @@ DEFAULTS = Config(
     # No taxonomy by default: a machine without music-tagger installed assigns no genres and prints one line
     # saying so, rather than inventing a vocabulary of its own.
     taxonomy=None,
-    # Both ship with the project: `tools/convert_to_aiff.sh` and the normalizer submodule under `vendor/`.
-    convert_tool=HERE / "tools/convert_to_aiff.sh",
     normalize_tool=HERE / "vendor/loudness_normalizer/loudness_normalizer.py",
 )
 
@@ -252,7 +268,7 @@ def load(path: Path | None = None) -> Config:
         soulseek_state_dir=str(soulseek.get("state_dir", DEFAULTS.soulseek_state_dir)),
         traktor_command=_command(traktor.get("command", DEFAULTS.traktor_command)),
         export_targets=_names(export.get("targets", DEFAULTS.export_targets)),
-        **_listening_ports(),
+        soulseek_listen_port=int(soulseek.get("listen_port", _listening_ports()["soulseek_listen_port"])),
         max_downloads=int(soulseek.get("max_downloads", DEFAULTS.max_downloads)),
         workers=int(soulseek.get("workers", DEFAULTS.workers)),
         search_interval=float(soulseek.get("search_interval", DEFAULTS.search_interval)),
@@ -262,8 +278,17 @@ def load(path: Path | None = None) -> Config:
         slsk_username_env=credentials.get("soulseek_user", DEFAULTS.slsk_username_env),
         slsk_password_env=credentials.get("soulseek_password", DEFAULTS.slsk_password_env),
         taxonomy=(_resolve(taxonomy, base) if taxonomy else DEFAULTS.taxonomy),
-        convert_tool=_resolve(tools.get("convert", str(DEFAULTS.convert_tool)), base),
         normalize_tool=_resolve(tools.get("normalize", str(DEFAULTS.normalize_tool)), base),
+        shared_dirs=(tuple(_resolve(value, base) for value in paths.get("shared", []))
+                     if "shared" in paths.data else None),
+        soulseek_server=str(soulseek.get("server", "")),
+        upload_slots=int(soulseek.get("upload_slots", 2)),
+        daemon_address=str(soulseek.get("daemon_address", "")),
+        soulseek_username=str(soulseek.get("username", "")),
+        musicbrainz_contact=str(credentials.get("contact", "")),
+        ffmpeg=str(tools.get("ffmpeg", "ffmpeg")),
+        ffprobe=str(tools.get("ffprobe", "ffprobe")),
+        fpcalc=str(tools.get("fpcalc", "fpcalc")),
     )
     _refuse_unknown(SECTIONS, data, sections)
     return config

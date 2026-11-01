@@ -11,17 +11,19 @@ network's timeout, and a transfer that survives one pass is resumed by the next.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import socket
 import subprocess
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Iterable
 
 from . import processes
-from .config import ENV_HINT, Config, MissingCredential
+from .config import Config, MissingCredential
 
 # The daemon's control protocol, as `soulseek-rs` 19.1.0 speaks it. It is bumped whenever a change would
 # break a client written against the old shape, and a mismatch is refused rather than guessed at.
@@ -63,28 +65,71 @@ def socket_path(config: Config) -> Path:
     return state_dir(config) / "daemon.sock"
 
 
-def environment(config: Config) -> dict[str, str]:
-    """The daemon's environment: the credentials, the one listening port, and its ceilings.
+def shared_directories(config: Config) -> tuple[Path, ...]:
+    if config.shared_dirs is not None:
+        return config.shared_dirs
+    return config.lossless, config.lossy
 
-    The shares and the download directory are per session, so they are set over the socket once the daemon
-    is up — a folder added at runtime is served without a restart.
-    """
-    username = os.environ.get(config.slsk_username_env)
-    password = os.environ.get(config.slsk_password_env)
+
+def tcp_address(address: str) -> tuple[str, int]:
+    value = address.strip()
+    if value.startswith("["):
+        end = value.find("]")
+        if end < 0 or value[end + 1:end + 2] != ":":
+            raise ValueError("daemon address must be a loopback host and port")
+        host = value[1:end]
+        port = value[end + 2:]
+    else:
+        host, separator, port = value.rpartition(":")
+        if not separator or ":" in host:
+            raise ValueError("daemon address must be a loopback host and port")
+    if host.casefold() == "localhost":
+        host = "127.0.0.1"
+    try:
+        address_ip = ipaddress.ip_address(host)
+    except ValueError as error:
+        raise ValueError("daemon address must use a loopback IP address") from error
+    if not address_ip.is_loopback:
+        raise ValueError("daemon address must use a loopback IP address")
+    if not port.isdecimal() or not 1 <= int(port) <= 65535:
+        raise ValueError("daemon port must be between 1 and 65535")
+    return host, int(port)
+
+
+def _control_token(config: Config) -> str:
+    token = config.credential("daemon_token") or config.credential("SOULSEEK_DAEMON_TOKEN")
+    if token:
+        return token
+    path = state_dir(config) / "daemon.token"
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def environment(config: Config) -> dict[str, str]:
+    username = config.credential(config.slsk_username_env)
+    password = config.credential(config.slsk_password_env)
     if not username:
-        raise MissingCredential(f"{config.slsk_username_env} is not set — add it to .env, or run: "
-                                f"{ENV_HINT}")
+        raise MissingCredential(f"{config.slsk_username_env} is not set; add it in settings")
     if not password:
-        raise MissingCredential(f"{config.slsk_password_env} is not set — add it to .env, or run: "
-                                f"{ENV_HINT}")
+        raise MissingCredential(f"{config.slsk_password_env} is not set; add it in settings")
     env = dict(os.environ)
+    env.pop("SOULSEEK_PASSWORD", None)
+    env.pop(config.slsk_password_env, None)
+    env.pop("SOULSEEK_DAEMON_TOKEN", None)
+    env.pop("SOULSEEK_SERVER", None)
     env["SOULSEEK_USERNAME"] = username
-    env["SOULSEEK_PASSWORD"] = password
     env["SOULSEEK_STATE_DIR"] = str(state_dir(config))
     env["SOULSEEK_LISTENER_PORT"] = str(config.soulseek_listen_port)
     env["SOULSEEK_MAX_CONCURRENT_DOWNLOADS"] = str(config.max_downloads)
-    # The server's own default is 10s; the pass reads once after its own window, so the daemon's is set to
-    # the same length rather than left to cut the window short.
+    env["SOULSEEK_UPLOAD_SLOTS"] = str(config.upload_slots)
+    if config.soulseek_server:
+        env["SOULSEEK_SERVER"] = config.soulseek_server
     env["SOULSEEK_SEARCH_TIMEOUT"] = "5"
     return env
 
@@ -94,54 +139,33 @@ def environment(config: Config) -> dict[str, str]:
 # kill the first to take the port.
 CONNECT_GRACE = 0.5
 
-# The clients that squat the account and the port. `soulseek-rs` is deliberately absent: the daemon is ours,
-# and this function is what clears the field *before* it is started.
+# Clients whose presence means the account is already in use. They are reported, never signalled:
+# `soulseek-rs` is deliberately absent, because the daemon this process started is ours to stop.
 SQUATTERS = ("nicotine", "sldl", "soulseekqt", "soulseek-qt")
 
 
 def free_ports(config: Config, *, log=print) -> list[int]:
-    """Clear the field: no other Soulseek client, and the listening port ours.
+    """Refuse to start while another client or process holds the account or the listening port.
 
-    A second client on the same account makes the server hand it every search reply, so this pass asks and
-    hears nothing. The processes stopped are another harness's clients, restarted on demand; anything else
-    on the port is named and left alone.
+    Nothing is signalled. A client logged in on this account is its owner's session, and a port held by a
+    stranger is theirs: both are named, and the caller stops rather than starting a second session.
     """
-    stopped = []
-    for name in SQUATTERS:
-        pids = processes.named(name)
-        if pids:
-            stubborn = processes.stop(pids)
-            if stubborn:
-                raise PortBusy(f"pids {stubborn} ({name}) would not stop")
-            log(f"stopped {name} (pid {', '.join(str(pid) for pid in pids)})")
-            stopped.extend(pids)
-
+    squatters = [(name, processes.named(name)) for name in SQUATTERS]
+    present = [(name, pids) for name, pids in squatters if pids]
     port = config.soulseek_listen_port
     held = [pid for pid in processes.listeners(port) if pid != os.getpid()]
-    if not held:
-        return stopped
-
-    # Our own daemon holds this port too, and killing it is right only when it has stopped answering — the
-    # caller has already tried to connect twice. It is named apart, because the log otherwise reads like a
-    # stranger was killed.
-    ours = Path(config.soulseek_command[0]).name
-    mine = [pid for pid in held if processes.runs(pid, ours)]
-    others = [pid for pid in held if pid not in mine]
-    stubborn = processes.stop(mine)
-    if stubborn:
-        raise PortBusy(f"pids {stubborn} would not stop, and they hold {port}")
-    if mine:
-        log(f"stopped the Soulseek daemon that stopped answering port {port} "
-            f"(pid {', '.join(str(pid) for pid in mine)})")
-    if others:
-        # Named and left alone: this process knows the port is taken and not by a client it may kill.
-        log(f"port {port} is held by another process (pid {', '.join(str(pid) for pid in others)}) "
-            f"— left alone")
-    return stopped + mine
+    if not present and not held:
+        return []
+    details = [f"{name} (pid {', '.join(str(pid) for pid in pids)})" for name, pids in present]
+    if held:
+        details.append(f"port {port} (pid {', '.join(str(pid) for pid in held)})")
+    message = "the Soulseek daemon cannot start: " + "; ".join(details) + "; stop it yourself"
+    log(message)
+    raise PortBusy(message)
 
 
 class Daemon:
-    """The daemon's socket: one request at a time, notifications skipped, replies matched by id."""
+    """The daemon's socket: one request at a time, events kept, replies matched by id."""
 
     def __init__(self, config: Config, *, log=print) -> None:
         self._config = config
@@ -149,20 +173,27 @@ class Daemon:
         self._sock: socket.socket | None = None
         self._buffer = b""
         self._replies: dict[int, dict[str, Any]] = {}
+        self._events: deque[dict[str, Any]] = deque(maxlen=1024)
         # Re-entrant: `call` closes the socket on a read error while holding it, and `close` takes it again.
         self._lock = threading.RLock()         # one request in flight, so replies cannot cross
         self._searches: dict[str, threading.Lock] = {}
         self._search_lock = threading.Lock()   # guards `_searches`
         self._ids = iter(range(1, 1 << 30))
         self.username = ""
+        # The child this client started, if any. A daemon attached over an address is not ours to stop.
+        self.process: subprocess.Popen | None = None
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
-    def ensure(self) -> None:
-        """Connect, starting the daemon first when nothing answers on the socket."""
+    def connect(self) -> bool:
+        """Try the configured endpoint once, saying whether it answered."""
         if self._sock is not None:
-            return
-        if self._open():
+            return True
+        return self._open()
+
+    def ensure(self) -> None:
+        """Connect, starting the daemon first when nothing answers."""
+        if self.connect():
             return
         if self._connect_again():
             return
@@ -170,30 +201,60 @@ class Daemon:
         deadline = time.monotonic() + STARTUP_TIMEOUT
         while not self._open():
             if time.monotonic() > deadline:
-                raise DaemonError("start", f"no daemon on {socket_path(self._config)} after "
+                raise DaemonError("start", f"no daemon on {self.endpoint()} after "
                                            f"{STARTUP_TIMEOUT:g}s — see "
                                            f"{state_dir(self._config) / 'daemon.log'}")
             time.sleep(0.25)
 
+    def endpoint(self) -> str:
+        if self._config.daemon_address:
+            return self._config.daemon_address
+        return str(socket_path(self._config))
+
     def start(self) -> None:
-        """Clear the port, then start the daemon detached, its own log beside its state."""
+        """Refuse a taken endpoint, then start the daemon detached with its password on stdin."""
         free_ports(self._config, log=self._log)
+        username = self._config.credential(self._config.slsk_username_env)
+        password = self._config.credential(self._config.slsk_password_env)
+        if not username or not password:
+            raise MissingCredential("the Soulseek username and password are needed to start the daemon")
+        command = self._command(username)
         directory = state_dir(self._config)
         directory.mkdir(parents=True, exist_ok=True)
         log = directory / "daemon.log"
         with open(log, "ab") as handle:
             try:
-                subprocess.Popen(
-                    list(self._config.soulseek_command),
+                process = subprocess.Popen(
+                    command,
                     env=environment(self._config),
-                    stdin=subprocess.DEVNULL,
+                    stdin=subprocess.PIPE,
                     stdout=handle,
                     stderr=handle,
                     start_new_session=True,
                 )
-            except FileNotFoundError as exc:
-                raise DaemonError("start", f"cannot run {self._config.soulseek_command[0]!r}: {exc}") from exc
-        self._log(f"started the Soulseek daemon — its log is {log}")
+            except OSError as exc:
+                raise DaemonError("start", f"cannot run {command[0]!r}: {exc}") from exc
+        self.process = process
+        try:
+            assert process.stdin is not None
+            process.stdin.write((password + "\n").encode("utf-8"))
+            process.stdin.close()
+        except OSError as exc:
+            processes.stop_owned(process)
+            self.process = None
+            raise DaemonError("start", f"the daemon would not take its password: {exc}") from exc
+        self._log(f"started the Soulseek daemon; its log is {log}")
+
+    def _command(self, username: str) -> list[str]:
+        command = list(self._config.soulseek_command)
+        command += ["--username", username, "--password-stdin"]
+        command += ["--listener-port", str(self._config.soulseek_listen_port)]
+        command += ["--max-concurrent-downloads", str(self._config.max_downloads)]
+        command += ["--upload-slots", str(self._config.upload_slots)]
+        if self._config.daemon_address:
+            host, port = tcp_address(self._config.daemon_address)
+            command += ["--bind", f"{host}:{port}"]
+        return command
 
     def stop(self) -> None:
         """Ask the daemon to shut down, then let go of the socket.
@@ -230,19 +291,32 @@ class Daemon:
     # ── the wire ─────────────────────────────────────────────────────────────
 
     def _open(self) -> bool:
-        path = socket_path(self._config)
-        if not path.exists():
-            return False
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            sock.connect(str(path))
-        except OSError:
-            sock.close()
-            return False
+        if self._config.daemon_address:
+            host, port = tcp_address(self._config.daemon_address)
+            family = socket.AF_INET6 if ":" in host else socket.AF_INET
+            sock = socket.socket(family, socket.SOCK_STREAM)
+            try:
+                sock.connect((host, port))
+            except OSError:
+                sock.close()
+                return False
+        else:
+            path = socket_path(self._config)
+            if not path.exists():
+                return False
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                sock.connect(str(path))
+            except OSError:
+                sock.close()
+                return False
         self._sock = sock
         self._buffer = b""
+        params: dict[str, Any] = {"protocol": PROTOCOL}
+        if self._config.daemon_address:
+            params["token"] = _control_token(self._config)
         try:
-            answer = self.call("auth", {"protocol": PROTOCOL}, timeout=STARTUP_TIMEOUT)
+            answer = self.call("auth", params, timeout=STARTUP_TIMEOUT)
         except DaemonError as error:
             self.close()
             raise
@@ -261,7 +335,7 @@ class Daemon:
 
     def _check_account(self) -> None:
         """The daemon's account is the one this machine configured; another one would mix two libraries."""
-        wanted = os.environ.get(self._config.slsk_username_env)
+        wanted = self._config.credential(self._config.slsk_username_env)
         if wanted and self.username and wanted.lower() != self.username.lower():
             raise DaemonError("auth", f"the daemon is logged in as {self.username!r}, and this machine's "
                                       f"{self._config.slsk_username_env} names {wanted!r} — stop it with "
@@ -307,8 +381,7 @@ class Daemon:
                     continue                     # a line that is not ours is not an answer either way
                 if message.get("id") != message_id:
                     # An event, or the answer to a call another thread is waiting on: kept, not dropped.
-                    if "id" in message:
-                        self._replies[message["id"]] = message
+                    self._keep(message)
                     continue
                 return self._answer(message, method)
 
@@ -351,15 +424,49 @@ class Daemon:
                 self._take_replies()
 
     def _take_replies(self) -> None:
-        """Keep every complete answer, drop the events. Called with the lock held."""
+        """Keep every complete message. Called with the lock held."""
         while b"\n" in self._buffer:
             line, _, self._buffer = self._buffer.partition(b"\n")
             try:
                 message = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if "id" in message:
-                self._replies[message["id"]] = message
+            self._keep(message)
+
+    def _keep(self, message: dict[str, Any]) -> None:
+        if "id" in message:
+            self._replies[message["id"]] = message
+        elif "method" in message:
+            self._events.append(message)
+
+    def drain_events(self) -> list[dict[str, Any]]:
+        """Read whatever the daemon has pushed, keeping the events, and return them newest last.
+
+        The daemon drops a client whose event queue fills, so a desktop that is not asking anything has to
+        read here. Non-blocking: it never waits for the daemon to say something.
+        """
+        with self._lock:
+            if self._sock is None:
+                return self._take_events()
+            try:
+                self._sock.settimeout(0.0)
+                while True:
+                    chunk = self._sock.recv(65536)
+                    if not chunk:
+                        self.close()
+                        break
+                    self._buffer += chunk
+            except (BlockingIOError, socket.timeout):
+                pass
+            except OSError:
+                self.close()
+            self._take_replies()
+            return self._take_events()
+
+    def _take_events(self) -> list[dict[str, Any]]:
+        found = list(self._events)
+        self._events.clear()
+        return found
 
     def _readline(self, deadline: float | None = None) -> str:
         assert self._sock is not None

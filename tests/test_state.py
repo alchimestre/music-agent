@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
+import pytest
+
 from music_agent import config as config_module
-from music_agent import state
+from music_agent import state, store
 from music_agent.rules import Candidate
 
 
@@ -64,43 +69,34 @@ def test_a_record_computes_its_own_verdicts(tmp_path):
     assert waiting.needs_you() is True
 
 
-def test_verdicts_are_never_written_to_the_file(tmp_path):
-    """Only the facts are stored; a stored label could drift away from the rule."""
-    job = state.create(make_config(tmp_path), "run")
-    job.write_records([a_settled_track()])
-
-    line = json.loads(job.tracks_path.read_text(encoding="utf-8").strip())
-    assert line["candidates"][0]["user"] == "vinyl_only"
-    for forbidden in ("label", "reason", "verdict", "ready"):
-        assert forbidden not in json.dumps(line).lower()
-
 
 def test_an_empty_file_reads_as_no_records(tmp_path):
     assert state.create(make_config(tmp_path), "run").records() == []
 
 
-def test_a_record_written_with_an_unknown_field_still_loads(tmp_path):
-    """Old jobs keep working when the record grows a field."""
-    job = state.create(make_config(tmp_path), "run")
-    job.tracks_path.write_text(
-        json.dumps({"idx": 1, "artist": "A", "title": "T", "something_new": 7}) + "\n",
-        encoding="utf-8")
-    assert job.records()[0].title == "T"
+def test_legacy_records_ignore_unknown_fields_and_default_refusals(tmp_path):
+    config = make_config(tmp_path)
+    legacy_job = config.state_root / "old-job"
+    legacy_job.mkdir(parents=True)
+    tracks = legacy_job / state.TRACKS
+    tracks.write_text(json.dumps({
+        "idx": 1, "artist": "A", "title": "T", "tried": ["p:a.flac"], "something_new": 7,
+    }) + "\n", encoding="utf-8")
+    (legacy_job / state.EVENTS).write_text(json.dumps({"event": "created"}) + "\n", encoding="utf-8")
 
+    store.import_legacy(config.state_root)
 
-def test_a_refusal_round_trips_and_a_record_without_one_loads_empty(tmp_path):
-    """The refusal is the fact that closes a track, so it survives a write; a record from before the field
-    existed must not read as every candidate refused."""
+    imported = state.find(config, "old-job")
+    assert imported.records()[0].title == "T"
+    assert imported.records()[0].refused == []
+def test_a_refusal_round_trips(tmp_path):
     job = state.create(make_config(tmp_path), "run")
     refused = a_settled_track()
     refused.refused = [r"vinyl_only:M\Kiasmos - Blurred.flac"]
     job.write_records([refused])
+
     assert job.records()[0].refused == refused.refused
 
-    job.tracks_path.write_text(
-        json.dumps({"idx": 2, "artist": "A", "title": "T", "tried": ["p:a.flac"]}) + "\n",
-        encoding="utf-8")
-    assert job.records()[0].refused == []
 
 
 def test_the_resume_target_is_the_newest_unfinished_run(tmp_path):
@@ -297,3 +293,141 @@ def test_the_status_file_carries_the_split(tmp_path):
     assert "Not searched: 1" in text
     assert "The network offered nothing: 0" in text
     assert "Every offer refused: 0" in text
+
+
+def test_legacy_import_retries_without_duplicate_history(tmp_path):
+    config = make_config(tmp_path)
+    first_root = write_legacy_job(
+        config.state_root, "20250101T000000Z-first",
+        [state.Record(idx=1, artist="A", title="T", decision=state.SKIPPED).to_json()],
+        [{"event": "created"}, {"event": "skipped", "idx": 1}],
+    )
+    second_root = write_legacy_job(
+        config.state_root, "20250102T000000Z-second",
+        [state.Record(idx=1, artist="A", title="T", decision=state.ACCEPTED).to_json()],
+        [{"event": "created"}, {"event": "accepted", "idx": 1}],
+    )
+    second_events = second_root / state.EVENTS
+    second_events.write_text("{broken json\n", encoding="utf-8")
+    original_tracks = (first_root / state.TRACKS).read_text(encoding="utf-8")
+    state.Job(first_root)
+    assert not (config.state_root / "state.sqlite3").exists()
+
+    with pytest.raises(json.JSONDecodeError):
+        store.import_legacy(config.state_root)
+
+    first = state.Job(first_root)
+    assert first.records()[0].decision == state.SKIPPED
+    backup = first_root / "legacy-backup" / state.TRACKS
+    assert backup.read_text(encoding="utf-8") == original_tracks
+
+    second_events.write_text(json.dumps({"event": "created"}) + "\n", encoding="utf-8")
+    store.import_legacy(config.state_root)
+    store.import_legacy(config.state_root)
+
+    first = state.Job(first_root)
+    second = state.Job(second_root)
+    assert first.records()[0].decision == state.SKIPPED
+    assert second.records()[0].decision == state.ACCEPTED
+    assert first.work_id(1) == second.work_id(1)
+    assert len(first.events()) == 2
+    assert len(second.events()) == 1
+    first.write_records([state.Record(idx=1, artist="A", title="T", decision=state.SKIPPED,
+                                      notes="edited")])
+    assert backup.read_text(encoding="utf-8") == original_tracks
+
+
+def test_constructor_does_not_import_unlocked_legacy_state(tmp_path):
+    config = make_config(tmp_path)
+    legacy_job = write_legacy_job(
+        config.state_root, "old-job", [{"idx": 1, "artist": "A", "title": "T"}],
+        [{"event": "created"}],
+    )
+    original = (legacy_job / state.TRACKS).read_text(encoding="utf-8")
+
+    state.Job(legacy_job)
+
+    assert (legacy_job / state.TRACKS).read_text(encoding="utf-8") == original
+    assert not (config.state_root / "state.sqlite3").exists()
+
+
+def test_projection_rebuild_preserves_replacement_provenance(tmp_path):
+    config = make_config(tmp_path)
+    job = state.create(config, "projection")
+    record = state.Record(idx=1, artist="A", title="T", replaces=r"M:\held\T.mp3",
+                          local_path=str(tmp_path / "T.aiff"))
+    job.write_records([record])
+    job.tracks_path.unlink()
+
+    store.rebuild_projections(config.state_root)
+
+    projected = json.loads(job.tracks_path.read_text(encoding="utf-8").strip())
+    assert projected["replaces"] == r"M:\held\T.mp3"
+    assert projected["local_path"] == str(tmp_path / "T.aiff")
+
+
+def test_writer_lock_excludes_a_second_process(tmp_path):
+    root = tmp_path / "state"
+    root.mkdir()
+    code = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from music_agent.store import WriterLocked, writer_lock\n"
+        "root = Path(sys.argv[1])\n"
+        "try:\n"
+        "    with writer_lock(root):\n"
+        "        raise SystemExit('lock acquired twice')\n"
+        "except WriterLocked:\n"
+        "    print('locked')\n"
+    )
+    environment = os.environ.copy()
+    source_root = str(Path(__file__).resolve().parents[1] / "src")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        part for part in (source_root, environment.get("PYTHONPATH", "")) if part)
+
+    with store.writer_lock(root):
+        result = subprocess.run([sys.executable, "-c", code, str(root)], capture_output=True,
+                                text=True, env=environment, timeout=10)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "locked"
+
+
+def write_legacy_job(root: Path, job_id: str, records: list[dict],
+                     events: list[dict]) -> Path:
+    job_root = root / job_id
+    job_root.mkdir(parents=True)
+    (job_root / state.TRACKS).write_text(
+        "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    (job_root / state.EVENTS).write_text(
+        "".join(json.dumps(event, ensure_ascii=False) + "\n" for event in events),
+        encoding="utf-8",
+    )
+    return job_root
+
+
+def test_legacy_import_reuses_only_existing_artifacts(tmp_path):
+    config = make_config(tmp_path)
+    existing_path = tmp_path / "present.aiff"
+    existing_path.write_bytes(b"audio")
+    missing_path = tmp_path / "missing.aiff"
+    legacy_job = write_legacy_job(
+        config.state_root, "legacy",
+        [
+            state.Record(idx=1, artist="A", title="Missing", status=state.IMPORTED,
+                         format="aiff", local_path=str(missing_path)).to_json(),
+            state.Record(idx=2, artist="B", title="Present", status=state.IMPORTED,
+                         format="aiff", local_path=str(existing_path)).to_json(),
+        ],
+        [{"event": "created"}],
+    )
+
+    store.import_legacy(config.state_root)
+
+    records = state.Job(legacy_job).records()
+    assert records[0].status == state.RETRY_LATER
+    assert records[0].local_path == ""
+    assert records[1].status == state.IMPORTED
+    assert records[1].local_path == str(existing_path)

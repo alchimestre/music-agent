@@ -13,7 +13,6 @@ from pathlib import Path
 
 from . import acquire
 from . import config as config_module
-from . import deezer
 from . import exporting
 from . import genre
 from . import importing
@@ -26,12 +25,10 @@ from . import reference
 from . import review
 from .rules import hms
 from . import slsk
-from . import spotify
 from . import state
+from . import store
 from . import sweep
 from . import tidy
-from . import tracklist
-from . import youtube
 from . import traktor
 
 
@@ -416,7 +413,7 @@ def _process(config: config_module.Config, args: argparse.Namespace) -> int:
         return 1
 
     _stage("process", f"run {job.id} · convert, place, normalize, tag")
-    summary = process.run(config, job, tools=tools)
+    summary = process.run(config, job.execution(), tools=tools)
     _report(summary, job, len(summary.failed))
     if summary.ungenred:
         print(f"{len(summary.ungenred)} without a genre — nothing resolved for them, or the taxonomy "
@@ -458,47 +455,24 @@ def _reconcile(config: config_module.Config, args: argparse.Namespace) -> int:
     return 0
 
 
-# The services a `--tracks` argument can name. Each turns its own playlist into the text `tracklist` reads,
-# and each is asked whether the argument is its own before anything is fetched: the first that answers yes
-# reads it.
-_PLAYLIST_SOURCES = (deezer, spotify, youtube)
 
 
 def _start(config: config_module.Config, args: argparse.Namespace) -> state.Job | None:
-    """The run `--tracks` starts: a file, a directory, or a playlist from one of the services.
+    from .application import preview_source
 
-    A playlist is read here rather than written out first, because handing over a URL should cost no more
-    than handing over a file — and the text it is parsed from is the text a tracklist file would have held.
-    """
-    name = None
-    reader = next(
-        (source for source in _PLAYLIST_SOURCES if source.names_a_playlist(args.tracks)), None
-    )
-    if reader is not None:
-        try:
-            found = reader.playlist(args.tracks)
-        except playlists.PlaylistError as error:
-            print(error, file=sys.stderr)
-            return None
-        requests, name = tracklist.parse(found.text()), found.name
-    else:
-        try:
-            requests = tracklist.read(Path(args.tracks).expanduser())
-        except (OSError, UnicodeDecodeError) as error:
-            reason = getattr(error, "strerror", None) or error
-            print(f"cannot read {args.tracks} ({reason})", file=sys.stderr)
-            return None
-
-    if not requests:
-        print(f"{args.tracks} names no tracks", file=sys.stderr)
+    try:
+        preview = preview_source(config, args.tracks)
+    except (OSError, UnicodeDecodeError) as error:
+        reason = getattr(error, "strerror", None) or error
+        print(f"cannot read {args.tracks} ({reason})", file=sys.stderr)
         return None
-
-    job = state.create(config, args.name or name or Path(args.tracks).stem)
-    job.write_records([
-        state.Record(idx=index, artist=request.artist, title=request.title, mix=request.mix)
-        for index, request in enumerate(requests, start=1)
-    ])
-    print(f"run {job.id} · {len(requests)} tracks · staging {config.staging}")
+    except (playlists.PlaylistError, ValueError) as error:
+        print(error, file=sys.stderr)
+        return None
+    job = state.create(config, args.name or preview.name)
+    job.write_records(preview.records)
+    job.append_event("submission", source=preview.source)
+    print(f"run {job.id} · {len(preview.records)} tracks · staging {config.staging}")
     return job
 
 
@@ -521,7 +495,7 @@ def _one_pass(config: config_module.Config, job: state.Job, *, retry: bool,
     _ready(daemon, config)
     _stage("acquire", f"{len(job.records())} tracks · pass {attempt}"
                       f"{' · retry' if retry else ''}")
-    return acquire.run(config, job, daemon, reference.lookup(config),
+    return acquire.run(config, job.execution(), daemon, reference.lookup(config),
                        library=shelf, retry=retry)
 
 
@@ -529,7 +503,7 @@ def _ready(daemon: slsk.Daemon, config: config_module.Config) -> None:
     """Point the daemon at this pass: staging, the two shared lanes, and a session to search with."""
     config.staging.mkdir(parents=True, exist_ok=True)
     daemon.set_dir(config.staging)
-    shared = daemon.share([config.lossless, config.lossy])
+    shared = daemon.share(slsk.shared_directories(config))
     if int(shared.get("files") or 0) == 0:
         # Without shared files peers read the account as a leecher and queue or ban it. The two lanes are
         # handed over above; this says when the daemon did not take them.
@@ -693,7 +667,7 @@ def _review(config: config_module.Config, args: argparse.Namespace) -> int:
                 daemon = slsk.Daemon(config)
                 daemon.ensure()
                 daemon.set_dir(config.staging)
-                daemon.share([config.lossless, config.lossy])
+                daemon.share(slsk.shared_directories(config))
                 return daemon
 
             if len(picks) == 1:
@@ -882,6 +856,11 @@ def _peers(config: config_module.Config, args: argparse.Namespace) -> int:
     return 0
 
 
+# Commands whose pass writes records from worker threads. Holding the process writer lock across one would
+# deadlock: the main thread waits in the drain while the workers queue on the same lock.
+_THREADED = frozenset({"run", "acquire", "review"})
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
@@ -889,10 +868,21 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as error:
         print(error, file=sys.stderr)
         return 1
-    if args.command == "run":
-        return _run(config, args)
     if args.command == "status":
         return _status(config, args)
+    try:
+        if args.command in _THREADED:
+            return _dispatch(config, args)
+        with store.writer_lock(config.state_root):
+            return _dispatch(config, args)
+    except store.WriterLocked as error:
+        print(error, file=sys.stderr)
+        return 1
+
+
+def _dispatch(config: config_module.Config, args: argparse.Namespace) -> int:
+    if args.command == "run":
+        return _run(config, args)
     if args.command == "acquire":
         return _acquire(config, args)
     if args.command == "review":

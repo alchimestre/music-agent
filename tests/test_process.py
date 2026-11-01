@@ -1,13 +1,14 @@
-"""The processing stage: the two lanes, the house naming, and the order the canonical tools run in.
+"""The processing stage: the two lanes, house naming, and persistence around tool failures.
 
-The runner is injected, so these tests read the exact command lines the stage would issue — and one of
-them checks the thing most likely to go wrong quietly: a conversion that fails must put the file back,
-because the real converter deletes its input rather than leaving it behind.
+The injected runner stands in for external tools. Real FFmpeg fixtures cover media conversion and metadata.
 """
 
 from __future__ import annotations
 
+import json
+import shutil
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,45 @@ from audio_files import aiff, mp4
 from music_agent import config as config_module
 from music_agent import identify, lanes, process, state, tag
 from music_agent.parsing import fold
+
+
+def media_binaries() -> tuple[str, str]:
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    if not ffmpeg or not ffprobe:
+        pytest.skip("FFmpeg and ffprobe are required for media conversion fixtures")
+    return ffmpeg, ffprobe
+
+
+def lossless_with_artwork(path: Path, ffmpeg: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=0.25",
+            "-f", "lavfi", "-i", "color=c=red:s=16x16:d=0.25",
+            "-map", "0:a:0", "-map", "1:v:0",
+            "-c:a", "flac", "-sample_fmt", "s32", "-c:v", "png",
+            "-disposition:v:0", "attached_pic",
+            "-metadata", "title=Embedded Title",
+            "-metadata", "artist=Embedded Artist",
+            "-metadata", "album=Embedded Album",
+            str(path),
+        ],
+        capture_output=True,
+        check=True,
+    )
+    return path
+
+
+def probe_media(path: Path, ffprobe: str) -> dict:
+    result = subprocess.run(
+        [ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)],
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
 
 
 def make_config(tmp_path: Path) -> config_module.Config:
@@ -34,7 +74,8 @@ true_peak_db = -1.0
 tolerance_lu = 0.5
 
 [tools]
-convert = "{tmp_path}/fake-convert.sh"
+ffmpeg = "ffmpeg"
+ffprobe = "ffprobe"
 normalize = "{tmp_path}/fake-normalize.py"
 """,
         encoding="utf-8",
@@ -44,11 +85,7 @@ normalize = "{tmp_path}/fake-normalize.py"
 
 
 class FakeRunner:
-    """Records the commands and stands in for both tools.
-
-    The conversion stands in faithfully in one respect that matters: the real script removes its input, so
-    this does too. A failure leaves the input where it is, which is how the real one behaves as well.
-    """
+    """Supplies tool outcomes without making command-line details part of the contract."""
 
     def __init__(self, *, fails_conversion: bool = False, fails_normalize: bool = False,
                  unreadable: bool = False, normalizer_errors: int = 0,
@@ -59,20 +96,14 @@ class FakeRunner:
         self.unreadable = unreadable
         self.normalizer_errors = normalizer_errors
         self.normalizer_failed = normalizer_failed
+        self.conversion_count = 0
 
     def __call__(self, argv: list[str]) -> subprocess.CompletedProcess:
         self.commands.append(argv)
-        if Path(argv[0]).name == "ffprobe":
+        if Path(argv[0]).stem == "ffprobe":
             if self.unreadable:
                 return subprocess.CompletedProcess(argv, 1, "", "Invalid data found")
             return subprocess.CompletedProcess(argv, 0, "flac\n", "")
-        if any("fake-convert" in part for part in argv):
-            if self.fails_conversion:
-                return subprocess.CompletedProcess(argv, 1, "", "ffmpeg: no such codec")
-            source = next(Path(argv[1]).iterdir())
-            aiff(Path(argv[2]) / f"{source.stem}.aiff")   # real: the tagger opens it afterwards
-            source.unlink()
-            return subprocess.CompletedProcess(argv, 0, "", "")
         if any("fake-normalize" in part for part in argv):
             if self.fails_normalize:
                 return subprocess.CompletedProcess(argv, 1, "", "ffmpeg not found")
@@ -83,10 +114,13 @@ class FakeRunner:
             for name in named:
                 said = f"\nERROR: {name}\nEncoding failed:\nffmpeg exited 1\n{said}"
             return subprocess.CompletedProcess(argv, 0, said, "")
+        if Path(argv[0]).stem == "ffmpeg":
+            self.conversion_count += 1
+            if self.fails_conversion:
+                return subprocess.CompletedProcess(argv, 1, "", "ffmpeg: no such codec")
+            aiff(Path(argv[-1]))
+            return subprocess.CompletedProcess(argv, 0, "", "")
         raise AssertionError(f"unexpected command: {argv}")
-
-    def conversions(self) -> list[list[str]]:
-        return [argv for argv in self.commands if any("fake-convert" in part for part in argv)]
 
     def normalizations(self) -> list[list[str]]:
         return [argv for argv in self.commands if any("fake-normalize" in part for part in argv)]
@@ -136,17 +170,24 @@ def test_a_name_with_nothing_in_it_still_has_one():
 
 
 def test_a_lossy_file_goes_to_the_lossy_lane_untouched(tmp_path):
+    _, ffprobe = media_binaries()
     config = make_config(tmp_path)
-    runner = FakeRunner()
+    source = mp4(tmp_path / "staging" / "08 - Blurred.m4a")
     record = state.Record(idx=1, artist="Kiasmos", title="Blurred",
-                          local_path=str(mp4(tmp_path / "staging" / "08 - Blurred.m4a")),
-                          status=state.DOWNLOADED, format="m4a")
+                          local_path=str(source), status=state.DOWNLOADED, format="m4a")
     job = job_with(config, [record])
+    runner = FakeRunner()
 
     process.run(config, job, tools=process.Tools(runner=runner), log=lambda *_: None)
 
-    assert runner.conversions() == [], "lossy is never converted"
-    assert (config.lossy / "Kiasmos - Blurred.m4a").is_file()
+    assert runner.conversion_count == 0, "lossy is never converted"
+    landed = config.lossy / "Kiasmos - Blurred.m4a"
+    assert landed.is_file()
+    audio = next(
+        stream for stream in probe_media(landed, ffprobe)["streams"]
+        if stream["codec_type"] == "audio"
+    )
+    assert audio["codec_name"] == "aac"
     assert not (config.lossless / "Kiasmos - Blurred.aiff").exists()
 
 
@@ -162,10 +203,9 @@ def test_a_lossless_file_is_converted_into_the_lossless_lane(tmp_path):
 
     landed = config.lossless / "UFO95 - Solution (Original Mix).aiff"
     assert landed.is_file()
-    assert not Path(source).exists(), "the converter consumes its input"
+    assert not Path(source).exists(), "the source is removed after successful conversion"
     assert job.records()[0].local_path == str(landed), "the record follows the file"
-    assert runner.conversions()[0][2] == str(Path(source).parent)
-
+    assert runner.conversion_count == 1
 
 def test_a_file_already_in_aiff_is_not_converted_again(tmp_path):
     config = make_config(tmp_path)
@@ -177,17 +217,12 @@ def test_a_file_already_in_aiff_is_not_converted_again(tmp_path):
 
     process.run(config, job, tools=process.Tools(runner=runner), log=lambda *_: None)
 
-    assert runner.conversions() == []
+    assert runner.conversion_count == 0
     assert (config.lossless / "Kiasmos - Blurred.aiff").is_file()
 
 
 def test_a_file_named_aif_is_placed_as_aiff(tmp_path):
-    """One extension for one format, because pyrekordbox's own `add_content` derives its file type from the
-    upper-cased suffix and there is no `AIF` member — a `.aif` cannot be added at all.
-
-    Renamed, never converted: `.aif` is an AIFF by another name, so the audio is already what the collection
-    wants and the converter would only re-encode it.
-    """
+    """One extension for one format, because pyrekordbox cannot add a `.aif` suffix."""
     config = make_config(tmp_path)
     runner = FakeRunner()
     record = state.Record(idx=1, artist="Maryam Saleh", title="El Fetra",
@@ -197,11 +232,71 @@ def test_a_file_named_aif_is_placed_as_aiff(tmp_path):
 
     process.run(config, job, tools=process.Tools(runner=runner), log=lambda *_: None)
 
-    assert runner.conversions() == [], "an .aif is an AIFF, so there is nothing to convert"
+    assert runner.conversion_count == 0
     assert (config.lossless / "Maryam Saleh - El Fetra.aiff").is_file()
     assert not (config.lossless / "Maryam Saleh - El Fetra.aif").exists()
-    assert job.records()[0].local_path == str(config.lossless / "Maryam Saleh - El Fetra.aiff"), \
-        "the record follows the file"
+    assert job.records()[0].local_path == str(config.lossless / "Maryam Saleh - El Fetra.aiff")
+
+
+def test_lossless_conversion_preserves_audio_properties_tags_and_artwork(tmp_path, monkeypatch):
+    ffmpeg, ffprobe = media_binaries()
+    config = replace(make_config(tmp_path), ffmpeg=ffmpeg, ffprobe=ffprobe)
+    source = lossless_with_artwork(tmp_path / "staging" / "input.flac", ffmpeg)
+    record = state.Record(idx=1, artist="Kiasmos", title="Blurred", local_path=str(source),
+                          status=state.DOWNLOADED, format="flac")
+    empty_path = tmp_path / "empty-bin"
+    empty_path.mkdir()
+    monkeypatch.setenv("PATH", str(empty_path))
+
+    landed = process.place(config, record, run=process.execute, log=lambda *_: None)
+
+    assert landed == config.lossless / "Kiasmos - Blurred.aiff"
+    assert not source.exists()
+    media = probe_media(landed, ffprobe)
+    audio = next(stream for stream in media["streams"] if stream["codec_type"] == "audio")
+    assert audio["codec_name"] == "pcm_s16be"
+    assert audio["sample_rate"] == "44100"
+    assert audio.get("bits_per_sample") in (16, "16") or \
+        audio.get("bits_per_raw_sample") in (16, "16")
+    tags = {name.casefold(): value for name, value in media["format"].get("tags", {}).items()}
+    assert tags["title"] == "Embedded Title"
+    assert tags["artist"] == "Embedded Artist"
+    assert tags["album"] == "Embedded Album"
+    assert any(stream.get("disposition", {}).get("attached_pic") == 1 for stream in media["streams"])
+    subprocess.run(
+        [ffmpeg, "-v", "error", "-i", str(landed), "-vn", "-f", "null", "-"],
+        capture_output=True,
+        check=True,
+    )
+
+
+def test_conversion_refuses_to_replace_an_existing_aiff(tmp_path):
+    ffmpeg, ffprobe = media_binaries()
+    config = replace(make_config(tmp_path), ffmpeg=ffmpeg, ffprobe=ffprobe)
+    source = lossless_with_artwork(tmp_path / "staging" / "input.flac", ffmpeg)
+    original = source.read_bytes()
+    unrelated = source.with_suffix(".aiff")
+    unrelated.write_bytes(b"unrelated audio")
+
+    with pytest.raises(process.ProcessError):
+        process.convert(config, source, run=process.execute, log=lambda *_: None)
+
+    assert source.read_bytes() == original
+    assert unrelated.read_bytes() == b"unrelated audio"
+
+
+def test_real_ffmpeg_failure_keeps_the_source_and_no_partial_output(tmp_path):
+    ffmpeg, ffprobe = media_binaries()
+    config = replace(make_config(tmp_path), ffmpeg=ffmpeg, ffprobe=ffprobe)
+    source = tmp_path / "staging" / "broken.flac"
+    source.write_bytes(b"not an audio stream")
+    original = source.read_bytes()
+
+    with pytest.raises(process.ProcessError, match="conversion failed"):
+        process.convert(config, source, run=process.execute, log=lambda *_: None)
+
+    assert source.read_bytes() == original
+    assert not source.with_suffix(".aiff").exists()
 
 
 def test_a_name_the_lane_already_holds_deletes_the_download_instead_of_dangling_in_staging(tmp_path):
@@ -241,21 +336,43 @@ def test_a_staged_file_that_is_gone_is_reported(tmp_path):
     assert "is gone" in job.records()[0].notes
 
 
-def test_a_failed_conversion_puts_the_file_back(tmp_path):
-    """The real converter deletes its input, so a failure must not be allowed to eat the download."""
+def test_a_failed_conversion_keeps_source_untouched(tmp_path):
     config = make_config(tmp_path)
     runner = FakeRunner(fails_conversion=True)
     source = Path(staged(tmp_path, "Kiasmos - Blurred.flac"))
     record = state.Record(idx=1, artist="Kiasmos", title="Blurred", local_path=str(source),
                           status=state.DOWNLOADED, format="flac")
     job = job_with(config, [record])
+    source_bytes = source.read_bytes()
 
     summary = process.run(config, job, tools=process.Tools(runner=runner), log=lambda *_: None)
 
     assert summary.failed == [1]
     assert source.is_file(), "the download must survive a failed conversion"
+    assert source.read_bytes() == source_bytes
     assert "conversion failed" in job.records()[0].notes
-    assert not list(tmp_path.glob("music-agent-convert-*")), "the pen is cleaned up"
+    assert not source.with_suffix(".aiff").exists()
+
+
+def test_a_source_removal_failure_cleans_the_promoted_output(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    runner = FakeRunner()
+    source = Path(staged(tmp_path, "Kiasmos - Blurred.flac"))
+    original = source.read_bytes()
+    unlink = Path.unlink
+
+    def fail_source_removal(path: Path, *, missing_ok: bool = False) -> None:
+        if path == source:
+            raise PermissionError("source is locked")
+        unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", fail_source_removal)
+
+    with pytest.raises(process.ProcessError, match="cannot remove converted source"):
+        process.convert(config, source, run=runner, log=lambda *_: None)
+
+    assert source.read_bytes() == original
+    assert not source.with_suffix(".aiff").exists()
 
 
 def test_a_corrupt_download_is_removed_and_the_record_released(tmp_path):

@@ -61,8 +61,8 @@ def a_waiting_track(idx: int = 2) -> state.Record:
 
 
 def _named(idx: int) -> state.Record:
-    """A waiting track whose candidate is named after its index, so the daemon's derived path is per-track."""
-    return state.Record(idx=idx, artist="Ntogn", title="Mines", duration_s=528,
+    """A waiting track named after its index, so each one is its own work and the daemon's path is per-track."""
+    return state.Record(idx=idx, artist="Ntogn", title=f"Mines {idx}", duration_s=528,
                         candidates=[Candidate(user="mole", path=rf"M\Ntogn - Mines {idx}.aiff",
                                               duration=None)])
 

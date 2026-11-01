@@ -1,0 +1,32 @@
+{
+  "platform": "windows-x86_64",
+  "binaries": [
+    {
+      "name": "ffmpeg",
+      "files": ["ffmpeg.exe", "ffprobe.exe"],
+      "version": "N-128273-g836436cfb9",
+      "archive": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-11-01-12-49/ffmpeg-N-128273-g836436cfb9-win64-lgpl.zip",
+      "sha256": "00bfdb3e67d674822e447d12bfa83db5910ed7618b0dc11bd4f6f53c2f798c61",
+      "license": "LGPL-2.1-or-later",
+      "license_url": "https://raw.githubusercontent.com/FFmpeg/FFmpeg/836436cfb9/LICENSE.md"
+    },
+    {
+      "name": "fpcalc",
+      "files": ["fpcalc.exe"],
+      "version": "1.6.2",
+      "archive": "https://github.com/acoustid/chromaprint/releases/download/v1.6.2/chromaprint-fpcalc-1.6.2-windows-x86_64.zip",
+      "sha256": "b74369726676670af3ab0eadff45f960cf969fdf4a87a971ba37eaf8d530e874",
+      "license": "MIT",
+      "license_url": "https://raw.githubusercontent.com/acoustid/chromaprint/v1.6.2/LICENSE.md"
+    },
+    {
+      "name": "soulseek-rs",
+      "files": ["soulseek-rs.exe"],
+      "version": "19.1.0",
+      "archive": "https://github.com/michel/soulseek-rs/releases/download/v19.1.0/soulseek-rs-v19.1.0-x86_64-pc-windows-msvc.zip",
+      "sha256": "843c6cb23e0751060e45f567a6cee6fc5b889445e220c4a3eab09fac9baabea4",
+      "license": "MIT",
+      "license_url": "https://raw.githubusercontent.com/michel/soulseek-rs/v19.1.0/LICENSE"
+    }
+  ]
+}

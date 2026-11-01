@@ -1,0 +1,102 @@
+name: Windows desktop
+
+# Builds the standalone Windows application. A tagged run is meant to be a release and refuses to
+# produce an unsigned artifact; a manually dispatched run is an internal validation build and is named
+# as unsigned. Neither replaces the Windows 11 proof on a clean machine: this job produces the artifact.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "desktop-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-desktop-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: "0.13.6"
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install the locked environment
+        run: uv sync --locked --no-default-groups --extra desktop --group windows-build
+
+      - name: Provide the licensed normalizer
+        env:
+          NORMALIZER_URL: ${{ secrets.NORMALIZER_PACKAGE_URL }}
+          NORMALIZER_SHA256: ${{ vars.NORMALIZER_PACKAGE_SHA256 }}
+        run: |
+          if (-not $env:NORMALIZER_URL) {
+            throw "No normalizer release artifact is configured: set the NORMALIZER_PACKAGE_URL secret."
+          }
+          if (-not $env:NORMALIZER_SHA256) {
+            throw "The normalizer artifact has no pinned digest: set the NORMALIZER_PACKAGE_SHA256 variable."
+          }
+          $package = Join-Path $env:RUNNER_TEMP "loudness_normalizer.zip"
+          Invoke-WebRequest -Uri $env:NORMALIZER_URL -OutFile $package
+          $actual = (Get-FileHash -Path $package -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $env:NORMALIZER_SHA256.ToLowerInvariant()) {
+            throw "The normalizer package is not the pinned artifact: sha256 $actual."
+          }
+          Expand-Archive -Path $package -DestinationPath "packaging/windows/normalizer" -Force
+
+      - name: Stage the bundled tools
+        run: uv run python packaging/windows/stage.py
+
+      - name: Generate the deployment specification
+        run: uv run pyside6-deploy --init -f
+
+      - name: Build the standalone application
+        run: uv run pyside6-deploy --no-install -f -c pysidedeploy.spec
+
+      - name: Sign the application
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          SIGNING_CERTIFICATE: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE }}
+          SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
+        run: |
+          if (-not $env:SIGNING_CERTIFICATE) {
+            throw "A tagged build is a release and must be signed: set the WINDOWS_SIGNING_CERTIFICATE secret."
+          }
+          $signtool = Get-Command signtool.exe -ErrorAction SilentlyContinue
+          if (-not $signtool) {
+            throw "signtool.exe is not on this runner; install the Windows SDK signing tools."
+          }
+          $certificate = Join-Path $env:RUNNER_TEMP "signing.pfx"
+          [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:SIGNING_CERTIFICATE))
+          Get-ChildItem build/windows/*.dist/*.exe | ForEach-Object {
+            & $signtool.Source sign /f $certificate /p $env:SIGNING_PASSWORD /fd SHA256 `
+              /tr http://timestamp.digicert.com /td SHA256 $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Signing failed for $($_.Name)." }
+          }
+
+      - name: Assemble the artifact
+        run: |
+          if ("${{ startsWith(github.ref, 'refs/tags/') }}" -eq "true") {
+            uv run python packaging/windows/assemble.py build/windows --signed
+          } else {
+            Add-Content $env:GITHUB_STEP_SUMMARY "Internal validation build: unsigned, not a release artifact."
+            uv run python packaging/windows/assemble.py build/windows
+          }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: music-agent-windows
+          path: |
+            build/windows/music-agent-windows-*.zip
+            build/windows/music-agent-windows-*.zip.sha256
+          if-no-files-found: error

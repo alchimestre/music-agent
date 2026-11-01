@@ -204,6 +204,7 @@ def accept_many(
         raise NotAccepted("these picks need their files fetched, and no daemon was given")
 
     printing = threading.Lock()
+    write_lock = threading.Lock()
     refused: list[str] = []
 
     def say(line: str) -> None:
@@ -215,10 +216,12 @@ def accept_many(
                                                          clock=clock)
         if decision is not acquire.Move.DONE:
             # The record is left as it was, and the candidate is marked tried so a later pass moves on.
-            record.tried.append(acquire.identifier(candidate))
-            job.write_records(records)
+            with write_lock:
+                record.tried.append(acquire.identifier(candidate))
+                job.write_records(records)
             return f"[{record.idx}] {record.label}: {candidate.user} did not hand the file over ({decision.value})"
-        return _take(job, records, record, candidate, path, from_disk=False)
+        with write_lock:
+            return _take(job, records, record, candidate, path, from_disk=False)
 
     with daemon_factory() as daemon:
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:

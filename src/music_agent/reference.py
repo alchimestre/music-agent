@@ -8,11 +8,10 @@ so resuming never re-queries.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Protocol
 
-from .config import ENV_HINT, Config, MissingCredential
+from .config import Config, MissingCredential
 from .parsing import bare_title, extract_mix, fold, mix_matches, primary_artist
 from .rules import DURATION_WINDOW, Request
 
@@ -121,9 +120,9 @@ def _recording(item: dict) -> Recording:
 
 
 def lookup(config: Config, limit: int = LIMIT) -> MusicBrainz:
-    """The live lookup, with the contact their policy requires taken from the environment."""
+    """The live lookup using the configured MusicBrainz contact."""
     name = config.musicbrainz_contact_env
-    contact = os.environ.get(name)
+    contact = config.credential(name)
     if not contact:
-        raise MissingCredential(f"{name} is not set — add it to .env, or run: {ENV_HINT}")
+        raise MissingCredential(f"{name} is not configured; enter it in Settings or set its environment variable.")
     return MusicBrainz(contact, limit=limit)
