@@ -15,9 +15,8 @@ AGENTS.md
 config.toml
 .omp/
 
-# The Windows release build regenerates these: downloaded archives, the staged payload, the deployment
-# spec, and the licensed normalizer the build refuses to run without.
+# The Windows release build regenerates these: downloaded archives, the staged payload, and the
+# deployment spec.
 build/
 pysidedeploy.spec
 packaging/windows/payload/
-packaging/windows/normalizer/
