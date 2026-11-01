@@ -56,7 +56,10 @@ def archive(dist: Path, suffix: str) -> Path:
             if path.is_file():
                 bundle.write(path, path.relative_to(dist.parent))
     digest = sha256_of(destination)
-    destination.with_suffix(".zip.sha256").write_text(f"{digest}  {destination.name}\n", encoding="utf-8")
+    # newline="" keeps the line ending LF on Windows: the checksum file is verified on other systems.
+    destination.with_suffix(".zip.sha256").write_text(
+        f"{digest}  {destination.name}\n", encoding="utf-8", newline=""
+    )
     return destination
 
 
