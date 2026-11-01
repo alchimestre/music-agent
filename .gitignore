@@ -20,3 +20,4 @@ config.toml
 build/
 pysidedeploy.spec
 packaging/windows/payload/
+.nuitka-cache/
