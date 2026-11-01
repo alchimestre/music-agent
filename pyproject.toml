@@ -47,7 +47,7 @@ title = "music-agent"
 input_file = "src/music_agent/desktop.py"
 exec_directory = "build/windows"
 mode = "standalone"
-extra_args = "--quiet --noinclude-qt-translations=True"
+extra_args = "--quiet --noinclude-qt-translations"
 
 [dependency-groups]
 dev = ["pytest>=8"]
