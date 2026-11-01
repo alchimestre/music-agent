@@ -37,6 +37,13 @@ jobs:
       - name: Install the locked environment
         run: uv sync --locked --no-default-groups --extra desktop --group windows-build
 
+      # Nuitka refuses standalone mode on Windows without dumpbin to resolve dependencies; the runner
+      # ships the MSVC tools but does not put them on PATH.
+      - name: Provide the MSVC toolchain
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Stage the bundled tools
         run: uv run python packaging/windows/stage.py
 
