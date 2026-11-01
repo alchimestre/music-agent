@@ -2,8 +2,8 @@
 
 Run from the repository root inside the locked environment: every download is checked against
 `inputs.json`, so a replaced or rewritten archive stops the build instead of shipping. The
-normalization runtime is not in that manifest: it may not be redistributed from this repository, so it
-has to be supplied as a licensed file, and a build without one is refused.
+normalization runtime is not in that manifest: it is the `vendor/loudness_normalizer` submodule, MIT
+licensed, staged from the checkout.
 """
 
 from __future__ import annotations
@@ -21,7 +21,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 PAYLOAD = HERE / "payload"
 CACHE = HERE / "build" / "downloads"
-NORMALIZER_INPUT = HERE / "normalizer"
+REPOSITORY = HERE.parents[1]
+NORMALIZER_INPUT = REPOSITORY / "vendor" / "loudness_normalizer"
 NORMALIZER_NAME = "loudness_normalizer.py"
 NORMALIZER_PACKAGE = "loudness_normalizer"
 
@@ -75,19 +76,19 @@ def stage_normalizer(binaries: Path, licenses: Path) -> dict:
     source = NORMALIZER_INPUT / NORMALIZER_NAME
     if not source.is_file():
         raise SystemExit(
-            f"Refusing to build: no licensed normalizer at {source}. The workflow downloads it from the "
-            "release artifact named by NORMALIZER_PACKAGE_URL; it may not be redistributed from here."
+            f"Refusing to build: no normalizer at {source}. It is the vendor/loudness_normalizer "
+            "submodule; check the build out with submodules."
         )
-    texts = sorted(NORMALIZER_INPUT.glob("LICENSE*")) + sorted(NORMALIZER_INPUT.glob("COPYING*"))
-    if not texts:
-        raise SystemExit(f"Refusing to build: {NORMALIZER_INPUT} holds no license text for {NORMALIZER_NAME}.")
+    text = NORMALIZER_INPUT / "LICENSE"
+    if not text.is_file():
+        raise SystemExit(f"Refusing to build: {NORMALIZER_INPUT} holds no LICENSE for {NORMALIZER_NAME}.")
     shutil.copy2(source, binaries / NORMALIZER_NAME)
-    shutil.copy2(texts[0], licenses / f"{NORMALIZER_PACKAGE}.txt")
+    shutil.copy2(text, licenses / f"{NORMALIZER_PACKAGE}.txt")
     return {
         "name": NORMALIZER_PACKAGE,
         "sha256": sha256_of(source),
-        "source": f"supplied release input, license {texts[0].name}",
-        "license": "see license text",
+        "source": "https://github.com/alchimestre/loudness_normalizer.git",
+        "license": "MIT",
     }
 
 

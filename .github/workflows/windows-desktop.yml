@@ -25,6 +25,8 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: recursive
 
       - uses: astral-sh/setup-uv@v10.3.3
         with:
@@ -34,25 +36,6 @@ jobs:
 
       - name: Install the locked environment
         run: uv sync --locked --no-default-groups --extra desktop --group windows-build
-
-      - name: Provide the licensed normalizer
-        env:
-          NORMALIZER_URL: ${{ secrets.NORMALIZER_PACKAGE_URL }}
-          NORMALIZER_SHA256: ${{ vars.NORMALIZER_PACKAGE_SHA256 }}
-        run: |
-          if (-not $env:NORMALIZER_URL) {
-            throw "No normalizer release artifact is configured: set the NORMALIZER_PACKAGE_URL secret."
-          }
-          if (-not $env:NORMALIZER_SHA256) {
-            throw "The normalizer artifact has no pinned digest: set the NORMALIZER_PACKAGE_SHA256 variable."
-          }
-          $package = Join-Path $env:RUNNER_TEMP "loudness_normalizer.zip"
-          Invoke-WebRequest -Uri $env:NORMALIZER_URL -OutFile $package
-          $actual = (Get-FileHash -Path $package -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actual -ne $env:NORMALIZER_SHA256.ToLowerInvariant()) {
-            throw "The normalizer package is not the pinned artifact: sha256 $actual."
-          }
-          Expand-Archive -Path $package -DestinationPath "packaging/windows/normalizer" -Force
 
       - name: Stage the bundled tools
         run: uv run python packaging/windows/stage.py
