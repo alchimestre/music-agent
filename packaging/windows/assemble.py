@@ -12,6 +12,9 @@ HERE = Path(__file__).resolve().parent
 PAYLOAD = HERE / "payload"
 BUNDLED = ("ffmpeg.exe", "ffprobe.exe", "fpcalc.exe", "soulseek-rs.exe", "loudness_normalizer.py")
 LICENSED = ("ffmpeg", "fpcalc", "soulseek-rs", "loudness_normalizer")
+APPLICATION = "music-agent.exe"
+# Nuitka names the executable after its input module, so the build produces desktop.exe.
+BUILT_APPLICATION = "desktop.exe"
 
 
 def distribution(exec_directory: Path) -> Path:
@@ -27,6 +30,14 @@ def sha256_of(path: Path) -> str:
         for block in iter(lambda: handle.read(1 << 20), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def publish_application(dist: Path) -> None:
+    """Ship the executable under the name a person looks for, not the module it was compiled from."""
+    built = dist / BUILT_APPLICATION
+    if not built.is_file():
+        raise SystemExit(f"{dist}: the deployment produced no {BUILT_APPLICATION}")
+    built.rename(dist / APPLICATION)
 
 
 def verify(resources: Path) -> None:
@@ -55,6 +66,7 @@ def main(argv: list[str]) -> int:
     if not PAYLOAD.is_dir():
         raise SystemExit(f"{PAYLOAD}: run stage.py first")
     dist = distribution(Path(argv[0]).resolve())
+    publish_application(dist)
     resources = dist / "resources"
     shutil.copytree(PAYLOAD, resources, dirs_exist_ok=True)
     verify(resources)
