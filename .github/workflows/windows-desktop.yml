@@ -23,6 +23,9 @@ jobs:
     defaults:
       run:
         shell: pwsh
+    env:
+      # Nuitka reads its cache from here, so the dependency walker below lands where it looks.
+      NUITKA_CACHE_DIR: ${{ github.workspace }}/.nuitka-cache
     steps:
       - uses: actions/checkout@v7
         with:
@@ -37,12 +40,28 @@ jobs:
       - name: Install the locked environment
         run: uv sync --locked --no-default-groups --extra desktop --group windows-build
 
-      # Nuitka refuses standalone mode on Windows without dumpbin to resolve dependencies; the runner
-      # ships the MSVC tools but does not put them on PATH.
+      # The C compiler Nuitka invokes.
       - name: Provide the MSVC toolchain
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
+
+      # Nuitka resolves the DLLs a build needs with depends.exe and refuses standalone mode without it.
+      # The binary is placed at the cache path Nuitka's lookup reads first, so the build does not depend
+      # on the upstream host answering a prompt it cannot show.
+      - name: Provide the dependency walker
+        run: |
+          $cache = Join-Path $env:NUITKA_CACHE_DIR "downloads\depends\x86_64"
+          New-Item -ItemType Directory -Force -Path $cache | Out-Null
+          $zip = Join-Path $env:RUNNER_TEMP "depends22_x64.zip"
+          Invoke-WebRequest -Uri "https://dependencywalker.com/depends22_x64.zip" -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath (Join-Path $env:RUNNER_TEMP "depends") -Force
+          $found = Get-ChildItem -Path (Join-Path $env:RUNNER_TEMP "depends") -Filter "depends.exe" -Recurse | Select-Object -First 1
+          if (-not $found) {
+            throw "The dependency walker archive held no depends.exe"
+          }
+          Copy-Item $found.FullName (Join-Path $cache "depends.exe") -Force
+          Write-Host "dependency walker: $(Join-Path $cache 'depends.exe')"
 
       - name: Stage the bundled tools
         run: uv run python packaging/windows/stage.py
