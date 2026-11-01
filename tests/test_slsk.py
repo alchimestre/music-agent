@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import signal
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -49,10 +50,8 @@ def test_the_environment_carries_what_the_daemon_reads(tmp_path, creds, monkeypa
     env = slsk.environment(config)
 
     assert env["SOULSEEK_USERNAME"] == "someone"
-    assert env["SOULSEEK_PASSWORD"] == "a secret"
-    assert env["SOULSEEK_STATE_DIR"] == str(tmp_path / "daemon")
-    assert env["SOULSEEK_LISTENER_PORT"] == "41000"
-    assert env["SOULSEEK_MAX_CONCURRENT_DOWNLOADS"] == str(config.max_downloads)
+    assert "SOULSEEK_PASSWORD" not in env.keys()
+    assert config.credential(config.slsk_password_env) == "a secret"
 
 
 def test_credentials_are_renamed_to_what_the_daemon_expects(tmp_path, monkeypatch):
@@ -67,7 +66,8 @@ def test_credentials_are_renamed_to_what_the_daemon_expects(tmp_path, monkeypatc
     env = slsk.environment(config)
 
     assert env["SOULSEEK_USERNAME"] == "someone"
-    assert env["SOULSEEK_PASSWORD"] == "a secret"
+    assert "SOULSEEK_PASSWORD" not in env.keys()
+    assert config.credential(config.slsk_password_env) == "a secret"
 
 
 def test_a_missing_credential_names_the_variable(tmp_path, creds, monkeypatch):
@@ -78,6 +78,14 @@ def test_a_missing_credential_names_the_variable(tmp_path, creds, monkeypatch):
 
 def test_the_socket_lives_where_the_config_says(tmp_path):
     assert slsk.socket_path(make_config(tmp_path)) == tmp_path / "daemon" / "daemon.sock"
+
+def test_explicit_shared_directories_replace_inferred_lanes(tmp_path):
+    config = make_config(tmp_path)
+    explicit = tmp_path / "Music"
+
+    assert slsk.shared_directories(config) == (config.lossless, config.lossy)
+    assert slsk.shared_directories(replace(config, shared_dirs=(explicit,))) == (explicit,)
+    assert slsk.shared_directories(replace(config, shared_dirs=())) == ()
 
 
 def test_the_concurrency_the_daemon_runs_at_comes_from_config(tmp_path, creds):
@@ -241,51 +249,46 @@ def test_an_error_from_the_daemon_keeps_its_exit_code(tmp_path, creds):
     assert caught.value.exit_status == 3
 
 
-def test_free_ports_stops_the_client_and_spares_the_log_reader(tmp_path, machine):
-    """A client left logged in takes every search reply, so it goes. A reader of its log is a stranger."""
-    box = machine({500: "tail -f /tmp/sldl.log", 501: "/opt/homebrew/bin/sldl --random", 502: "nicotine"})
-    said = []
+def test_free_ports_refuses_to_stop_soulseek_clients(tmp_path, machine):
+    box = machine({500: "tail -f /tmp/sldl.log",
+                   501: "/opt/homebrew/bin/sldl --random", 502: "nicotine"})
 
-    stopped = slsk.free_ports(make_config(tmp_path), log=said.append)
+    with pytest.raises(slsk.PortBusy):
+        slsk.free_ports(make_config(tmp_path), log=lambda _line: None)
 
-    assert stopped == [502, 501]
-    assert {500} == box.alive
-    assert said == ["stopped nicotine (pid 502)", "stopped sldl (pid 501)"]
+    assert box.alive == {500, 501, 502}
+    assert box.signalled == []
 
 
-def test_free_ports_stops_the_daemon_that_stopped_answering(tmp_path, machine):
-    """Our own daemon holds the port too, and killing it is right once the caller's connects have missed."""
+def test_free_ports_does_not_kill_a_daemon_that_stopped_answering(tmp_path, machine):
     config = make_config(tmp_path)
-    box = machine({601: "/opt/homebrew/bin/soulseek-rs daemon"}, {config.soulseek_listen_port: [601]})
-    said = []
+    box = machine({601: "/opt/homebrew/bin/soulseek-rs daemon"},
+                  {config.soulseek_listen_port: [601]})
 
-    stopped = slsk.free_ports(config, log=said.append)
+    with pytest.raises(slsk.PortBusy):
+        slsk.free_ports(config, log=lambda _line: None)
 
-    assert stopped == [601]
-    assert box.alive == set()
-    assert said == [f"stopped the Soulseek daemon that stopped answering port "
-                    f"{config.soulseek_listen_port} (pid 601)"]
+    assert box.alive == {601}
+    assert box.signalled == []
 
 
-def test_free_ports_leaves_a_stranger_holding_the_port_alone(tmp_path, machine):
-    """Anything else on the port is named and left alone: this is not the place to kill a stranger."""
+def test_free_ports_reports_a_stranger_without_signalling_it(tmp_path, machine):
     config = make_config(tmp_path)
     box = machine({600: "/usr/local/bin/some-other-server --port 20000"},
                   {config.soulseek_listen_port: [600]})
-    said = []
 
-    stopped = slsk.free_ports(config, log=said.append)
+    with pytest.raises(slsk.PortBusy):
+        slsk.free_ports(config, log=lambda _line: None)
 
-    assert stopped == []
+    assert box.alive == {600}
     assert box.signalled == []
-    assert said == [f"port {config.soulseek_listen_port} is held by another process (pid 600) — left alone"]
 
 
-def test_a_squatter_that_will_not_go_is_a_port_busy(tmp_path, machine):
+def test_a_squatter_remains_running_when_the_port_is_busy(tmp_path, machine):
     box = machine({502: "sldl"})
-    box.will_not_go = {502}
 
-    with pytest.raises(slsk.PortBusy, match="502"):
+    with pytest.raises(slsk.PortBusy):
         slsk.free_ports(make_config(tmp_path), log=lambda _line: None)
 
-    assert [number for _, number in box.signalled] == [signal.SIGTERM, signal.SIGKILL]
+    assert box.alive == {502}
+    assert box.signalled == []

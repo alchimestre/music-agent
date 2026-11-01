@@ -10,9 +10,11 @@ here, and report what it said. Nothing about Traktor is decided in this repo.
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
+from dataclasses import dataclass
 
 from .config import Config
 
@@ -28,9 +30,58 @@ class Failed(RuntimeError):
 def command(config: Config) -> list[str] | None:
     """The tool's argv, or None when it is not installed here."""
     argv = list(config.traktor_command)
-    if not argv or shutil.which(argv[0]) is None:
+    if not argv:
         return None
-    return argv
+    executable = shutil.which(argv[0])
+    if executable is None and argv == ["traktor-nml"]:
+        try:
+            from .resources import bundled_executable
+
+            bundled = bundled_executable("traktor-nml")
+            executable = str(bundled) if bundled is not None else None
+        except (ImportError, AttributeError, OSError):
+            executable = None
+    if executable is None:
+        return None
+    return [executable, *argv[1:]]
+
+
+@dataclass(frozen=True)
+class Plan:
+    destination: str
+    changes: str
+    requires_confirmation: bool
+
+
+def destination(config: Config) -> str:
+    """A stable identity for the collection the configured command points at."""
+    return json.dumps(list(config.traktor_command), separators=(",", ":"))
+
+
+def plan(config: Config) -> Plan | None:
+    """Run the external planner without applying its changes."""
+    argv = command(config)
+    if argv is None:
+        return None
+    ok, changes = _run(argv, "plan")
+    if not ok:
+        raise Failed(f"plan failed · {changes}")
+    return Plan(
+        destination=destination(config),
+        changes=changes,
+        requires_confirmation=not nothing_to_do(changes),
+    )
+
+
+def apply(config: Config) -> str:
+    """Apply the external plan; its own tool owns the backup and running-app checks."""
+    argv = command(config)
+    if argv is None:
+        raise Missing("traktor-nml is not installed on this machine")
+    ok, said = _run(argv, "apply")
+    if not ok:
+        raise Failed(f"apply failed · {said}")
+    return said
 
 
 def _run(argv: list[str], verb: str, timeout: float = 900.0) -> tuple[bool, str]:
@@ -55,27 +106,17 @@ def nothing_to_do(plan: str) -> bool:
 
 
 def sync(config: Config, *, log=print) -> str | None:
-    """Plan, apply if the plan changes anything, and report both.
-
-    Returns what the tool said about the plan, or None when it is not installed. Raises `Failed` when the
-    tool exits nonzero, which is how it refuses — Traktor being open, a missing collection. Traktor's own
-    step is left to the person: the tracks it added have not been analyzed yet.
-    """
-    argv = command(config)
-    if argv is None:
+    """Preserve the CLI's plan-then-apply behavior."""
+    planned = plan(config)
+    if planned is None:
         log("traktor: not installed on this machine — its collection is untouched")
         return None
 
-    ok, plan = _run(argv, "plan")
-    log("traktor: " + plan.replace("\n", "\n         "))
-    if not ok:
-        raise Failed(f"plan failed · {plan}")
-    if nothing_to_do(plan):
-        return plan
+    log("traktor: " + planned.changes.replace("\n", "\n         "))
+    if not planned.requires_confirmation:
+        return planned.changes
 
-    ok, said = _run(argv, "apply")
+    said = apply(config)
     log("traktor: " + said.replace("\n", "\n         "))
-    if not ok:
-        raise Failed(f"apply failed · {said}")
     log("traktor: open Traktor and run Check Consistency → Analyze for the tracks it added")
-    return plan
+    return planned.changes

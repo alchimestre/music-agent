@@ -69,6 +69,4 @@ soulseek_user       = "SLSK_USERNAME"
 soulseek_password   = "SLSK_PASSWORD"
 
 [tools]
-# Both ship with the project; set either to use another build.
-# convert   = "tools/convert_to_aiff.sh"
 # normalize = "vendor/loudness_normalizer/loudness_normalizer.py"

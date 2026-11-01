@@ -132,3 +132,15 @@ def stop_named(names: tuple[str, ...], *, log=print) -> list[int]:
             + (f" — {stubborn} would not go" if stubborn else ""))
         return found
     return []
+
+
+def stop_owned(process: subprocess.Popen, *, grace: float = GRACE) -> None:
+    """Stop a child this process started, through its handle rather than a pid lookup."""
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()

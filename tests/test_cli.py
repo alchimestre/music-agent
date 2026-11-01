@@ -13,7 +13,7 @@ from audio_files import aiff
 from music_agent import acquire
 from music_agent import cli as cli_module
 from music_agent import config as config_module
-from music_agent import exporting, lanes, library, playlists, slsk, state, sweep
+from music_agent import deezer, exporting, lanes, library, playlists, slsk, spotify, state, sweep, youtube
 from music_agent.cli import main
 from fake_server import Direct
 from music_agent.rules import Candidate
@@ -613,7 +613,7 @@ def test_a_playlist_url_starts_the_run_a_file_would_have(tmp_path, monkeypatch):
     """2026-10-13: a playlist url is passed the same way a file is. So `--tracks` takes both, and what a
     file's stem gave the run a playlist's own name gives it."""
     config = config_module.load(make_paths_config(tmp_path))
-    monkeypatch.setattr(cli_module.spotify, "playlist",
+    monkeypatch.setattr(spotify, "playlist",
                         lambda source, timeout=None: playlists.Playlist(
                             name="Rock Classics",
                             lines=("Kiasmos - Blurred", "Ntogn - Ame No Hi (Original Mix)")))
@@ -630,7 +630,7 @@ def test_a_deezer_share_link_starts_the_run_a_spotify_url_would_have(tmp_path, m
     """The second source is read by the same command, and reaches a run the same way. A share link is what a
     phone hands over, and it carries no id at all — the reader is the one that resolves it."""
     config = config_module.load(make_paths_config(tmp_path))
-    monkeypatch.setattr(cli_module.deezer, "playlist",
+    monkeypatch.setattr(deezer, "playlist",
                         lambda source, timeout=None: playlists.Playlist(
                             name="01", lines=("Massive Attack - Teardrop",)))
 
@@ -646,7 +646,7 @@ def test_a_youtube_playlist_url_starts_the_run_a_spotify_url_would_have(tmp_path
     """The third source reaches a run the same way, whichever of the two link forms it is given: the list id
     is what a run reads, and it is the same in both."""
     config = config_module.load(make_paths_config(tmp_path))
-    monkeypatch.setattr(cli_module.youtube, "playlist",
+    monkeypatch.setattr(youtube, "playlist",
                         lambda source, timeout=None: playlists.Playlist(
                             name="Couscoussière", lines=("Tangerine Dream - Stratosfear",)))
 
@@ -678,7 +678,7 @@ def test_a_playlist_that_cannot_be_read_starts_nothing(tmp_path, monkeypatch, ca
     def refuse(source, timeout=None):
         raise playlists.PlaylistError("Spotify answered 400 for /api/token: Unauthorized request")
 
-    monkeypatch.setattr(cli_module.spotify, "playlist", refuse)
+    monkeypatch.setattr(spotify, "playlist", refuse)
 
     assert cli_module._start(config, Namespace(
         tracks="https://open.spotify.com/playlist/37i9dQZF1DWXRqgorJj26U", name=None)) is None

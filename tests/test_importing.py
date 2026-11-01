@@ -175,8 +175,9 @@ def test_bpm_and_key_are_never_written(tmp_path):
 def test_one_commit_covers_every_addition_in_a_run(tmp_path):
     """One batch commit rather than one per track. Three additions are one commit, not three."""
     config = make_config(tmp_path)
-    job = job_with(config, [tagged(tmp_path, 1, "One.aiff"), tagged(tmp_path, 2, "Two.aiff"),
-                            tagged(tmp_path, 3, "Three.aiff")])
+    job = job_with(config, [tagged(tmp_path, 1, "One.aiff", title="One"),
+                            tagged(tmp_path, 2, "Two.aiff", title="Two"),
+                            tagged(tmp_path, 3, "Three.aiff", title="Three")])
     database = FakeDatabase()
 
     summary = importing.run(config, job, db=database, backup_first=False, log=quiet)

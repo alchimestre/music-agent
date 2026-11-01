@@ -7,6 +7,7 @@ fingerprint is of the file as downloaded. Lossy files are never converted; both 
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -194,23 +195,77 @@ def apply_genre(record: state.Record, found: identify.Identified, tools: Tools, 
 
 
 def convert(config: Config, source: Path, *, run: Runner, log) -> Path:
-    """Run the canonical converter over one file, in a directory of its own.
+    """Convert one lossless source without exposing partial output or losing the download."""
+    produced = source.with_suffix(".aiff")
+    if produced.exists():
+        raise ProcessError(f"conversion output already exists: {produced}")
 
-    The script converts everything it finds in the directory it is given, so it is handed a pen holding
-    exactly this file. It deletes its input on success; on failure the input is put back, because the script
-    does not always survive to clean up after itself.
-    """
-    with tempfile.TemporaryDirectory(prefix="music-agent-convert-") as pen:
-        parked = Path(pen) / source.name
-        shutil.move(str(source), parked)
-        result = run([str(config.convert_tool), pen, str(source.parent)])
-        produced = source.parent / f"{parked.stem}.aiff"
-        if result.returncode != 0 or not produced.is_file():
-            if parked.exists():
-                shutil.move(str(parked), source)
+    with tempfile.TemporaryDirectory(prefix="music-agent-convert-", dir=source.parent) as folder:
+        temporary = Path(folder) / "converted.aiff"
+        result = run(_ffmpeg_command(config.ffmpeg, source, temporary, video_codec="copy"))
+        if result.returncode != 0:
+            temporary.unlink(missing_ok=True)
+            result = run(_ffmpeg_command(config.ffmpeg, source, temporary, video_codec="png"))
+        if result.returncode != 0 and "Invalid UTF8" in (result.stderr or ""):
+            temporary.unlink(missing_ok=True)
+            result = run(_ffmpeg_command(
+                config.ffmpeg, source, temporary, video_codec="png", preserve_metadata=False,
+            ))
+        if result.returncode != 0 or not temporary.is_file():
             raise ProcessError(f"conversion failed: {_failure_detail(result)}")
-        log(f"      converted to {produced.name}")
-        return produced
+        try:
+            _promote_conversion(temporary, produced)
+        except FileExistsError as error:
+            raise ProcessError(f"conversion output already exists: {produced}") from error
+        except OSError as error:
+            raise ProcessError(f"cannot promote converted file: {error}") from error
+        try:
+            source.unlink()
+        except OSError as error:
+            try:
+                produced.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                raise ProcessError(
+                    f"cannot remove converted source: {source}; cannot clean {produced}: {cleanup_error}"
+                ) from error
+            raise ProcessError(f"cannot remove converted source: {source}") from error
+
+    log(f"      converted to {produced.name}")
+    return produced
+
+
+def _ffmpeg_command(
+    ffmpeg: str,
+    source: Path,
+    output: Path,
+    *,
+    video_codec: str,
+    preserve_metadata: bool = True,
+) -> list[str]:
+    command = [
+        str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
+        "-map", "0", "-c:a", "pcm_s16be", "-ar", "44100", "-c:v", video_codec,
+    ]
+    if preserve_metadata:
+        command.extend(["-map_metadata", "0"])
+    else:
+        stem = source.stem
+        artist, separator, title = stem.partition(" - ")
+        if not separator:
+            artist, title = "Unknown Artist", stem
+        command.extend([
+            "-map_metadata", "-1", "-metadata", f"artist={artist}", "-metadata", f"title={title}",
+        ])
+    command.extend(["-write_id3v2", "1", "-id3v2_version", "3", str(output)])
+    return command
+
+
+def _promote_conversion(temporary: Path, produced: Path) -> None:
+    if os.name == "nt":
+        os.rename(temporary, produced)
+    else:
+        # POSIX rename replaces an existing file; os.link refuses it atomically.
+        os.link(temporary, produced)
 
 
 def discard(record: state.Record) -> Path:
@@ -224,9 +279,9 @@ def discard(record: state.Record) -> Path:
     return source
 
 
-def decodable(source: Path, *, run: Runner) -> bool:
-    """Whether ffmpeg can open the file at all, before anything is spent converting it."""
-    result = run(["ffprobe", "-v", "error", "-show_entries", "format=format_name",
+def decodable(config: Config, source: Path, *, run: Runner) -> bool:
+    """Whether ffprobe can open the file at all, before anything is spent converting it."""
+    result = run([str(config.ffprobe), "-v", "error", "-show_entries", "format=format_name",
                   "-of", "csv=p=0", str(source)])
     return result.returncode == 0 and bool((result.stdout or "").strip())
 
@@ -236,11 +291,9 @@ def place(config: Config, record: state.Record, *, run: Runner, log) -> Path:
     source = Path(record.local_path)
     if not source.is_file():
         raise ProcessError(f"the staged file is gone: {source}")
-    if not decodable(source, run=run):
-        # A peer that delivers something the decoder cannot open has delivered nothing. Caught before the
-        # converter so the failure is the file's, not the tool's: a failed conversion keeps its download
-        # (the converter deletes its input), which left a corrupt .flac in staging with a record pointing at
-        # it and no pass that would ever look again.
+    if not decodable(config, source, run=run):
+        # A decoder failure means this is not audio the pipeline can place. Catch it before conversion so the
+        # unreadable-download path removes it instead of retaining a file no stage can use.
         raise Unreadable(f"the file is not audio ffmpeg can read: {source.name}")
 
     suffix = source.suffix.lower()

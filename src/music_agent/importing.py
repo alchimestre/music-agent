@@ -7,6 +7,7 @@ the MCP, which buys one batch commit and one backup per run.
 
 from __future__ import annotations
 
+import os
 import shutil
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -51,6 +52,42 @@ class Summary:
         return " · ".join(parts)
 
 
+@dataclass
+class ImportPlan:
+    destination: str
+    fingerprint: tuple[tuple[str, int | None, int | None], ...]
+    added: list[int] = field(default_factory=list)
+    repointed: list[int] = field(default_factory=list)
+    already: list[int] = field(default_factory=list)
+    failed: dict[int, str] = field(default_factory=dict)
+
+    @property
+    def requires_confirmation(self) -> bool:
+        return bool(self.added or self.repointed)
+
+    def report(self) -> str:
+        parts = []
+        for count, label in (
+            (len(self.repointed), "to repoint"),
+            (len(self.added), "to add"),
+            (len(self.already), "already present"),
+            (len(self.failed), "unsupported or missing"),
+        ):
+            if count:
+                parts.append(f"{count} {label}")
+        return " · ".join(parts) or "no tagged files"
+
+
+def delivery_records(job: state.Job) -> list[state.Record]:
+    """One record per work: a work downloaded once is delivered once, however many memberships asked."""
+    eligible = {state.TAGGED, state.IMPORTED, state.FOUND_IN_LIBRARY}
+    try:
+        records = job.execution().records()
+    except AttributeError:
+        records = job.records()
+    return [record for record in records if record.status in eligible]
+
+
 def is_running() -> bool:
     """Whether rekordbox is up, asked the same way pyrekordbox asks before it refuses to commit."""
     from pyrekordbox.utils import get_rekordbox_pid
@@ -87,6 +124,66 @@ def database_path(db) -> Path | None:
     except Exception:
         return None
     return Path(found) if found else None
+
+
+def plan(config: Config, job: state.Job) -> ImportPlan:
+    """Read the collection and describe this job's actionable files without committing."""
+    if is_running():
+        raise NotClosed("rekordbox is running — close it before reviewing or importing tracks")
+
+    with database(config) as db:
+        source = database_path(db)
+        if source is None:
+            raise ImportFailed("pyrekordbox did not report the master database path")
+        planned = ImportPlan(str(source), _collection_fingerprint(source))
+        known_paths = _known_paths(db.get_content())
+        for record in delivery_records(job):
+            path = Path(record.local_path)
+            if not path.is_file():
+                planned.failed[record.idx] = f"the file is gone: {path}"
+                continue
+            if path.suffix.lower() not in COLLECTION_FORMATS:
+                planned.failed[record.idx] = (
+                    f"the collection cannot point at {path.suffix.lower() or 'an extensionless file'}"
+                )
+                continue
+            if _path_key(path) in known_paths:
+                planned.already.append(record.idx)
+                continue
+            replaced = Path(record.replaces) if record.replaces else None
+            if replaced is not None and _path_key(replaced) == _path_key(path):
+                planned.failed[record.idx] = "the row already points at this file"
+                continue
+            if replaced is not None and _path_key(replaced) in known_paths:
+                planned.repointed.append(record.idx)
+                continue
+            planned.added.append(record.idx)
+        return planned
+
+
+def _path_key(path: Path) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _known_paths(rows) -> set[str]:
+    return {
+        _path_key(Path(row.FolderPath))
+        for row in rows
+        if getattr(row, "FolderPath", None)
+    }
+
+
+def _collection_fingerprint(source: Path) -> tuple[tuple[str, int | None, int | None], ...]:
+    fingerprint = []
+    for suffix in ("", "-wal", "-shm"):
+        path = Path(f"{source}{suffix}")
+        try:
+            details = path.stat()
+        except OSError:
+            fingerprint.append((suffix, None, None))
+        else:
+            fingerprint.append((suffix, details.st_size, details.st_mtime_ns))
+    return tuple(fingerprint)
 
 
 def backup(db) -> Path | None:
@@ -212,19 +309,27 @@ def repoint(db, record: state.Record, log) -> bool:
     return True
 
 
-def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=print) -> Summary:
+def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=print,
+        record_indices: set[int] | list[int] | tuple[int, ...] | None = None,
+        stop_mcp: bool = True) -> Summary:
     """Every tagged track into the collection, behind one backup and two commits — see the comment on the
     first commit for why the upgrades and the additions cannot share one."""
     # A `rekordbox-mcp` another harness left running is a second writer on this file. It is that harness's
     # child and is restarted when it is wanted, so it goes rather than being asked about.
-    processes.stop_named(("rekordbox-mcp",), log=log)
+    if stop_mcp:
+        processes.stop_named(("rekordbox-mcp",), log=log)
 
     if is_running():
         raise NotClosed("rekordbox is running, and pyrekordbox will not commit while it is — close it, "
                         "then run this again")
 
     records = job.records()
-    tagged = [record for record in records if record.status == state.TAGGED]
+    if record_indices is None:
+        tagged = [record for record in records if record.status == state.TAGGED]
+    else:
+        selected = set(record_indices)
+        eligible = {state.TAGGED, state.IMPORTED, state.FOUND_IN_LIBRARY}
+        tagged = [record for record in records if record.idx in selected and record.status in eligible]
     summary = Summary()
     if not tagged:
         log("nothing to import: no track in this run has been tagged yet")

@@ -13,26 +13,45 @@ dependencies = [
     "musicbrainzngs==0.7.1",
     "pyrekordbox==0.4.3",
     "mutagen",
-    # Identification by sound: pyacoustid fingerprints through the `fpcalc` binary (chromaprint), which is
-    # not a Python package and has to be installed separately.
     "pyacoustid",
+    "filelock==4.2.6",
+    "platformdirs==4.14.2",
+    # The cipher behind the rekordbox database: the integration cannot open the collection without it.
+    "sqlcipher3-wheels==0.5.7",
+]
+
+[project.optional-dependencies]
+desktop = [
+    "PySide6==6.12.0",
+    "keyring==25.7.0",
 ]
 
 [project.scripts]
 music-agent = "music_agent.cli:main"
+music-agent-desktop = "music_agent.desktop:main"
 
 [project.urls]
 Repository = "https://github.com/alchimestre/music-agent"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.33.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/music_agent"]
 
+# The Windows release build: PySide6's supported deployment wrapper, which compiles with Nuitka. The
+# executables staged beside the build by `packaging/windows/stage.py` are copied in afterwards.
+[tool.pyside6.deploy]
+title = "music-agent"
+input_file = "src/music_agent/desktop.py"
+exec_directory = "build/windows"
+mode = "standalone"
+extra_args = "--quiet --noinclude-qt-translations=True"
+
 [dependency-groups]
 dev = ["pytest>=8"]
+windows-build = ["Nuitka==4.1.1"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

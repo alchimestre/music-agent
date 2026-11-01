@@ -1,16 +1,15 @@
-"""The job: a directory per run, holding the canonical per-track record.
+"""The job: one submission over the canonical SQLite state, with derived JSONL files for readers.
 
-`.state/jobs/<job-id>/` holds `tracks.jsonl` (one JSON object per track, rewritten whole — it stays small),
-`events.jsonl` and `current_status.md`. Verdicts are never stored: they are computed from the candidate
-facts by `rules`, so a job replayed tomorrow is judged by the rule as it stands then.
+`state.sqlite3` holds jobs, ordered memberships, shared work, events and deliveries. Each job directory keeps
+`tracks.jsonl` and `events.jsonl` as atomic projections for external consumers, and `current_status.md` as a
+human report. Verdicts are never stored: they are computed from the candidate facts by `rules`, so a job
+replayed tomorrow is judged by the rule as it stands then.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
-import threading
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -71,6 +70,12 @@ def ungenred_names(jobs: Iterable[Job]) -> dict[str, int]:
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _jsonl(path: Path) -> list[dict]:
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 # The three facts a run reads off the two files it owns. Each takes the snapshot it is given rather than
@@ -166,9 +171,6 @@ class Job:
 
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
-        # A pass works on several tracks at once, so the two files a run owns are written under one lock
-        # rather than trusting to luck.
-        self._lock = threading.Lock()
 
     @property
     def id(self) -> str:
@@ -187,46 +189,40 @@ class Job:
         return self.root / STATUS
 
     def records(self) -> list[Record]:
-        if not self.tracks_path.is_file():
-            return []
-        found = []
-        for line in self.tracks_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line:
-                found.append(Record.from_json(json.loads(line)))
-        return found
+        from . import store
+
+        if store.job_exists(self.root.parent, self.id):
+            return [Record.from_json(data) for data in store.job_records(self.root.parent, self.id)]
+        return [Record.from_json(data) for data in _jsonl(self.tracks_path)]
 
     def write_records(self, records: list[Record]) -> None:
-        """Rewrite the whole file atomically, from a snapshot taken under the lock.
+        from . import store
 
-        Several passes write records from thread pools, so a snapshot taken outside the lock can be stale
-        by the time it lands and silently revert another thread's update.
-        """
-        with self._lock:
-            for attempt in range(3):
-                # Workers append to their own records without this lock, and `asdict` walking a list that
-                # grew under it raises; one retry is enough to read a quiet list.
-                try:
-                    lines = [json.dumps(record.to_json(), ensure_ascii=False) for record in records]
-                    break
-                except RuntimeError:
-                    if attempt == 2:
-                        raise
-            temporary = self.tracks_path.with_suffix(".tmp")
-            temporary.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
-            os.replace(temporary, self.tracks_path)
+        store.write_records(self.root.parent, self.id, [record.to_json() for record in records])
 
     def append_event(self, event: str, **fields) -> None:
+        from . import store
+
         entry = {"ts": _now(), "event": event}
         entry.update(fields)
-        with self._lock, self.events_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        store.append_event(self.root.parent, self.id, entry)
 
     def events(self) -> list[dict]:
-        if not self.events_path.is_file():
-            return []
-        return [json.loads(line) for line in self.events_path.read_text(encoding="utf-8").splitlines()
-                if line.strip()]
+        from . import store
+
+        if store.job_exists(self.root.parent, self.id):
+            return store.job_events(self.root.parent, self.id)
+        return _jsonl(self.events_path)
+
+    def work_id(self, idx: int) -> str:
+        """The immutable canonical work this membership points at."""
+        from . import store
+
+        return store.work_id(self.root.parent, self.id, idx)
+
+    def execution(self) -> ExecutionJob:
+        """The view a pass schedules: one representative record per shared work item."""
+        return ExecutionJob(self)
 
     def searched(self) -> set[int]:
         """The tracks a pass has actually asked the network about.
@@ -281,6 +277,55 @@ class Job:
         ]
         lines += [f"{name}: {count}" for name, count in sorted(counts.items())] or ["nothing yet"]
         self.status_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _pass_order(record: Record) -> tuple[int, int]:
+    """Prefer a membership still worth working on over one a person passed over."""
+    return (0 if record.decision in (UNDECIDED, ACCEPTED) else 1, record.idx)
+
+
+class ExecutionJob:
+    """A job as a pass sees it: one record per shared work item, writes folded back onto every membership.
+
+    A submission may hold the same work twice. A pass must not fetch it twice, so it schedules the
+    representative; the other memberships stay in the job and read the shared work state written here.
+    """
+
+    def __init__(self, job: Job) -> None:
+        self.base = job
+
+    def __getattr__(self, name: str):
+        return getattr(self.base, name)
+
+    def records(self) -> list[Record]:
+        from . import store
+
+        mapping = store.work_ids(self.base.root.parent, self.base.id)
+        chosen: dict[object, Record] = {}
+        for record in self.base.records():
+            work_id = mapping.get(record.idx, record.idx)
+            current = chosen.get(work_id)
+            if current is None or _pass_order(record) < _pass_order(current):
+                chosen[work_id] = record
+        return sorted(chosen.values(), key=lambda record: record.idx)
+
+    def write_records(self, records: list[Record]) -> None:
+        """Write the pass's representatives, then settle still-open duplicates of the same work."""
+        from . import store
+
+        self.base.write_records(records)
+        mapping = store.work_ids(self.base.root.parent, self.base.id)
+        decisions = {mapping.get(record.idx, record.idx): record.decision
+                     for record in records if record.decided()}
+        if not decisions:
+            return
+        siblings = [record for record in self.base.records()
+                    if not record.decided() and mapping.get(record.idx, record.idx) in decisions]
+        if not siblings:
+            return
+        for record in siblings:
+            record.decision = decisions[mapping.get(record.idx, record.idx)]
+        self.base.write_records(siblings)
 
 
 @dataclass
@@ -347,22 +392,47 @@ def queue(job: Job) -> Queue:
     return _queue_of(job.records(), job.searched())
 
 
-def create(config: Config, name: str) -> Job:
+def create(config: Config, name: str, records: list[Record] | None = None) -> Job:
     """Start a run. The id leads with a UTC stamp, so the newest run is the last one sorted."""
+    from . import store
+
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "run"
-    job = Job(config.state_root / f"{stamp}-{slug}")
+    with store.writer_lock(config.state_root):
+        job = _new_job(config.state_root, f"{stamp}-{slug}")
+        try:
+            store.admit_submission(config.state_root, job.id, list(records or []), name=name)
+        except BaseException:
+            try:
+                job.root.rmdir()     # only if admission left it empty; a committed job keeps its files
+            except OSError:
+                pass
+            raise
+    return job
+
+
+def _new_job(state_root: Path, job_id: str) -> Job:
+    """A run id nothing holds: enqueueing twice in the same second adds a suffix instead of failing."""
+    from . import store
+
+    candidate = job_id
+    suffix = 2
+    while (state_root / candidate).exists() or store.job_exists(state_root, candidate):
+        candidate = f"{job_id}-{suffix}"
+        suffix += 1
+    job = Job(state_root / candidate)
     job.root.mkdir(parents=True, exist_ok=False)
-    job.tracks_path.touch()
-    job.events_path.touch()
-    job.append_event("created", name=name)
     return job
 
 
 def all_jobs(config: Config) -> list[Job]:
+    from . import store
+
     if not config.state_root.is_dir():
         return []
-    return [Job(path) for path in sorted(config.state_root.iterdir()) if path.is_dir()]
+    ids = {path.name for path in config.state_root.iterdir() if path.is_dir()}
+    ids.update(store.job_ids(config.state_root))
+    return [Job(config.state_root / job_id) for job_id in sorted(ids)]
 
 
 def newest_unfinished(config: Config) -> Job | None:

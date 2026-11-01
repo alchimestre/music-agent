@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 
-from . import peers, progress, reference, rules, slsk, state
+from . import peers, progress as progress_bar, reference, rules, slsk, state, store
 from .config import Config
 from .lanes import Held
 from .library import Library
@@ -89,6 +89,7 @@ class Move(Enum):
     ROTATE = "rotate"       # give up on this candidate; another may be better
     DONE = "done"
     FAILED = "failed"
+    INTERRUPTED = "interrupted"   # the caller stopped the pass; the transfer stays resumable
 
 
 @dataclass(frozen=True)
@@ -246,6 +247,7 @@ class Outcome(Enum):
     IN_REVIEW = "in_review"
     NOTHING_USABLE = "nothing_usable"
     FAILED = "failed"
+    INTERRUPTED = "interrupted"
 
 
 @dataclass
@@ -259,6 +261,7 @@ class Summary:
     in_review: list[int] = field(default_factory=list)
     nothing_usable: list[int] = field(default_factory=list)
     failed: list[int] = field(default_factory=list)
+    interrupted: list[int] = field(default_factory=list)  # the caller stopped; the transfer resumes later
     unsearched: list[int] = field(default_factory=list)   # the network stopped answering
     dropped: list[int] = field(default_factory=list)      # every candidate refused, nothing left to try
     # The peers this pass put on the ignore list, by name: a run that silences three mirrors should say so.
@@ -286,6 +289,8 @@ class Summary:
             parts.append(f"{len(self.ignored)} peers ignored — music-agent peers lists them")
         if self.failed:
             parts.append(f"{len(self.failed)} to retry")
+        if self.interrupted:
+            parts.append(f"{len(self.interrupted)} interrupted")
         if self.unsearched:
             parts.append(f"{len(self.unsearched)} not searched — the daemon had stopped answering")
         return " · ".join(parts)
@@ -438,9 +443,17 @@ def await_transfer(
     log,
     sleep,
     clock,
+    stop_event=None,
+    on_progress=None,
+    on_start=None,
+    idx: int | None = None,
 ) -> tuple[Move, str, Transfer]:
     """Take one candidate as far as it goes. Returns how it ended, where the file is, and what the daemon
-    last said about it — the last of those is what the peer's own failure is read from."""
+    last said about it — the last of those is what the peer's own failure is read from.
+
+    A caller that stops the pass is not an error: the transfer is left where the daemon holds it, so the
+    next pass asks the same peer to resume from the bytes already on disk.
+    """
     payload = daemon.download(
         candidate.user,
         candidate.path,
@@ -456,11 +469,20 @@ def await_transfer(
     local_path = report.local_path
     log(f"      asking {candidate.user} for {candidate.name}")
     key = (candidate.user, candidate.path)
+    row = _progress_row(idx, candidate, report)
+    if on_start is not None:
+        on_start(row)
+    if on_progress is not None:
+        on_progress(row)
+    if stop_event is not None and stop_event.is_set():
+        return Move.INTERRUPTED, local_path, report
 
     last_bytes = 0
     last_change = clock()
     started = last_change
     while True:
+        if stop_event is not None and stop_event.is_set():
+            return Move.INTERRUPTED, local_path, report
         stuck_for = clock() - last_change
         on_disk = bool(local_path) and Path(local_path).is_file()
         decision = move(report, on_disk=on_disk, stuck_for=stuck_for, elapsed=clock() - started)
@@ -478,9 +500,26 @@ def await_transfer(
             return Move.FAILED, local_path, Transfer(status="missing", local_path=local_path)
         report = transfer_of(current)
         local_path = report.local_path or local_path
+        if on_progress is not None:
+            on_progress(_progress_row(idx, candidate, report))
         if report.received_bytes > last_bytes:
             last_bytes = report.received_bytes
             last_change = clock()
+
+
+def _progress_row(idx: int | None, candidate: Candidate, report: Transfer) -> dict:
+    total = report.total_bytes
+    return {
+        "idx": idx,
+        "peer": candidate.user,
+        "remote_file": candidate.path,
+        "local_path": report.local_path,
+        "status": report.status,
+        "received_bytes": report.received_bytes,
+        "total_bytes": total,
+        "progress": report.received_bytes / total if total else None,
+        "queue_position": report.queue or None,
+    }
 
 
 def give_up(daemon: Daemon, candidate: Candidate, log) -> None:
@@ -604,9 +643,13 @@ class Pass:
 
     def __init__(self, config: Config, job: state.Job, daemon: Daemon, lookup: Lookup, *,
                  library: Library | None = None, log=print, sleep=None,
-                 clock=time.monotonic, retry: bool = False) -> None:
+                 clock=time.monotonic, retry: bool = False, stop_event=None,
+                 pause_event=None, progress=None) -> None:
         self.job = job
         self.daemon = daemon
+        self.stop_event = stop_event
+        self.pause_event = pause_event
+        self.progress = progress
         # MusicBrainz's rate limiter is a module global inside `musicbrainzngs`, and their policy asks for
         # one request a second, so lookups queue here rather than race inside a library not written for it.
         self.lookup = one_at_a_time(lookup)
@@ -629,8 +672,20 @@ class Pass:
         return sorted(self.ledger.ignored())
 
     def stopped(self) -> bool:
-        """Whether the daemon can still answer, so nothing more should be asked of it."""
-        return self.watch.dead.is_set() or self.watch.session_lost
+        """Whether nothing more should be asked of the daemon: it died, lost the session, or was stopped."""
+        return self.watch.dead.is_set() or self.watch.session_lost or self.stop_requested()
+
+    def stop_requested(self) -> bool:
+        return self.stop_event is not None and self.stop_event.is_set()
+
+    def paused(self) -> bool:
+        return self.pause_event is not None and self.pause_event.is_set()
+
+    def wait_unpaused(self) -> bool:
+        """Hold a new request while the queue is paused; False when the caller stopped the pass."""
+        while self.paused() and not self.stop_requested():
+            time.sleep(0.02)
+        return not self.stop_requested()
 
     def attempt(self, record: state.Record) -> Outcome:
         """Acquire one track. Returns which of the summary's lists it belongs in."""
@@ -639,6 +694,8 @@ class Pass:
         watch, pacer, ledger = self.watch, self.pacer, self.ledger
         ignored = self.summary.ignored
         later_pass = self.retry or bool(record.candidates)
+        if not self.wait_unpaused():
+            return Outcome.INTERRUPTED
         if record.decided():
             # GLOSSARY.md: a settled track is not asked about again — that is the whole of what the decision
             # axis means — so a pass leaves it alone rather than spending a search to re-open the question.
@@ -717,14 +774,28 @@ class Pass:
             return Outcome.IN_REVIEW if record.usable() else Outcome.NOTHING_USABLE
 
         for candidate in queue[:MAX_CANDIDATES]:
+            if not self.wait_unpaused():
+                job.append_event("interrupted", idx=record.idx)
+                return Outcome.INTERRUPTED
             if ledger is not None and ledger.ignores(candidate.user):
                 # Banned by an earlier file of its own in this same pass: the rest of its offers are the same
                 # question, already answered.
                 silenced += 1
                 continue
             record.tried.append(identifier(candidate))
-            decision, local_path, report = await_transfer(daemon, candidate, log=log, sleep=sleep,
-                                                          clock=clock)
+
+            def started(row: dict) -> None:
+                job.append_event("transfer_started", idx=record.idx, peer=candidate.user,
+                                 remote_file=candidate.path, local_path=row["local_path"])
+
+            decision, local_path, report = await_transfer(
+                daemon, candidate, log=log, sleep=sleep, clock=clock,
+                stop_event=self.stop_event, on_progress=self.progress, on_start=started,
+                idx=record.idx)
+            if decision is Move.INTERRUPTED:
+                job.append_event("interrupted", idx=record.idx)
+                log(f"[{record.idx}] {record.label}: stopped — {candidate.user} keeps the transfer")
+                return Outcome.INTERRUPTED
 
             if decision is Move.DONE:
                 if ledger is not None:
@@ -780,6 +851,30 @@ def one_at_a_time(lookup: Lookup) -> Lookup:
     return Serialised()
 
 
+def _drain(pool: ThreadPoolExecutor, work, schedule: list[state.Record], limit: int) -> None:
+    """Run the schedule with at most `limit` tracks in flight, so a stopped pass stops submitting."""
+    records = iter(schedule)
+    pending = {}
+
+    def submit_next() -> bool:
+        try:
+            record = next(records)
+        except StopIteration:
+            return False
+        pending[pool.submit(work, record)] = record
+        return True
+
+    for _ in range(limit):
+        if not submit_next():
+            break
+    while pending:
+        finished, _ = wait(pending, return_when=FIRST_COMPLETED)
+        for future in finished:
+            future.result()
+            pending.pop(future)
+            submit_next()
+
+
 def run(
     config: Config,
     job: state.Job,
@@ -792,6 +887,9 @@ def run(
     clock=time.monotonic,
     retry: bool = False,
     stream=None,
+    stop_event=None,
+    pause_event=None,
+    progress=None,
 ) -> Summary:
     """The whole pass: every record the job holds, `workers` of them at a time, writing as it goes.
 
@@ -807,7 +905,7 @@ def run(
     # Only the order the pass works through is sorted; the records are written back as they were read, so the
     # file a person opens stays in track order and a run does not churn it every pass.
     schedule = sorted(records, key=lambda record: (record.idx in asked, record.idx))
-    bar = progress.Bar(len(schedule), log=log, stream=stream)
+    bar = progress_bar.Bar(len(schedule), log=log, stream=stream)
     unsearched: list[int] = []
 
     # One track's story stays readable while others are running, so lines are printed under the bar's lock.
@@ -815,7 +913,8 @@ def run(
         bar.say(line)
 
     pass_ = Pass(config, job, daemon, lookup, library=library, log=say, sleep=sleep,
-                 clock=clock, retry=retry)
+                 clock=clock, retry=retry, stop_event=stop_event, pause_event=pause_event,
+                 progress=progress)
     summary = pass_.summary
     already_ignored = pass_.ignored_peers()
     if already_ignored:
@@ -851,8 +950,14 @@ def run(
             say(f"one search every {config.search_interval:g}s"
                 " — the network's rate, not this loop's")
         try:
-            with ThreadPoolExecutor(max_workers=max(1, config.workers)) as pool:
-                list(pool.map(work, schedule))
+            if store.writer_lock_held(config.state_root):
+                # A caller may hold the writer lock around the pass (desktop orchestration does). A pool
+                # worker would block on that lock while the caller waits for it, so run in the owning thread.
+                for record in schedule:
+                    work(record)
+            else:
+                with ThreadPoolExecutor(max_workers=max(1, config.workers)) as pool:
+                    _drain(pool, work, schedule, max(1, config.workers))
         except BaseException:
             # The pass is over either way, and a bar left drawn under the traceback outlives it.
             bar.close()

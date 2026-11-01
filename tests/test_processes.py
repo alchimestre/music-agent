@@ -135,3 +135,16 @@ def test_stop_named_stops_the_client_and_not_the_log_reader(machine):
     assert processes.stop_named(("sldl",), log=said.append) == [501]
     assert 500 in box.alive
     assert said == ["stopped sldl (pid 501)"]
+
+def test_owned_process_stops_through_its_handle():
+    import subprocess
+    import sys
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        processes.stop_owned(child, grace=0.1)
+        assert child.poll() is not None
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=2)
