@@ -13,8 +13,8 @@ PAYLOAD = HERE / "payload"
 BUNDLED = ("ffmpeg.exe", "ffprobe.exe", "fpcalc.exe", "soulseek-rs.exe", "loudness_normalizer.py")
 LICENSED = ("ffmpeg", "fpcalc", "soulseek-rs", "loudness_normalizer")
 APPLICATION = "music-agent.exe"
-# Nuitka names the executable after its input module, so the build produces desktop.exe.
-BUILT_APPLICATION = "desktop.exe"
+# Nuitka names the executable after its input module, so the build produces launch.exe.
+BUILT_APPLICATION = "launch.exe"
 
 
 def distribution(exec_directory: Path) -> Path:
