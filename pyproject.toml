@@ -47,7 +47,7 @@ title = "music-agent"
 input_file = "src/music_agent/launch.py"
 exec_directory = "build/windows"
 mode = "standalone"
-extra_args = "--quiet --noinclude-qt-translations --assume-yes-for-downloads"
+extra_args = "--quiet --noinclude-qt-translations --assume-yes-for-downloads --windows-console-mode=disable"
 
 [dependency-groups]
 dev = ["pytest>=8"]
