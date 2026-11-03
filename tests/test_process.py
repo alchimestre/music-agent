@@ -870,3 +870,22 @@ def test_a_binary_that_is_not_installed_is_a_process_error():
     """ffprobe is the first thing the stage runs, and subprocess raises FileNotFoundError for it."""
     with pytest.raises(process.ProcessError, match="cannot run ffprobe-not-installed"):
         process.execute(["ffprobe-not-installed", "-version"])
+
+
+def test_the_normalizer_runs_under_a_python_interpreter(monkeypatch, tmp_path):
+    config = replace(config_module.DEFAULTS, normalize_tool=tmp_path / "normalize.py")
+    monkeypatch.setattr(process.sys, "executable", "/usr/bin/python3.13")
+
+    command = process.normalizer_command(config, tmp_path)
+
+    assert command[:2] == ["/usr/bin/python3.13", str(tmp_path / "normalize.py")]
+
+
+def test_a_frozen_executable_runs_the_normalizer_in_its_own_process(monkeypatch, tmp_path):
+    """A standalone build ships no interpreter, so the executable has to expose the normalizer itself."""
+    config = replace(config_module.DEFAULTS, normalize_tool=tmp_path / "normalize.py")
+    monkeypatch.setattr(process.sys, "executable", r"C:\app\music-agent.exe")
+
+    command = process.normalizer_command(config, tmp_path)
+
+    assert command[:3] == [r"C:\app\music-agent.exe", "--normalize", str(tmp_path / "normalize.py")]
