@@ -75,3 +75,23 @@ def test_secret_store_failure_does_not_commit_settings_or_expose_secret(tmp_path
     app.save(changed, remember=False)
     assert app.config.credential(app.config.slsk_password_env) == 'private-password'
     assert 'private-password' not in app.path.read_text()
+
+
+def test_bundled_tools_are_resolved_on_load_and_after_a_save(tmp_path, monkeypatch):
+    from music_agent import resources
+
+    app_dir = tmp_path / 'music-agent-desktop.dist'
+    bin_dir = app_dir / 'resources' / 'bin'
+    bin_dir.mkdir(parents=True)
+    for name in ('soulseek-rs', 'ffmpeg', 'ffprobe', 'fpcalc'):
+        (bin_dir / name).touch()
+    monkeypatch.setattr(resources, '_application_directory', lambda: app_dir)
+
+    app = app_for(tmp_path)
+    assert app.config.soulseek_command == (str(bin_dir / 'soulseek-rs'), 'daemon')
+    assert app.config.ffmpeg == str(bin_dir / 'ffmpeg')
+
+    default = replace(app.config, soulseek_command=('soulseek-rs', 'daemon'), ffmpeg='ffmpeg')
+    app.save(default, remember=False)
+    assert app.config.soulseek_command == (str(bin_dir / 'soulseek-rs'), 'daemon')
+    assert Application(path=app.path).config.soulseek_command == (str(bin_dir / 'soulseek-rs'), 'daemon')
