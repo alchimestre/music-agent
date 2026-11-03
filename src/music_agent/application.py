@@ -11,6 +11,7 @@ from pathlib import Path
 from . import acquire, genre, library, process, reference, review, state, store, tracklist
 from .config import Config
 from .credentials import CredentialStore, CredentialStoreError
+from .resources import bundle_config
 from .settings import load_settings, save_settings, settings_path, validate_settings
 
 
@@ -73,7 +74,7 @@ class RunResult:
 class Application:
     def __init__(self, config: Config | None = None, path: Path | None = None) -> None:
         self.path = path or settings_path()
-        self.config = config or load_settings(self.path)
+        self.config = bundle_config(config or load_settings(self.path))
         self.credential_error = ''
         if config is None:
             try:
@@ -92,7 +93,7 @@ class Application:
         if remember:
             CredentialStore().save(config)
         save_settings(self.path, config)
-        self.config = config
+        self.config = bundle_config(config)
         self.credential_error = ''
 
     def preview(self, source: str) -> Preview:
