@@ -876,16 +876,18 @@ def test_the_normalizer_runs_under_a_python_interpreter(monkeypatch, tmp_path):
     config = replace(config_module.DEFAULTS, normalize_tool=tmp_path / "normalize.py")
     monkeypatch.setattr(process.sys, "executable", "/usr/bin/python3.13")
 
-    command = process.normalizer_command(config, tmp_path)
+    command = process.normalizer_command(config, tmp_path, tmp_path / "report.txt")
 
     assert command[:2] == ["/usr/bin/python3.13", str(tmp_path / "normalize.py")]
 
 
 def test_a_frozen_executable_runs_the_normalizer_in_its_own_process(monkeypatch, tmp_path):
-    """A standalone build ships no interpreter, so the executable has to expose the normalizer itself."""
+    """A standalone build ships no interpreter, so the executable has to expose the normalizer itself,
+    and it is told where to write the report a windowed binary cannot print."""
     config = replace(config_module.DEFAULTS, normalize_tool=tmp_path / "normalize.py")
     monkeypatch.setattr(process.sys, "executable", r"C:\app\music-agent.exe")
 
-    command = process.normalizer_command(config, tmp_path)
+    command = process.normalizer_command(config, tmp_path, tmp_path / "report.txt")
 
-    assert command[:3] == [r"C:\app\music-agent.exe", "--normalize", str(tmp_path / "normalize.py")]
+    assert command[:4] == [r"C:\app\music-agent.exe", "--normalize", str(tmp_path / "report.txt"),
+                           str(tmp_path / "normalize.py")]

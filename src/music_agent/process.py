@@ -66,9 +66,9 @@ def execute(argv: list[str]) -> subprocess.CompletedProcess:
         raise ProcessError(f"cannot run {Path(argv[0]).name}: {error.strerror or error}") from error
 
 
-def _failure_detail(result: subprocess.CompletedProcess) -> str:
+def _failure_detail(result: subprocess.CompletedProcess, said: str = "") -> str:
     """The last thing the tool said, for a failure message."""
-    lines = (result.stderr or result.stdout or "").strip().splitlines()
+    lines = (said or result.stderr or result.stdout or "").strip().splitlines()
     return lines[-1] if lines else "no output"
 
 
@@ -318,12 +318,16 @@ def place(config: Config, record: state.Record, *, run: Runner, log) -> Path:
     return target
 
 
-def normalizer_command(config: Config, folder: Path) -> list[str]:
-    """The normalizer under a Python that can import it, or under this executable when frozen."""
+def normalizer_command(config: Config, folder: Path, report: Path) -> list[str]:
+    """The normalizer under a Python that can import it, or under this executable when frozen.
+
+    A frozen build is a windowed binary with no standard output at all, so it is told where to write the
+    lines that say which files it failed. A real interpreter keeps writing them to its own stdout.
+    """
     script = str(config.normalize_tool)
     interpreter = [sys.executable]
     if not Path(sys.executable).stem.lower().startswith("python"):
-        interpreter = [sys.executable, "--normalize"]
+        interpreter = [sys.executable, "--normalize", str(report)]
     return [
         *interpreter, script, str(folder),
         "--target-lufs", str(config.target_lufs),
@@ -340,10 +344,13 @@ def normalize(config: Config, folder: Path, *, files: set[Path], run: Runner, lo
     failure and not the folder's — and it exits 0 either way, so a batch that trusted the exit code claimed
     every one of its tracks was at target when only the tool's own lines say so.
     """
-    result = run(normalizer_command(config, folder))
+    with tempfile.TemporaryDirectory() as scratch:
+        report = Path(scratch) / "normalizer.txt"
+        result = run(normalizer_command(config, folder, report))
+        said = report.read_text(encoding="utf-8", errors="replace") if report.is_file() else result.stdout
     if result.returncode != 0:
-        raise ProcessError(f"normalizing {folder} failed: {_failure_detail(result)}")
-    failed, reported, complaint = _normalizer_failures(result.stdout, folder)
+        raise ProcessError(f"normalizing {folder} failed: {_failure_detail(result, said)}")
+    failed, reported, complaint = _normalizer_failures(said, folder)
     mine = {path: why for path, why in failed.items() if path in files}
     if reported > len(mine):
         # It counted failures it never pinned on a file this pass placed, so no track here can claim a pass.

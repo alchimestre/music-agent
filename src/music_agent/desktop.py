@@ -1115,16 +1115,19 @@ class DesktopWindow(QMainWindow):
 
 
 def _run_normalizer(argv: list[str]) -> int:
-    """Run the shipped normalizer in this process: a frozen build has no interpreter to spawn."""
+    """Run the shipped normalizer in this process: a frozen build has no interpreter to spawn, and no
+    standard output either, so what it prints goes to the report file instead."""
     import importlib.util
 
-    script = Path(argv[0])
+    report, script = Path(argv[0]), Path(argv[1])
+    sys.stdout = report.open("w", encoding="utf-8", buffering=1)
+    sys.stderr = sys.stdout
     spec = importlib.util.spec_from_file_location("loudness_normalizer", script)
     if spec is None or spec.loader is None:
         raise SystemExit(f"cannot read the normalizer at {script}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    sys.argv = [str(script), *argv[1:]]
+    sys.argv = [str(script), *argv[2:]]
     return module.main() or 0
 
 
