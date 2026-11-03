@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import settings, slsk, state
+from .resources import expose_payload_on_path
 
 FAILED_STATUSES = frozenset({state.FAILED, state.NOT_FOUND})
 FINISHED_STATUSES = frozenset({state.TAGGED, state.IMPORTED, state.FOUND_IN_LIBRARY})
@@ -1128,6 +1129,7 @@ def _run_normalizer(argv: list[str]) -> int:
 
 
 def main() -> int:
+    expose_payload_on_path()
     if sys.argv[1:2] == ["--normalize"]:
         return _run_normalizer(sys.argv[2:])
     application = QApplication(sys.argv)

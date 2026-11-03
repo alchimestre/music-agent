@@ -8,6 +8,7 @@ gave them.
 
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -38,6 +39,17 @@ def bundled_executable(name: str) -> Path | None:
     """The staged executable `name`, when this build ships one."""
     path = _resource_directory() / f"{name}{_executable_suffix()}"
     return path if path.is_file() else None
+
+
+def expose_payload_on_path() -> None:
+    """Put the staged tools on PATH, so a tool that calls another by name finds the payload's copy."""
+    directory = _resource_directory()
+    if not directory.is_dir():
+        return
+    entries = os.environ.get("PATH", "").split(os.pathsep)
+    if str(directory) in entries:
+        return
+    os.environ["PATH"] = os.pathsep.join([str(directory), *entries])
 
 
 def _bundled(configured: str, name: str) -> str:
