@@ -85,3 +85,15 @@ def test_saving_from_the_desktop_keeps_a_target_it_does_not_show():
     assert merged_targets(('traktor',), True) == ('traktor', 'rekordbox')
     assert merged_targets(('rekordbox',), True) == ('rekordbox',)
     assert merged_targets((), False) == ()
+
+
+def test_an_untouched_share_list_keeps_the_two_lanes_shared(tmp_path):
+    from music_agent import slsk
+
+    settings = replace(configured(tmp_path), shared_dirs=None)
+    path = tmp_path / 'private' / 'settings.toml'
+    save_settings(path, settings)
+    assert 'shared' not in path.read_text()
+    loaded = load_settings(path)
+    assert loaded.shared_dirs is None
+    assert slsk.shared_directories(loaded) == (loaded.lossless, loaded.lossy)
