@@ -318,6 +318,20 @@ def place(config: Config, record: state.Record, *, run: Runner, log) -> Path:
     return target
 
 
+def normalizer_command(config: Config, folder: Path) -> list[str]:
+    """The normalizer under a Python that can import it, or under this executable when frozen."""
+    script = str(config.normalize_tool)
+    interpreter = [sys.executable]
+    if not Path(sys.executable).stem.lower().startswith("python"):
+        interpreter = [sys.executable, "--normalize"]
+    return [
+        *interpreter, script, str(folder),
+        "--target-lufs", str(config.target_lufs),
+        "--true-peak", str(config.true_peak_db),
+        "--tolerance", str(config.tolerance_lu),
+    ]
+
+
 def normalize(config: Config, folder: Path, *, files: set[Path], run: Runner, log) -> dict[Path, str]:
     """Let the canonical normalizer look at the whole directory, and say which of `files` it failed and why.
 
@@ -326,12 +340,7 @@ def normalize(config: Config, folder: Path, *, files: set[Path], run: Runner, lo
     failure and not the folder's — and it exits 0 either way, so a batch that trusted the exit code claimed
     every one of its tracks was at target when only the tool's own lines say so.
     """
-    result = run([
-        sys.executable, str(config.normalize_tool), str(folder),
-        "--target-lufs", str(config.target_lufs),
-        "--true-peak", str(config.true_peak_db),
-        "--tolerance", str(config.tolerance_lu),
-    ])
+    result = run(normalizer_command(config, folder))
     if result.returncode != 0:
         raise ProcessError(f"normalizing {folder} failed: {_failure_detail(result)}")
     failed, reported, complaint = _normalizer_failures(result.stdout, folder)

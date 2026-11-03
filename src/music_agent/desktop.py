@@ -1113,7 +1113,23 @@ class DesktopWindow(QMainWindow):
             self.close()
 
 
+def _run_normalizer(argv: list[str]) -> int:
+    """Run the shipped normalizer in this process: a frozen build has no interpreter to spawn."""
+    import importlib.util
+
+    script = Path(argv[0])
+    spec = importlib.util.spec_from_file_location("loudness_normalizer", script)
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"cannot read the normalizer at {script}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    sys.argv = [str(script), *argv[1:]]
+    return module.main() or 0
+
+
 def main() -> int:
+    if sys.argv[1:2] == ["--normalize"]:
+        return _run_normalizer(sys.argv[2:])
     application = QApplication(sys.argv)
     application.setApplicationName("Music Agent")
     application.setApplicationDisplayName("Music Agent")
