@@ -1,3 +1,4 @@
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -65,3 +66,17 @@ def test_bundled_executable_returns_only_existing_resource(monkeypatch, tmp_path
 
     assert resources.bundled_executable("ffmpeg") == ffmpeg
     assert resources.bundled_executable("fpcalc") is None
+
+
+def test_the_payload_goes_on_path_once(monkeypatch, tmp_path):
+    """A staged tool that spawns another by name needs the payload's directory, not an absolute path."""
+    app_dir = tmp_path / "music-agent-desktop.dist"
+    bin_dir = app_dir / "resources" / "bin"
+    bin_dir.mkdir(parents=True)
+    monkeypatch.setattr(resources, "_application_directory", lambda: app_dir)
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    resources.expose_payload_on_path()
+    resources.expose_payload_on_path()
+
+    assert os.environ["PATH"] == f"{bin_dir}{os.pathsep}/usr/bin"
