@@ -292,3 +292,24 @@ def test_a_squatter_remains_running_when_the_port_is_busy(tmp_path, machine):
 
     assert box.alive == {502}
     assert box.signalled == []
+
+
+def test_a_platform_without_unix_sockets_gets_a_loopback_control_address(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    monkeypatch.setattr(slsk.sys, "platform", "win32")
+    assert slsk.managed_address(config) == slsk.CONTROL_ADDRESS
+    assert slsk.Daemon(config)._command("someone")[-2:] == ["--bind", slsk.CONTROL_ADDRESS]
+
+
+def test_a_configured_address_wins_over_the_managed_one(tmp_path, monkeypatch):
+    config = replace(make_config(tmp_path), daemon_address="127.0.0.1:9999")
+    monkeypatch.setattr(slsk.sys, "platform", "win32")
+    assert slsk.managed_address(config) == "127.0.0.1:9999"
+    assert slsk.Daemon(config)._command("someone")[-2:] == ["--bind", "127.0.0.1:9999"]
+
+
+def test_a_platform_with_unix_sockets_binds_nothing(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    monkeypatch.setattr(slsk.sys, "platform", "darwin")
+    assert slsk.managed_address(config) == ""
+    assert "--bind" not in slsk.Daemon(config)._command("someone")
