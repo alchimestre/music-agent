@@ -16,6 +16,7 @@ import json
 import os
 import socket
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -63,6 +64,21 @@ def state_dir(config: Config) -> Path:
 
 def socket_path(config: Config) -> Path:
     return state_dir(config) / "daemon.sock"
+
+
+# `soulseek-rs` refuses to start where there are no Unix sockets unless it is told what to listen on,
+# so a daemon this process manages answers on a loopback TCP port there instead. It is fixed rather
+# than chosen at start: the client has to find the daemon it did not keep a note of.
+CONTROL_ADDRESS = "127.0.0.1:27100"
+
+
+def managed_address(config: Config) -> str:
+    """Where a daemon this process manages answers. Empty means its Unix socket in `state_dir`."""
+    if config.daemon_address:
+        return config.daemon_address
+    if sys.platform == "win32":
+        return CONTROL_ADDRESS
+    return ""
 
 
 def shared_directories(config: Config) -> tuple[Path, ...]:
@@ -207,9 +223,7 @@ class Daemon:
             time.sleep(0.25)
 
     def endpoint(self) -> str:
-        if self._config.daemon_address:
-            return self._config.daemon_address
-        return str(socket_path(self._config))
+        return managed_address(self._config) or str(socket_path(self._config))
 
     def start(self) -> None:
         """Refuse a taken endpoint, then start the daemon detached with its password on stdin."""
@@ -251,8 +265,9 @@ class Daemon:
         command += ["--listener-port", str(self._config.soulseek_listen_port)]
         command += ["--max-concurrent-downloads", str(self._config.max_downloads)]
         command += ["--upload-slots", str(self._config.upload_slots)]
-        if self._config.daemon_address:
-            host, port = tcp_address(self._config.daemon_address)
+        address = managed_address(self._config)
+        if address:
+            host, port = tcp_address(address)
             command += ["--bind", f"{host}:{port}"]
         return command
 
@@ -291,8 +306,9 @@ class Daemon:
     # ── the wire ─────────────────────────────────────────────────────────────
 
     def _open(self) -> bool:
-        if self._config.daemon_address:
-            host, port = tcp_address(self._config.daemon_address)
+        address = managed_address(self._config)
+        if address:
+            host, port = tcp_address(address)
             family = socket.AF_INET6 if ":" in host else socket.AF_INET
             sock = socket.socket(family, socket.SOCK_STREAM)
             try:
@@ -313,7 +329,7 @@ class Daemon:
         self._sock = sock
         self._buffer = b""
         params: dict[str, Any] = {"protocol": PROTOCOL}
-        if self._config.daemon_address:
+        if address:
             params["token"] = _control_token(self._config)
         try:
             answer = self.call("auth", params, timeout=STARTUP_TIMEOUT)

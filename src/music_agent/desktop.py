@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import settings, state
+from . import settings, slsk, state
 
 FAILED_STATUSES = frozenset({state.FAILED, state.NOT_FOUND})
 FINISHED_STATUSES = frozenset({state.TAGGED, state.IMPORTED, state.FOUND_IN_LIBRARY})
@@ -673,7 +673,8 @@ class DesktopWindow(QMainWindow):
         self.taxonomy_edit.setText(str(config.taxonomy) if config.taxonomy else "")
         targets = set(config.export_targets)
         self.rekordbox_export.setChecked("rekordbox" in targets)
-        self.control_endpoint.setText(config.daemon_address or "Managed locally on loopback")
+        self.control_endpoint.setText(config.daemon_address or slsk.managed_address(config)
+                                      or "Managed locally on loopback")
 
     def _build_config(self) -> Any:
         secrets = dict(self._config.secrets)
