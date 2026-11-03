@@ -331,3 +331,15 @@ def test_empty_credentials_offline_do_not_spawn(tmp_path, monkeypatch):
     assert status.state == "stopped"
     assert status.managed is False
     assert manager.daemon.process is None
+
+
+def test_a_lane_that_does_not_exist_yet_is_created_and_shared(tmp_path):
+    from music_agent import runtime
+
+    config = replace(make_config(tmp_path), lossless=tmp_path / "absent" / "lossless",
+                     lossy=tmp_path / "absent" / "lossy")
+
+    shared = runtime._share_paths(config)
+
+    assert shared == (config.lossless.resolve(), config.lossy.resolve())
+    assert config.lossless.is_dir() and config.lossy.is_dir()
