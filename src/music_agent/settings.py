@@ -28,7 +28,7 @@ def load_settings(path: Path | None = None) -> Config:
     music = Path.home() / 'Music' / 'music-agent'
     return replace(DEFAULTS, staging=music / 'staging', lossless=music / 'lossless',
                    lossy=music / 'lossy', state_root=root / 'jobs', peers=root / 'peers.json',
-                   shared_dirs=(), export_targets=(), soulseek_state_dir=str(root / 'soulseek'))
+                   export_targets=(), soulseek_state_dir=str(root / 'soulseek'))
 
 
 def merged_targets(configured: tuple[str, ...], rekordbox_on: bool) -> tuple[str, ...]:

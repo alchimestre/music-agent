@@ -699,7 +699,7 @@ class DesktopWindow(QMainWindow):
             staging=self._required_path(self.staging_edit, "Download / staging folder"),
             lossless=self._required_path(self.lossless_edit, "Finished lossless folder"),
             lossy=self._required_path(self.lossy_edit, "Finished lossy folder"),
-            shared_dirs=shares,
+            shared_dirs=shares or None,
             soulseek_server=server,
             soulseek_listen_port=self.listen_port.value(),
             upload_slots=self.upload_slots.value(),
