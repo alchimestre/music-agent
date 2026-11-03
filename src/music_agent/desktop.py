@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,7 @@ LIVE_STATUSES = state.LIVE
 class _ApplicationWorker(QObject):
     completed = Signal(object)
     progress = Signal(object)
+    queue_changed = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -139,8 +141,13 @@ class _ApplicationWorker(QObject):
         return self.application.snapshot()
 
     def _run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        last_snapshot = [0.0]
+
         def emit_progress(event: object) -> None:
             self.progress.emit(event)
+            if time.monotonic() - last_snapshot[0] >= 2.0:
+                last_snapshot[0] = time.monotonic()
+                self.queue_changed.emit(self.application.snapshot())
             if self._stop_requested.is_set():
                 self.application.stop_event.set()
 
@@ -192,12 +199,14 @@ class DesktopWindow(QMainWindow):
         self._review_key: tuple[str, int] | None = None
         self._last_output_dir: Path | None = None
         self._admission_summary = ""
+        self._rendered_queue: list[tuple[str, ...]] = []
         self._pending_config: Any = None
         self._thread = QThread(self)
         self._worker = _ApplicationWorker()
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.initialize)
         self.command_requested.connect(self._worker.execute)
+        self._worker.queue_changed.connect(self._set_queue)
         self.pause_requested.connect(self._worker.set_paused, Qt.ConnectionType.DirectConnection)
         self.stop_requested.connect(self._worker.request_stop, Qt.ConnectionType.DirectConnection)
         self._worker.completed.connect(self._on_complete)
@@ -832,15 +841,28 @@ class DesktopWindow(QMainWindow):
             return
         selected_filter = self.queue_filter.currentText().lower()
         rows = [row for row in self._queue if self._queue_filter_matches(row, selected_filter)]
-        self.queue_table.setRowCount(0)
-        for index, row in enumerate(rows):
-            values = (
+        values = [
+            (
                 str(row.label), str(getattr(row, "source", "")), str(row.status), str(row.decision),
                 str(getattr(row, "peer", "")), self._peer_queue_value(row), str(getattr(row, "progress", "")),
                 str(row.notes), str(row.local_path or ""),
             )
-            self._insert_row(self.queue_table, index, values)
+            for row in rows
+        ]
+        if values == self._rendered_queue:
+            return
+        self._rendered_queue = values
+        chosen = {
+            self.queue_table.item(index.row(), 0).data(Qt.ItemDataRole.UserRole)
+            for index in self.queue_table.selectionModel().selectedRows()
+            if self.queue_table.item(index.row(), 0) is not None
+        }
+        self.queue_table.setRowCount(0)
+        for index, (row, cells) in enumerate(zip(rows, values)):
+            self._insert_row(self.queue_table, index, cells)
             self.queue_table.item(index, 0).setData(Qt.ItemDataRole.UserRole, (row.job_id, row.idx))
+            if (row.job_id, row.idx) in chosen:
+                self.queue_table.selectRow(index)
         self._update_queue_actions()
 
     def _queue_filter_matches(self, row: Any, selected_filter: str) -> bool:
