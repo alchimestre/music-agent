@@ -237,8 +237,7 @@ def load(path: Path | None = None) -> Config:
         # The defaults are a working configuration, but the ports still come from the environment.
         return replace(DEFAULTS, **_listening_ports())
 
-    with path.open("rb") as handle:
-        data = tomllib.load(handle)
+    data = tomllib.loads(path.read_text(encoding="utf-8-sig"))
 
     sections = {name: _Section(name, data.get(name, {})) for name in SECTIONS}
     paths = sections["paths"]
