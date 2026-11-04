@@ -20,6 +20,18 @@ That is the whole pipeline. It prints one line per stage and asks nothing.
 `uv tool install --editable .` puts `music-agent` on PATH from this checkout. The converter and normalizer
 ship here; `[tools]` in `config.toml` can point at other copies.
 
+## Windows desktop
+
+1. Extract the complete Windows bundle and open `music-agent.exe`.
+2. Open Settings. Enter the required credentials; each field has a button that opens its service setup page.
+3. Click Validate and save settings, then Start Soulseek.
+4. Open Add playlist. Choose a public playlist URL or tracklist file, click Preview playlist, then Add preview to queue.
+5. Select a track in Queue and click Process submission; the whole submission it belongs to is processed.
+
+Secrets are stored in the OS credential store when Remember secrets in the OS credential store is checked.
+Settings accept UTF-8 with or without a byte-order mark. A malformed settings file stops startup.
+Files remain available without a DJ collection export.
+
 ## Commands
 
 | command | what it does | time |

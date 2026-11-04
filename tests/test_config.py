@@ -60,6 +60,21 @@ def test_a_malformed_file_is_an_error(tmp_path):
         load(write(tmp_path, "this is not toml = = ="))
 
 
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
+def test_windows_saved_settings_preserve_paths_and_contact(tmp_path, encoding):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[paths]\nlossless = "Music/Électronique"\n'
+        '[credentials]\ncontact = "music@example.com"\n',
+        encoding=encoding,
+    )
+
+    config = load(path)
+
+    assert config.lossless == (tmp_path / "Music/Électronique").resolve()
+    assert config.musicbrainz_contact == "music@example.com"
+
+
 def test_the_config_is_found_beside_the_package_then_in_the_user_directory(tmp_path, monkeypatch):
     """A checkout reads its own `config.toml`; an installed copy has no checkout, so it reads
     `~/.config/music-agent/config.toml`. The checkout comes first, so a clone behaves as it always has, and

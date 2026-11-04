@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QTabWidget,
     QTableWidget,
@@ -200,7 +201,7 @@ class DesktopWindow(QMainWindow):
         self._review_key: tuple[str, int] | None = None
         self._last_output_dir: Path | None = None
         self._admission_summary = ""
-        self._rendered_queue: list[tuple[str, ...]] = []
+        self._rendered_queue: list[tuple[str, int, tuple[str, ...]]] = []
         self._pending_config: Any = None
         self._thread = QThread(self)
         self._worker = _ApplicationWorker()
@@ -226,7 +227,9 @@ class DesktopWindow(QMainWindow):
         root = QWidget()
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
-        layout.addLayout(self._build_controls())
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+        layout.addWidget(self._build_controls())
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_queue_page(), "Queue")
         self.tabs.addTab(self._build_add_page(), "Add playlist")
@@ -234,13 +237,18 @@ class DesktopWindow(QMainWindow):
         layout.addWidget(self.tabs, 1)
         self.status_label = QLabel("Loading application…")
         self.status_label.setAccessibleName("Application status")
+        self.status_label.setWordWrap(True)
+        self.status_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.status_label)
 
-    def _build_controls(self) -> QHBoxLayout:
-        controls = QHBoxLayout()
+    def _build_controls(self) -> QWidget:
+        runtime_group = QGroupBox("Soulseek runtime")
+        controls = QHBoxLayout(runtime_group)
+        controls.setContentsMargins(12, 12, 12, 12)
+        controls.setSpacing(8)
         self.runtime_label = QLabel("Soulseek: checking status")
         self.runtime_label.setAccessibleName("Soulseek connection status")
-        self.runtime_label.setMinimumWidth(230)
+        self.runtime_label.setMinimumWidth(160)
         controls.addWidget(self.runtime_label, 1)
         self.start_button = QPushButton("Start Soulseek")
         self.start_button.clicked.connect(lambda: self._submit("runtime_start"))
@@ -251,77 +259,134 @@ class DesktopWindow(QMainWindow):
         self.refresh_status_button = QPushButton("Refresh Soulseek status")
         self.refresh_status_button.clicked.connect(lambda: self._submit("runtime_status"))
         controls.addWidget(self.refresh_status_button)
+        return runtime_group
+
+    def _build_queue_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(8)
+        layout.addLayout(self._queue_view_controls())
+        layout.addWidget(self._queue_work_controls())
+        layout.addWidget(self._selected_track_controls())
+        self.queue_state_label = QLabel()
+        self.queue_state_label.setWordWrap(True)
+        self.queue_state_label.setAccessibleName("Queue selection and empty state")
+        layout.addWidget(self.queue_state_label)
+        self.queue_table = self._table((
+            "Track", "Playlist / source", "Stage", "Decision", "Peer",
+            "Peer queue", "Progress", "Action / error", "Output",
+        ))
+        for column, width in enumerate((140, 100, 64, 76, 64, 70, 60, 140, 110)):
+            self.queue_table.setColumnWidth(column, width)
+        self.queue_table.horizontalHeader().setStretchLastSection(True)
+        self.queue_table.setAccessibleName("Queue of requested tracks")
+        self.queue_table.itemSelectionChanged.connect(self._update_queue_actions)
+        layout.addWidget(self.queue_table, 1)
+        self._add_activity_controls(layout)
+        self._update_queue_actions()
+        return page
+
+    def _queue_view_controls(self) -> QHBoxLayout:
+        controls = QHBoxLayout()
+        controls.setSpacing(8)
+        self.queue_filter = QComboBox()
+        self.queue_filter.addItems(("All", "Pending", "Active", "Review", "Completed", "Failed", "History"))
+        self.queue_filter.currentIndexChanged.connect(self._populate_queue)
+        filter_label = QLabel("Show")
+        filter_label.setBuddy(self.queue_filter)
+        controls.addWidget(filter_label)
+        controls.addWidget(self.queue_filter)
+        self.refresh_button = QPushButton("Refresh")
+        self.refresh_button.clicked.connect(lambda: self._submit("snapshot"))
+        controls.addWidget(self.refresh_button)
+        controls.addStretch(1)
+        return controls
+
+    def _queue_work_controls(self) -> QGroupBox:
+        group = QGroupBox("Queue actions")
+        controls = QHBoxLayout(group)
+        controls.setContentsMargins(12, 12, 12, 12)
+        controls.setSpacing(8)
         self.pause_button = QPushButton("Pause queue")
         self.pause_button.clicked.connect(self._toggle_pause)
         controls.addWidget(self.pause_button)
         self.stop_work_button = QPushButton("Stop current work")
         self.stop_work_button.clicked.connect(self._request_work_stop)
         controls.addWidget(self.stop_work_button)
-        return controls
+        controls.addStretch(1)
+        return group
 
-    def _build_queue_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        actions = QHBoxLayout()
-        self.queue_filter = QComboBox()
-        self.queue_filter.addItems(("All", "Pending", "Active", "Review", "Completed", "Failed", "History"))
-        self.queue_filter.currentIndexChanged.connect(self._populate_queue)
-        actions.addWidget(QLabel("Show"))
-        actions.addWidget(self.queue_filter)
-        self.refresh_button = QPushButton("Refresh")
-        self.refresh_button.clicked.connect(lambda: self._submit("snapshot"))
-        actions.addWidget(self.refresh_button)
-        self.process_button = QPushButton("Process selected submission")
+    def _selected_track_controls(self) -> QGroupBox:
+        group = QGroupBox("Selected track")
+        controls = QHBoxLayout(group)
+        controls.setContentsMargins(12, 12, 12, 12)
+        controls.setSpacing(8)
+        self.process_button = QPushButton("Process submission")
+        self.process_button.setAccessibleName("Process selected submission")
+        self.process_button.setToolTip("Process the submission containing the selected track.")
         self.process_button.clicked.connect(self._process_selected)
-        actions.addWidget(self.process_button)
-        self.review_button = QPushButton("Review selected track")
+        controls.addWidget(self.process_button)
+        self.review_button = QPushButton("Review track")
+        self.review_button.setAccessibleName("Review selected track")
         self.review_button.clicked.connect(self._review_selected)
-        actions.addWidget(self.review_button)
-        self.delivery_button = QPushButton("Preview delivery plans")
+        controls.addWidget(self.review_button)
+        self.delivery_button = QPushButton("Preview delivery")
+        self.delivery_button.setAccessibleName("Preview delivery plans for selected submission")
         self.delivery_button.clicked.connect(self._preview_deliveries)
-        actions.addWidget(self.delivery_button)
+        controls.addWidget(self.delivery_button)
         self.open_output_button = QPushButton("Open output folder")
+        self.open_output_button.setAccessibleName("Open selected track output folder")
         self.open_output_button.clicked.connect(self._open_selected_output)
-        actions.addWidget(self.open_output_button)
-        layout.addLayout(actions)
-        self.queue_table = self._table((
-            "Track", "Playlist / source", "Stage", "Decision", "Peer",
-            "Peer's own queue position", "Progress", "Action / error", "Output",
-        ))
-        self.queue_table.setAccessibleName("Queue of requested tracks")
-        self.queue_table.itemSelectionChanged.connect(self._update_queue_actions)
-        layout.addWidget(self.queue_table, 1)
+        controls.addWidget(self.open_output_button)
+        controls.addStretch(1)
+        return group
+
+    def _add_activity_controls(self, layout: QVBoxLayout) -> None:
         self.result_label = QLabel("No submission has run in this session.")
         self.result_label.setWordWrap(True)
         layout.addWidget(self.result_label)
+        self.activity_button = QPushButton("Show activity")
+        self.activity_button.setCheckable(True)
+        self.activity_button.setAccessibleName("Show or hide processing activity")
+        self.activity_button.setVisible(False)
+        self.activity_button.toggled.connect(self._toggle_activity)
+        layout.addWidget(self.activity_button, 0, Qt.AlignmentFlag.AlignLeft)
         self.progress_log = QPlainTextEdit()
         self.progress_log.setReadOnly(True)
         self.progress_log.setMaximumBlockCount(400)
         self.progress_log.setAccessibleName("Processing progress and results")
-        self.progress_log.setMaximumHeight(150)
+        self.progress_log.setMaximumHeight(112)
+        self.progress_log.hide()
         layout.addWidget(self.progress_log)
-        self._update_queue_actions()
-        return page
 
     def _build_add_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
         source_row = QHBoxLayout()
-        source_row.addWidget(QLabel("Public playlist URL or tracklist file"))
+        source_row.setSpacing(8)
+        source_label = QLabel("Public playlist URL or tracklist file")
         self.source_edit = QLineEdit()
         self.source_edit.setPlaceholderText("Paste a public Spotify, Deezer, or YouTube playlist URL")
         self.source_edit.setAccessibleName("Playlist URL or tracklist file path")
+        source_label.setBuddy(self.source_edit)
+        source_row.addWidget(source_label)
         source_row.addWidget(self.source_edit, 1)
         self.source_file_button = QPushButton("Choose file…")
         self.source_file_button.clicked.connect(self._browse_source)
         source_row.addWidget(self.source_file_button)
-        self.preview_button = QPushButton("Preview")
-        self.preview_button.clicked.connect(self._preview_source)
-        source_row.addWidget(self.preview_button)
         layout.addLayout(source_row)
+        preview_actions = QHBoxLayout()
         self.preview_summary = QLabel("Preview before adding work to the persistent queue.")
         self.preview_summary.setWordWrap(True)
-        layout.addWidget(self.preview_summary)
+        preview_actions.addWidget(self.preview_summary, 1)
+        self.preview_button = QPushButton("Preview playlist")
+        self.preview_button.setAccessibleName("Preview playlist before adding work")
+        self.preview_button.clicked.connect(self._preview_source)
+        preview_actions.addWidget(self.preview_button)
+        layout.addLayout(preview_actions)
         self.preview_table = self._table(("#", "Track", "Admission", "Work ID / held path"))
         layout.addWidget(self.preview_table, 1)
         self.enqueue_button = QPushButton("Add preview to queue")
@@ -333,58 +398,130 @@ class DesktopWindow(QMainWindow):
     def _build_settings_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        body = QWidget()
-        form = QVBoxLayout(body)
-        form.addWidget(self._build_credentials_group())
-        form.addWidget(self._build_directories_group())
-        form.addWidget(self._build_connectivity_group())
-        form.addWidget(self._build_processing_group())
-        form.addWidget(self._build_exports_group())
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(8)
+        self.settings_tabs = QTabWidget()
+        for title, group in (
+            ("Credentials", self._build_credentials_group()),
+            ("Folders", self._build_directories_group()),
+            ("Connection", self._build_connectivity_group()),
+            ("Processing", self._build_processing_group()),
+            ("Delivery", self._build_exports_group()),
+        ):
+            self.settings_tabs.addTab(self._settings_category(group), title)
+        layout.addWidget(self.settings_tabs, 1)
+        layout.addWidget(self._settings_footer())
+        return page
+
+    def _settings_footer(self) -> QWidget:
+        footer = QWidget()
+        footer_layout = QVBoxLayout(footer)
+        footer_layout.setContentsMargins(0, 0, 0, 0)
+        footer_layout.setSpacing(8)
         self.settings_status = QLabel("Settings have not loaded.")
         self.settings_status.setWordWrap(True)
-        self.settings_status.setAccessibleName("Saved and effective settings")
-        form.addWidget(self.settings_status)
-        scroll.setWidget(body)
-        layout.addWidget(scroll, 1)
+        self.settings_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.settings_status.setAccessibleName("Saved and effective settings status")
+        footer_layout.addWidget(self.settings_status)
+        details_button = QPushButton("Connection details")
+        details_button.setCheckable(True)
+        details_button.setAccessibleName("Show or hide connection diagnostics")
+        footer_layout.addWidget(details_button, 0, Qt.AlignmentFlag.AlignLeft)
+        self.settings_details = QPlainTextEdit()
+        self.settings_details.setReadOnly(True)
+        self.settings_details.setMaximumHeight(112)
+        self.settings_details.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.settings_details.setAccessibleName("Saved and effective runtime settings details")
+        self.settings_details.hide()
+        details_button.toggled.connect(self.settings_details.setVisible)
+        footer_layout.addWidget(self.settings_details)
+        remember_note = QLabel("Unchecked means session-only; secrets are not written to settings.")
+        remember_note.setWordWrap(True)
+        footer_layout.addWidget(remember_note)
         save_row = QHBoxLayout()
         self.remember_secrets = QCheckBox("Remember secrets in the OS credential store")
         self.remember_secrets.setChecked(True)
         save_row.addWidget(self.remember_secrets, 1)
-        save_row.addWidget(QLabel("Unchecked means session-only; secrets are not written to settings."))
         self.save_button = QPushButton("Validate and save settings")
         self.save_button.clicked.connect(self._save_settings)
         save_row.addWidget(self.save_button)
-        layout.addLayout(save_row)
-        return page
+        footer_layout.addLayout(save_row)
+        return footer
 
     def _build_credentials_group(self) -> QGroupBox:
         group = QGroupBox("Credentials")
         form = QFormLayout(group)
-        self.username_edit = QLineEdit()
-        form.addRow("Soulseek username (required)", self.username_edit)
-        self.password_edit = self._secret_edit("Leave blank to keep the saved password")
-        form.addRow("Soulseek password (required to connect)", self.password_edit)
-        self.musicbrainz_edit = QLineEdit()
-        self.musicbrainz_edit.setPlaceholderText("Required for MusicBrainz requests")
-        form.addRow("MusicBrainz contact (required)", self.musicbrainz_edit)
-        self.acoustid_edit = self._secret_edit("Required AcoustID key for fingerprint matching")
-        form.addRow("AcoustID key (required)", self.acoustid_edit)
-        self.discogs_edit = self._secret_edit("Optional Discogs token")
-        form.addRow("Discogs token (optional)", self.discogs_edit)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
+        self._soulseek_fields(form)
+        self._metadata_fields(form)
         note = QLabel(
-            "Stored secrets stay hidden. Blank secret fields retain current values. Processing also requires "
+            "Blank secret fields retain current values. Stored secrets stay hidden. Processing also requires "
             "the bundled normalizer; missing prerequisites stop before acquisition."
         )
         note.setWordWrap(True)
         form.addRow(note)
         return group
 
+    def _soulseek_fields(self, form: QFormLayout) -> None:
+        self.username_edit = QLineEdit()
+        username_help = QLabel(
+            "Use SoulseekQt to set up or confirm the network login used here. This app cannot create network accounts."
+        )
+        username_help.setWordWrap(True)
+        form.addRow(username_help)
+        self.soulseek_setup_button = QPushButton("Soulseek client setup")
+        self.soulseek_setup_button.setAccessibleName("Open official Soulseek client download page")
+        self.soulseek_setup_button.setToolTip("Official Soulseek client downloads and setup information.")
+        self.soulseek_setup_button.clicked.connect(
+            lambda: self._open_external_url("https://www.slsknet.org/news/node/1")
+        )
+        form.addRow("Soulseek username (required)", self._linked_field(
+            self.username_edit, self.soulseek_setup_button
+        ))
+        self.password_edit = self._secret_edit("Leave blank to keep the saved password")
+        form.addRow("Soulseek password (required to connect)", self.password_edit)
+
+    def _metadata_fields(self, form: QFormLayout) -> None:
+        self.musicbrainz_edit = QLineEdit()
+        self.musicbrainz_edit.setPlaceholderText("Contact email or URL; not an API key")
+        musicbrainz_button = QPushButton("API contact guidance")
+        musicbrainz_button.setAccessibleName("Read official MusicBrainz API contact guidance")
+        musicbrainz_button.setToolTip("MusicBrainz asks API clients to include a maintainer contact.")
+        musicbrainz_button.clicked.connect(
+            lambda: self._open_external_url("https://musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting")
+        )
+        form.addRow("MusicBrainz contact (required)", self._linked_field(
+            self.musicbrainz_edit, musicbrainz_button
+        ))
+        self.acoustid_edit = self._secret_edit("Required for fingerprint matching")
+        acoustid_button = QPushButton("Create AcoustID key")
+        acoustid_button.setAccessibleName("Create an official AcoustID application key")
+        acoustid_button.setToolTip("Register this application with AcoustID to receive an application API key.")
+        acoustid_button.clicked.connect(
+            lambda: self._open_external_url("https://acoustid.org/new-application")
+        )
+        form.addRow("AcoustID application key (required)", self._linked_field(
+            self.acoustid_edit, acoustid_button
+        ))
+        self.discogs_edit = self._secret_edit("Optional Discogs token")
+        discogs_button = QPushButton("Create Discogs token")
+        discogs_button.setAccessibleName("Create an optional Discogs API token")
+        discogs_button.setToolTip("Open Discogs developer settings and generate a personal access token.")
+        discogs_button.clicked.connect(
+            lambda: self._open_external_url("https://www.discogs.com/settings/developers")
+        )
+        form.addRow("Discogs token (optional)", self._linked_field(
+            self.discogs_edit, discogs_button
+        ))
+
     def _build_directories_group(self) -> QGroupBox:
         group = QGroupBox("Directories")
         layout = QVBoxLayout(group)
+        layout.setSpacing(8)
         form = QFormLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
         self.staging_edit = QLineEdit()
         form.addRow("Download / staging (required)", self._path_control(self.staging_edit))
         self.lossless_edit = QLineEdit()
@@ -392,7 +529,12 @@ class DesktopWindow(QMainWindow):
         self.lossy_edit = QLineEdit()
         form.addRow("Finished lossy output (required)", self._path_control(self.lossy_edit))
         layout.addLayout(form)
-        layout.addWidget(QLabel("Shared folders are explicit. Staging and private application data cannot be shared."))
+        share_help = QLabel(
+            "Finished output folders are shared by default. Add folders to replace that default. "
+            "Staging and private application data cannot be shared."
+        )
+        share_help.setWordWrap(True)
+        layout.addWidget(share_help)
         shares_row = QHBoxLayout()
         self.shares_list = QListWidget()
         self.shares_list.setAccessibleName("Explicit Soulseek shared folders")
@@ -412,6 +554,8 @@ class DesktopWindow(QMainWindow):
     def _build_connectivity_group(self) -> QGroupBox:
         group = QGroupBox("Connectivity")
         form = QFormLayout(group)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
         self.server_host_edit = QLineEdit()
         self.server_host_edit.setPlaceholderText("Soulseek server host; blank uses the runtime default")
         self.server_port = QSpinBox()
@@ -435,6 +579,8 @@ class DesktopWindow(QMainWindow):
     def _build_processing_group(self) -> QGroupBox:
         group = QGroupBox("Processing and taxonomy")
         form = QFormLayout(group)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
         self.workers = QSpinBox()
         self.workers.setRange(1, 1000)
         form.addRow("Track workers", self.workers)
@@ -458,13 +604,18 @@ class DesktopWindow(QMainWindow):
         form.addRow("Optional taxonomy", taxonomy_row)
         return group
 
-    def _build_exports_group(self) -> QGroupBox:
-        group = QGroupBox("Optional DJ collection exports")
-        layout = QVBoxLayout(group)
-        self.rekordbox_export = QCheckBox("Deliver to Rekordbox")
-        layout.addWidget(self.rekordbox_export)
-        layout.addWidget(QLabel("File output works without exports. Collection changes are previewed before delivery."))
-        return group
+    def _settings_category(self, group: QGroupBox) -> QWidget:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+        group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        layout.addWidget(group, 0)
+        layout.addStretch(1)
+        scroll.setWidget(content)
+        return scroll
 
     def _table(self, headers: tuple[str, ...]) -> QTableWidget:
         table = QTableWidget(0, len(headers))
@@ -473,10 +624,107 @@ class DesktopWindow(QMainWindow):
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         table.setAlternatingRowColors(True)
+        table.setWordWrap(False)
+        table.setTextElideMode(Qt.TextElideMode.ElideRight)
         table.verticalHeader().setVisible(False)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        table.horizontalHeader().setStretchLastSection(True)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        header.setMinimumSectionSize(42)
+        header.setStretchLastSection(True)
+        for column, title in enumerate(headers):
+            table.horizontalHeaderItem(column).setToolTip(title)
         return table
+
+    def _insert_row(self, table: QTableWidget, row: int, values: tuple[str, ...]) -> None:
+        table.insertRow(row)
+        for column, value in enumerate(values):
+            item = QTableWidgetItem(str(value))
+            item.setToolTip(str(value))
+            table.setItem(row, column, item)
+
+    def _build_exports_group(self) -> QGroupBox:
+        group = QGroupBox("Optional DJ collection exports")
+        layout = QVBoxLayout(group)
+        layout.setSpacing(8)
+        self.rekordbox_export = QCheckBox("Deliver to Rekordbox")
+        layout.addWidget(self.rekordbox_export)
+        layout.addWidget(QLabel("File output works without exports. Collection changes are previewed before delivery."))
+        return group
+
+    def _finish_initialization(self, value: dict[str, Any]) -> None:
+        self._config = value["config"]
+        self._set_settings(self._config)
+        self._set_queue(value["queue"])
+        self._show_runtime(value["runtime"])
+        credential_error = value["credential_error"]
+        if credential_error:
+            self.remember_secrets.setChecked(False)
+            self.settings_status.setText(
+                f"{self.settings_status.text()}\nNative credential storage unavailable: {credential_error}. "
+                "Saving secrets requires an explicit session-only choice."
+            )
+        self._set_status("Ready. Configure required credentials before processing; no network work starts automatically.")
+        if not (self._config.soulseek_username and self._config.musicbrainz_contact):
+            self.tabs.setCurrentWidget(self.tabs.widget(2))
+            self._set_status(
+                "First run: Soulseek username, MusicBrainz contact, and AcoustID key are required before processing."
+            )
+        elif not value["queue"]:
+            self.tabs.setCurrentWidget(self.tabs.widget(1))
+
+    def _finish_enqueue(self, value: dict[str, Any]) -> None:
+        self._set_queue(value["queue"])
+        self._preview = None
+        self.enqueue_button.setEnabled(False)
+        summary = self._admission_summary
+        self.preview_summary.setText(
+            f"Submission {value['job_id']} was added. {summary} Start processing explicitly."
+        )
+        self.tabs.setCurrentWidget(self.tabs.widget(0))
+        self._set_status(f"Added submission {value['job_id']} to the queue.")
+
+    def _on_progress(self, progress: object) -> None:
+        stage = getattr(progress, "stage", "Working")
+        message = getattr(progress, "message", str(progress))
+        job_id = getattr(progress, "job_id", "")
+        idx = getattr(progress, "idx", None)
+        location = f"{job_id} · track {idx}" if job_id and idx is not None else job_id
+        line = " · ".join(part for part in (str(stage), location, str(message)) if part)
+        self._set_status(line)
+        self.activity_button.setVisible(True)
+        self.progress_log.appendPlainText(line)
+
+    def _toggle_activity(self, expanded: bool) -> None:
+        self.progress_log.setVisible(expanded)
+        self.activity_button.setText("Hide activity" if expanded else "Show activity")
+
+    def _set_status(self, message: str) -> None:
+        self.status_label.setText(message)
+
+    def _show_runtime(self, status: Any) -> None:
+        self.runtime_label.setText(f"Soulseek: {status.state}")
+        saved = status.saved
+        effective = status.effective
+        restart = ", ".join(status.restart_required) or "none"
+        deferred = ", ".join(getattr(status, "deferred", ())) or "none"
+        download = (
+            f"Download folder saved: {getattr(saved, 'download_dir', '')}; "
+            f"effective: {getattr(effective, 'download_dir', '')}"
+        )
+        shares = "; ".join(status.effective.shared_dirs or ()) or "none"
+        reindex = "in progress" if status.reindexing else "idle or complete"
+        error = status.error or getattr(status, "session_loss", None) or "none"
+        summary = f"Soulseek runtime: {status.state}. Restart required: {restart}. Deferred changes: {deferred}."
+        if error != "none":
+            summary += f" Runtime error or session loss: {error}"
+        self.settings_status.setText(summary)
+        self.settings_details.setPlainText(
+            f"{download}\nSaved: {saved}\nEffective: {effective}\n"
+            f"Restart required: {restart}\nDeferred changes: {deferred}\n"
+            f"Effective shared folders: {shares}\nShare reindexing: {reindex}\n"
+            f"Runtime error or session loss: {error}"
+        )
 
     def _path_control(self, edit: QLineEdit) -> QWidget:
         container = QWidget()
@@ -496,6 +744,23 @@ class DesktopWindow(QMainWindow):
         edit.setEchoMode(QLineEdit.EchoMode.Password)
         edit.setPlaceholderText(placeholder)
         return edit
+
+    def _linked_field(self, edit: QLineEdit, button: QPushButton) -> QWidget:
+        container = QWidget()
+        row = QHBoxLayout(container)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        row.addWidget(edit, 1)
+        row.addWidget(button)
+        return container
+
+    def _open_external_url(self, url: str) -> None:
+        if not QDesktopServices.openUrl(QUrl(url)):
+            QMessageBox.warning(
+                self,
+                "Could not open link",
+                f"The system could not open this URL in a browser:\n\n{url}",
+            )
 
     def _submit(self, action: str, payload: dict[str, Any] | None = None) -> None:
         if self._busy or (self._closing and action != "shutdown"):
@@ -576,35 +841,6 @@ class DesktopWindow(QMainWindow):
         elif action == "shutdown":
             self._set_status("Shutdown complete.")
 
-    def _finish_initialization(self, value: dict[str, Any]) -> None:
-        self._config = value["config"]
-        self._set_settings(self._config)
-        self._set_queue(value["queue"])
-        self._show_runtime(value["runtime"])
-        credential_error = value["credential_error"]
-        if credential_error:
-            self.remember_secrets.setChecked(False)
-            self.settings_status.setText(
-                f"{self.settings_status.text()}\nNative credential storage unavailable: {credential_error}. "
-                "Saving secrets requires an explicit session-only choice."
-            )
-        self._set_status("Ready. Configure required credentials before processing; no network work starts automatically.")
-        if not (self._config.soulseek_username and self._config.musicbrainz_contact):
-            self.tabs.setCurrentWidget(self.tabs.widget(2))
-            self._set_status(
-                "First run: Soulseek username, MusicBrainz contact, and AcoustID key are required before processing."
-            )
-
-    def _finish_enqueue(self, value: dict[str, Any]) -> None:
-        self._set_queue(value["queue"])
-        self._preview = None
-        self.enqueue_button.setEnabled(False)
-        summary = self._admission_summary
-        self.preview_summary.setText(
-            f"Submission {value['job_id']} was added. {summary} Start processing explicitly."
-        )
-        self._set_status(f"Added submission {value['job_id']} to the queue.")
-
     def _set_queue(self, rows: list[Any]) -> None:
         self._queue = rows
         self._populate_queue()
@@ -627,37 +863,6 @@ class DesktopWindow(QMainWindow):
         self._show_runtime(status)
         self._set_status(f"Soulseek state: {status.state}.")
 
-    def _on_progress(self, progress: object) -> None:
-        stage = getattr(progress, "stage", "Working")
-        message = getattr(progress, "message", str(progress))
-        job_id = getattr(progress, "job_id", "")
-        idx = getattr(progress, "idx", None)
-        location = f"{job_id} · track {idx}" if job_id and idx is not None else job_id
-        line = " · ".join(part for part in (str(stage), location, str(message)) if part)
-        self._set_status(line)
-        self.progress_log.appendPlainText(line)
-
-    def _set_status(self, message: str) -> None:
-        self.status_label.setText(message)
-
-    def _show_runtime(self, status: Any) -> None:
-        self.runtime_label.setText(f"Soulseek: {status.state}")
-        saved = status.saved
-        effective = status.effective
-        restart = ", ".join(status.restart_required) or "none"
-        deferred = ", ".join(getattr(status, "deferred", ())) or "none"
-        download = (
-            f"Download folder saved: {getattr(saved, 'download_dir', '')}; "
-            f"effective: {getattr(effective, 'download_dir', '')}"
-        )
-        shares = "; ".join(status.effective.shared_dirs or ()) or "none"
-        reindex = "in progress" if status.reindexing else "idle or complete"
-        error = status.error or getattr(status, "session_loss", None) or "none"
-        self.settings_status.setText(
-            f"{download}\nSaved: {saved}\nEffective: {effective}\nRestart required: {restart}\n"
-            f"Deferred changes: {deferred}\nEffective shared folders: {shares}\n"
-            f"Share reindexing: {reindex}\nRuntime error or session loss: {error}"
-        )
 
     def _set_settings(self, config: Any) -> None:
         self.staging_edit.setText(str(config.staging))
@@ -832,11 +1037,6 @@ class DesktopWindow(QMainWindow):
         if self._preview is not None:
             self._submit("enqueue", {"preview": self._preview})
 
-    def _insert_row(self, table: QTableWidget, row: int, values: tuple[str, ...]) -> None:
-        table.insertRow(row)
-        for column, value in enumerate(values):
-            table.setItem(row, column, QTableWidgetItem(str(value)))
-
     def _populate_queue(self) -> None:
         if not hasattr(self, "queue_table"):
             return
@@ -850,9 +1050,11 @@ class DesktopWindow(QMainWindow):
             )
             for row in rows
         ]
-        if values == self._rendered_queue:
+        rendered = [(row.job_id, row.idx, cells) for row, cells in zip(rows, values)]
+        if rendered == self._rendered_queue:
+            self._update_queue_actions()
             return
-        self._rendered_queue = values
+        self._rendered_queue = rendered
         chosen = {
             self.queue_table.item(index.row(), 0).data(Qt.ItemDataRole.UserRole)
             for index in self.queue_table.selectionModel().selectedRows()
@@ -911,6 +1113,17 @@ class DesktopWindow(QMainWindow):
         self.delivery_button.setEnabled(has_selection)
         self.open_output_button.setEnabled(has_selection)
         self.refresh_button.setEnabled(enabled)
+        if not self._queue:
+            message = "Queue is empty. Add a playlist to add tracks."
+        elif self.queue_table.rowCount() == 0:
+            message = f"No tracks match the {self.queue_filter.currentText()} filter."
+        elif key is None:
+            message = "Select a track. Process and delivery actions apply to its whole submission."
+        else:
+            row = self._selected_queue_row()
+            label = str(getattr(row, "label", "selected track"))
+            message = f"Selected track: {label}. Process and delivery actions apply to submission {key[0]}."
+        self.queue_state_label.setText(message)
 
     def _process_selected(self) -> None:
         key = self._selected_key()
@@ -937,6 +1150,9 @@ class DesktopWindow(QMainWindow):
         dialog.resize(850, 420)
         layout = QVBoxLayout(dialog)
         table = self._table(("#", "User", "Remote path", "Format", "Selection / rejection reason", "Label"))
+        for column, width in enumerate((46, 110, 190, 82, 240, 120)):
+            table.setColumnWidth(column, width)
+
         for index, candidate in enumerate(candidates):
             self._insert_row(table, index, (
                 str(candidate.number), str(candidate.user), str(candidate.path), str(candidate.format),
