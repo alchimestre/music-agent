@@ -39,6 +39,10 @@ CALL_TIMEOUT = 15.0
 # request's.
 _LINE = 8 << 20
 
+# Present on Windows only; the numeric value is what Windows defines, kept here so the daemon start is
+# testable on any platform.
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
 
 class PortBusy(RuntimeError):
     """Something else holds the Soulseek listening port and would not stop."""
@@ -245,6 +249,9 @@ class Daemon:
                     stdout=handle,
                     stderr=handle,
                     start_new_session=True,
+                    # A console binary started from a windowed process otherwise gets a console window of
+                    # its own on Windows, which opens over the application.
+                    creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0,
                 )
             except OSError as exc:
                 raise DaemonError("start", f"cannot run {command[0]!r}: {exc}") from exc

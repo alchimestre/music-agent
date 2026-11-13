@@ -26,8 +26,10 @@ ship here; `[tools]` in `config.toml` can point at other copies.
 2. Open Settings. Enter the required credentials; each field has a button that opens its service setup page.
 3. Click Validate and save settings, then Start Soulseek.
 4. Open Add playlist. Choose a public playlist URL or tracklist file, click Preview playlist, then Add preview to queue.
-5. Select a track in Queue and click Process submission; the whole submission it belongs to is processed.
+5. Leave the window open. The queue is worked through automatically: each row shows its stage, peer, and a
+   progress bar. Process submission runs the selected submission immediately instead of waiting its turn.
 
+Nothing is queued for a decision: an offer the rule will not take on its own is reported as not found.
 Secrets are stored in the OS credential store when Remember secrets in the OS credential store is checked.
 Settings accept UTF-8 with or without a byte-order mark. A malformed settings file stops startup.
 Files remain available without a DJ collection export.

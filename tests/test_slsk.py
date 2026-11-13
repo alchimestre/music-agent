@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import shutil
 import signal
 import tempfile
@@ -313,3 +314,43 @@ def test_a_platform_with_unix_sockets_binds_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(slsk.sys, "platform", "darwin")
     assert slsk.managed_address(config) == ""
     assert "--bind" not in slsk.Daemon(config)._command("someone")
+
+
+def test_the_daemon_runs_without_a_console_window_on_windows(tmp_path, creds, monkeypatch):
+    """A windowed app starting a console binary must not open a console window over itself."""
+    calls: dict = {}
+
+    class FakeProcess:
+        stdin = io.BytesIO()
+
+    def fake_popen(command, **kwargs):
+        calls.update(kwargs)
+        calls["command"] = command
+        return FakeProcess()
+
+    monkeypatch.setattr(slsk, "free_ports", lambda *args, **kwargs: None)
+    monkeypatch.setattr(slsk.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(slsk.sys, "platform", "win32")
+
+    slsk.Daemon(make_config(tmp_path)).start()
+
+    assert calls["creationflags"] == slsk.CREATE_NO_WINDOW
+
+
+def test_the_daemon_keeps_the_console_it_inherits_elsewhere(tmp_path, creds, monkeypatch):
+    calls: dict = {}
+
+    class FakeProcess:
+        stdin = io.BytesIO()
+
+    def fake_popen(command, **kwargs):
+        calls.update(kwargs)
+        return FakeProcess()
+
+    monkeypatch.setattr(slsk, "free_ports", lambda *args, **kwargs: None)
+    monkeypatch.setattr(slsk.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(slsk.sys, "platform", "darwin")
+
+    slsk.Daemon(make_config(tmp_path)).start()
+
+    assert calls["creationflags"] == 0

@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import io
 import threading
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import acquire, genre, library, process, reference, review, state, store, tracklist
+from . import acquire, genre, library, process, reference, state, store, tracklist
 from .config import Config
 from .credentials import CredentialStore, CredentialStoreError
 from .resources import bundle_config
@@ -21,6 +20,7 @@ class Progress:
     message: str
     job_id: str = ''
     idx: int | None = None
+    fraction: float | None = None
 
 
 @dataclass
@@ -46,16 +46,6 @@ class QueueRow:
     peer: str = ''
     peer_queue: int | None = None
     progress: str = ''
-
-
-@dataclass(frozen=True)
-class CandidateView:
-    number: int
-    user: str
-    path: str
-    format: str
-    reason: str
-    label: str
 
 
 @dataclass
@@ -108,19 +98,17 @@ class Application:
     def snapshot(self) -> list[QueueRow]:
         rows = []
         for job in state.all_jobs(self.config):
-            source = next((event.get('source', '') for event in job.events()
+            events = job.events()
+            source = next((event.get('source', '') for event in events
                            if event.get('event') == 'submission'), '')
+            peers = {event['idx']: event.get('peer', '') for event in events
+                     if event.get('event') == 'transfer_started' and event.get('idx') is not None}
             for record in job.records():
                 rows.append(QueueRow(job.id, record.idx, record.label, record.status,
                                      record.decision, record.notes, record.local_path,
-                                     job.work_id(record.idx), source=source))
+                                     job.work_id(record.idx), source=source,
+                                     peer=peers.get(record.idx, '')))
         return rows
-
-    def candidates(self, job_id: str, idx: int) -> list[CandidateView]:
-        record = self._record(job_id, idx)
-        return [CandidateView(number, verdict.candidate.user, verdict.candidate.path,
-                              verdict.candidate.ext, verdict.reason, verdict.label.value)
-                for number, verdict in enumerate(record.offered(), 1)]
 
     def run(self, job_id: str, emit=lambda event: None) -> RunResult:
         self.stop_event.clear()
@@ -142,7 +130,15 @@ class Application:
         acquire.run(self.config, job.execution(), self.runtime.daemon, reference.lookup(self.config),
                     library=shelf, stream=io.StringIO(), stop_event=self.stop_event,
                     pause_event=self.pause_event,
-                    log=lambda message: emit(Progress('acquire', message, job.id)))
+                    log=lambda message: emit(Progress('acquire', message, job.id)),
+                    progress=lambda row: self._transfer_progress(job, row, emit))
+
+    def _transfer_progress(self, job: state.Job, row: dict, emit) -> None:
+        fraction = row.get('progress')
+        if fraction is None:
+            return
+        emit(Progress('transfer', f"{row.get('peer', '')} · {fraction * 100:.0f}%", job.id,
+                      row.get('idx'), float(fraction)))
 
     def _process(self, job: state.Job, shelf, emit) -> None:
         emit(Progress('process', 'Identifying, converting, normalizing, and tagging.', job.id))
@@ -158,28 +154,6 @@ class Application:
                     or record.decided() and record.decision != state.ACCEPTED
                     for record in job.records()):
                 job.finish()
-
-    def decide(self, job_id: str, idx: int, action: str, candidate: int | None = None,
-               emit=lambda event: None):
-        job = self._job(job_id)
-        with store.writer_lock(self.config.state_root):
-            if action == 'skip':
-                return review.skip(job, idx)
-            if action == 'not_found':
-                return review.not_found(job, idx)
-            if action != 'accept':
-                raise ValueError('Review action must be accept, skip, or not_found.')
-            self._prerequisites()
-            return review.accept(job, idx, staging=self.config.staging, number=candidate,
-                                 daemon_factory=self._review_daemon,
-                                 log=lambda message: emit(Progress('review', message, job.id, idx)))
-
-    @contextmanager
-    def _review_daemon(self):
-        status = self.runtime.start()
-        if status.error:
-            raise RuntimeError(status.error)
-        yield self.runtime.daemon
 
     def delivery_plans(self, job_id: str):
         from . import deliveries
@@ -210,12 +184,6 @@ class Application:
         if job is None:
             raise ValueError('Submission does not exist.')
         return job
-
-    def _record(self, job_id: str, idx: int) -> state.Record:
-        record = next((row for row in self._job(job_id).records() if row.idx == idx), None)
-        if record is None:
-            raise ValueError('Track does not exist in this submission.')
-        return record
 
     def _prerequisites(self) -> None:
         for name in (self.config.musicbrainz_contact_env, self.config.acoustid_key_env):

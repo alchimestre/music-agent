@@ -95,3 +95,44 @@ def test_bundled_tools_are_resolved_on_load_and_after_a_save(tmp_path, monkeypat
     app.save(default, remember=False)
     assert app.config.soulseek_command == (str(bin_dir / 'soulseek-rs'), 'daemon')
     assert Application(path=app.path).config.soulseek_command == (str(bin_dir / 'soulseek-rs'), 'daemon')
+
+
+def _one_track_job(app, tmp_path):
+    tracklist = tmp_path / 'tracks.txt'
+    tracklist.write_text('Artist - Song\n')
+    job_id = app.enqueue(app.preview(str(tracklist)))
+    return job_id, app._job(job_id)
+
+
+def test_a_polled_transfer_becomes_one_progress_event(tmp_path):
+    app = app_for(tmp_path)
+    _, job = _one_track_job(app, tmp_path)
+    emitted = []
+
+    app._transfer_progress(job, {'idx': 1, 'peer': 'peerA', 'progress': 0.42}, emitted.append)
+
+    assert len(emitted) == 1
+    event = emitted[0]
+    assert (event.stage, event.job_id, event.idx, event.fraction) == ('transfer', job.id, 1, 0.42)
+    assert 'peerA' in event.message
+    assert '42%' in event.message
+
+
+def test_a_transfer_without_a_fraction_emits_nothing(tmp_path):
+    app = app_for(tmp_path)
+    _, job = _one_track_job(app, tmp_path)
+    emitted = []
+
+    app._transfer_progress(job, {'idx': 1, 'peer': 'peerA', 'progress': None}, emitted.append)
+
+    assert emitted == []
+
+
+def test_the_queue_row_names_the_peer_a_transfer_went_to(tmp_path):
+    app = app_for(tmp_path)
+    job_id, job = _one_track_job(app, tmp_path)
+    job.append_event('transfer_started', idx=1, peer='peerA')
+
+    rows = [row for row in app.snapshot() if row.job_id == job_id]
+
+    assert [row.peer for row in rows] == ['peerA']
