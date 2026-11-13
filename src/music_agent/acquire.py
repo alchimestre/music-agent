@@ -736,15 +736,16 @@ class Pass:
         added = merge(record, found)
         job.append_event("searched", idx=record.idx, added=added, offered=len(record.candidates))
 
-        if record.settled() is None:
-            record.status = state.PENDING
-            log(f"[{record.idx}] {record.label}: {len(record.offered())} offered, "
-                "nothing to take on its own")
-            return Outcome.IN_REVIEW if record.usable() else Outcome.NOTHING_USABLE
-
         tried = set(record.tried)
+        # No decision is asked of anybody: what the rule would not take on its own is not taken at all, and
+        # the track is reported instead of queued for a person.
+        takeable = rules.takeable(record.track)
+        if not takeable:
+            record.status = state.PENDING
+            log(f"[{record.idx}] {record.label}: nothing takeable offered")
+            return Outcome.NOTHING_USABLE
         queue = sorted(
-            (verdict.candidate for verdict in rules.takeable(record.track)
+            (verdict.candidate for verdict in takeable
              if identifier(verdict.candidate) not in tried),
             key=rules.rank,
         )
@@ -763,7 +764,7 @@ class Pass:
                 record.status = state.PENDING
                 job.append_event("no_upgrade_offered", idx=record.idx, replaces=upgrade.path)
                 log(f"[{record.idx}] {record.label}: nothing lossless offered — the copy held stands")
-                return Outcome.IN_REVIEW
+                return Outcome.ALREADY_HELD
 
         if not queue and silenced:
             # Nothing is left to try that the account is still willing to ask, which is not the same thing as a

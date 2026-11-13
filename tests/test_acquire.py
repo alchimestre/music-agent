@@ -354,6 +354,24 @@ def test_a_track_with_no_length_to_check_is_taken_on_its_name(tmp_path):
     assert "download.start" in tools_called(calls), "taken, not put in the queue"
 
 
+def test_an_offer_whose_name_names_no_track_is_reported_not_taken(tmp_path):
+    """Nothing is put to a person: an offer the rule will not settle is reported, never guessed at."""
+    unnamed = [{
+        "id": "peerA:Music\\01.flac",
+        "username": "peerA",
+        "filename": "Music\\01.flac",
+        "extension": "flac",
+        "duration_sec": 449,
+        "queue_size": 0,
+    }]
+    config, job, daemon, calls = setup(tmp_path, results=unnamed)
+
+    summary, quiet = pass_once(config, job, daemon, Reference(), calls)
+
+    assert summary.nothing_usable == [1], quiet.lines
+    assert "download.start" not in tools_called(calls)
+
+
 def test_a_search_with_no_usable_candidate_says_so(tmp_path):
     config, job, daemon, calls = setup(tmp_path, results=WRONG_LENGTH)
 
@@ -387,6 +405,26 @@ def test_a_connect_stall_rotates_to_the_next_peer_and_cancels_the_first(tmp_path
     assert record.local_path == str(landed)
     assert "peerB:Other\\Kiasmos - Blurred.flac" in record.tried
     assert "download.cancel" in tools_called(calls), "a stalled transfer must not hold a transfer slot"
+
+
+def test_a_pass_reports_the_transfers_it_polls(tmp_path):
+    """The window draws a bar from these rows, so a polled transfer has to reach it with a fraction."""
+    landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
+    config, job, daemon, calls = setup(tmp_path, results=GOOD,
+                                       download=f"downloading:transferring:45000:{landed}|"
+                                                f"downloading:transferring:82000000:{landed}")
+    landed.write_bytes(b"a file")
+    quiet = Quiet(Clock())
+    rows: list[dict] = []
+
+    acquire.run(config, job, daemon, Reference(), log=quiet.log, sleep=quiet.sleep,
+                clock=quiet.clock, progress=rows.append)
+
+    assert rows, "a transfer in flight is reported while it is polled"
+    assert {row["idx"] for row in rows} == {1}
+    assert {row["peer"] for row in rows} == {"peerA"}
+    fractions = [row["progress"] for row in rows if row["progress"] is not None]
+    assert fractions and all(0 < value <= 1 for value in fractions)
 
 
 def test_a_transfer_is_asked_about_on_the_passs_own_interval(tmp_path):
