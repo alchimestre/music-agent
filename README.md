@@ -107,6 +107,42 @@ Stored at `paths.peers`.
 another one. It holds directories, loudness targets, Soulseek pace, the ignore policy, `[tools]` paths,
 `[export]` targets, and the names of the credential variables. No secrets.
 
+## Spotify account playlists
+
+The public playlist reader used by `run` and `acquire` remains anonymous and unchanged. Account playlist
+management uses [spogo](https://github.com/steipete/spogo), an unofficial Spotify client that calls
+undocumented endpoints; Spotify can change or block those endpoints.
+
+Install spogo with Homebrew:
+
+```sh
+brew install steipete/tap/spogo
+```
+
+Import the existing browser session into spogo's local cookie cache:
+
+```sh
+spogo auth import --browser BROWSER
+```
+
+Choose a supported browser with an existing Spotify session; Arc is an option. Do not paste cookies or
+passwords into `music-agent` arguments, configuration, logs, or chat. The cookie cache is sensitive
+authentication material; protect it as you would a password.
+
+```sh
+music-agent spotify playlists
+music-agent spotify read PLAYLIST
+music-agent spotify read PLAYLIST --json
+music-agent spotify read PLAYLIST --out PATH
+music-agent spotify add PLAYLIST URI...
+music-agent spotify remove PLAYLIST URI...
+music-agent spotify remove PLAYLIST URI... --apply
+```
+
+`read` defaults to text and preserves track order and duplicates. Empty collections return empty results.
+`remove` previews the removal of every matching URI occurrence; it writes only with `--apply`.
+Playlist reordering is not supported.
+
 Soulseek takes one client per account. A pass stops another client on this machine before it starts, then
 holds the session in a daemon that outlives it.
 
