@@ -104,6 +104,38 @@ working, not the playlist failing; a list of newer or rarer tracks does better.
 
 **Done when** the run holds every track that was asked for, in the order it was asked for.
 
+## Manage account playlists
+
+The public Spotify URL above remains an anonymous reader for acquisition. Separate account playlist commands
+use [spogo](https://github.com/steipete/spogo), an unofficial client using undocumented Spotify endpoints;
+those endpoints can change or stop working.
+
+Install spogo and import the existing local browser session:
+
+```sh
+brew install steipete/tap/spogo
+spogo auth import --browser BROWSER
+```
+
+Choose a supported browser with an existing Spotify session; Arc is an option. Never paste cookies or
+passwords into `music-agent` arguments, configuration, logs, or chat. The local cookie cache is sensitive
+authentication material.
+
+```sh
+music-agent spotify playlists
+music-agent spotify read PLAYLIST
+music-agent spotify read PLAYLIST --json
+music-agent spotify read PLAYLIST --out PATH
+music-agent spotify add PLAYLIST URI...
+music-agent spotify remove PLAYLIST URI...
+music-agent spotify remove PLAYLIST URI... --apply
+```
+
+`read` prints text by default. `--json` selects JSON; `--out PATH` writes the default text format to a file.
+`remove` is a dry run by default and removes all occurrences of each URI only with `--apply`. Reordering is
+not supported.
+
+
 ## 2. Acquire
 
 ```
@@ -407,10 +439,11 @@ and no lane is touched. The collection is not read or written.
 
 ## Longer runs
 
-A run of dozens of tracks prints a great deal, and `run` is one command from start to finish, so a session
-does not have to sit through it. Hand it to a subagent where the harness has one, and have it report back the
-stage counts, the review queue with its reasons, and the ungenred list — three things, and nothing that needs
-a conversation.
+Start long runs as background shell jobs in the parent harness with `PYTHONUNBUFFERED=1`, keeping stdout
+attached. The pass's completed/total lines feed the harness's live progress widget. In omp, use
+`bash` with `async: true`, `pty: false`, and a deadline long enough for the pass.
+
+Report the stage counts, the review queue with its reasons, and the ungenred list when the command finishes.
 
 Stop a tool you started. A `rekordbox-mcp` holds the database the import writes, and the harness restarts it
 when it wants it, so stopping it needs nobody's permission. Leave `soulseek-rs daemon` alone: a pass starts

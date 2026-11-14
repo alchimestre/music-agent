@@ -7,6 +7,7 @@ reads what this prints and makes the calls that need judgement.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -28,6 +29,7 @@ from . import slsk
 from . import state
 from . import store
 from . import sweep
+from . import spotify_account
 from . import tidy
 from . import traktor
 
@@ -203,6 +205,23 @@ def _build_parser() -> argparse.ArgumentParser:
         help="the peers that advertise files and deliver nothing, and the ignore they earned")
     ignored_peers.add_argument("--unban", default=None, metavar="USER",
                                help="forget a peer and its failures, so the next pass asks it again")
+    spotify_command = commands.add_parser("spotify", parents=[common],
+                                          help="read and edit account playlists through spogo")
+    spotify_commands = spotify_command.add_subparsers(dest="spotify_command", required=True)
+    spotify_commands.add_parser("playlists", help="list account playlists")
+    spotify_read = spotify_commands.add_parser("read", help="read a playlist's ordered tracks")
+    spotify_read.add_argument("playlist")
+    spotify_read.add_argument("--json", action="store_true", help="print playlist track details as JSON")
+    spotify_read.add_argument("--out", type=Path, metavar="PATH", help="write the tracklist text to a file")
+    spotify_add = spotify_commands.add_parser("add", help="add Spotify track URIs in order")
+    spotify_add.add_argument("playlist")
+    spotify_add.add_argument("uris", nargs="+")
+    spotify_remove = spotify_commands.add_parser(
+        "remove", help="preview removal of every occurrence of Spotify track URIs")
+    spotify_remove.add_argument("playlist")
+    spotify_remove.add_argument("uris", nargs="+")
+    spotify_remove.add_argument("--apply", action="store_true", help="remove all occurrences shown in the preview")
+
     return parser
 
 
@@ -861,8 +880,43 @@ def _peers(config: config_module.Config, args: argparse.Namespace) -> int:
 _THREADED = frozenset({"run", "acquire", "review"})
 
 
+def _spotify(args: argparse.Namespace) -> int:
+    try:
+        if args.spotify_command == "playlists":
+            print(json.dumps(spotify_account.list_playlists(), ensure_ascii=False, indent=2))
+            return 0
+        if args.spotify_command == "add":
+            spotify_account.add_tracks(args.playlist, args.uris)
+            print(f"Added {len(args.uris)} track(s).")
+            return 0
+        playlist = spotify_account.read_playlist(args.playlist)
+        if args.spotify_command == "remove":
+            spotify_account.validate_mutation(args.playlist, args.uris)
+            requested = set(args.uris)
+            matches = [(track["position"], track) for track in playlist.tracks if track.get("uri") in requested]
+            for position, track in matches:
+                print(f"{position}: {track.get('uri', '')} {track.get('name', '')}")
+            if args.apply and matches:
+                spotify_account.remove_tracks(args.playlist, args.uris)
+            print(f"{len(matches)} occurrence(s) {'removed' if args.apply else 'would be removed; use --apply'}.")
+            return 0
+        from dataclasses import asdict
+        text = (json.dumps(asdict(playlist), ensure_ascii=False, indent=2) + "\n"
+                if args.json else playlist.tracklist.text())
+        if args.out:
+            args.out.write_text(text, encoding="utf-8")
+        else:
+            print(text, end="")
+        return 0
+    except (spotify_account.SpotifyAccountError, playlists.PlaylistError, ValueError, OSError) as error:
+        print(error, file=sys.stderr)
+        return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    if args.command == "spotify":
+        return _spotify(args)
     try:
         config = config_module.load(getattr(args, "config", None))
     except ValueError as error:
