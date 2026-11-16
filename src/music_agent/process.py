@@ -526,20 +526,22 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
     tools = tools or Tools()
     records = job.records()
     summary = Summary()
-    placed: list[state.Record] = []
+    _resume_records(config, records)
+    placed = [record for record in records if record.status in {state.CONVERTED, state.NORMALIZED}]
     found: dict[int, identify.Identified] = {}
 
     downloads = [record for record in records if record.status == state.DOWNLOADED]
-    if downloads:
+    identifying = downloads + placed
+    if identifying:
         def identified(record: state.Record) -> identify.Identified:
             log(f"[{record.idx}] {record.label}: identifying")
             return identify_one(record, tools, log)
 
         # The timeout is process-global, so it has to bracket the pool rather than each call: a thread
         # restoring the previous value while three others are still waiting is the hang this prevents.
-        with identify.bounded(), ThreadPoolExecutor(max_workers=min(IDENTIFIERS, len(downloads))) as pool:
-            answers = pool.map(identified, downloads)
-            found = dict(zip((record.idx for record in downloads), answers))
+        with identify.bounded(), ThreadPoolExecutor(max_workers=min(IDENTIFIERS, len(identifying))) as pool:
+            answers = pool.map(identified, identifying)
+            found = dict(zip((record.idx for record in identifying), answers))
 
     for record in downloads:
         try:
@@ -591,8 +593,9 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
         summary.placed.append(record.idx)
         job.write_records(records)          # a crash costs the current track and nothing else
 
-    for folder in sorted({Path(record.local_path).parent for record in placed}):
-        in_lane = [record for record in placed if Path(record.local_path).parent == folder]
+    normalizing = [record for record in placed if record.status == state.CONVERTED]
+    for folder in sorted({Path(record.local_path).parent for record in normalizing}):
+        in_lane = [record for record in normalizing if Path(record.local_path).parent == folder]
         try:
             files = {Path(record.local_path).resolve() for record in in_lane}
             failed = normalize(config, folder, files=files, run=tools.runner, log=log)
@@ -616,6 +619,8 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
                 continue
             record.status = state.NORMALIZED
             summary.normalized.append(record.idx)
+
+    job.write_records(records)
 
     for record in placed:
         if record.status != state.NORMALIZED:
@@ -647,3 +652,18 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
     job.write_status(config)
     # As in acquire: the run is finished by the import, which is where the pipeline ends.
     return summary
+
+
+def _resume_records(config: Config, records: list[state.Record]) -> None:
+    lanes = (config.lossless.resolve(), config.lossy.resolve())
+    staging = config.staging.resolve()
+    for record in records:
+        if record.status != state.RETRY_LATER or not record.local_path:
+            continue
+        path = Path(record.local_path).resolve()
+        if not path.is_file():
+            continue
+        if any(path.is_relative_to(lane) for lane in lanes):
+            record.status = state.CONVERTED
+        elif path.is_relative_to(staging):
+            record.status = state.DOWNLOADED

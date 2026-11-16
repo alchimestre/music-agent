@@ -29,6 +29,7 @@ class DeliveryPlan:
     artifact_identity: tuple[str, ...] = field(default=(), repr=False)
     artifact_errors: tuple[tuple[int, str], ...] = field(default=(), repr=False)
     blocked: bool = field(default=False, repr=False)
+    verified_artifacts: tuple[str, ...] = field(default=(), repr=False)
 
 
 @dataclass(frozen=True)
@@ -137,6 +138,10 @@ def _rekordbox_plan(target, config: Config, job: state.Job) -> DeliveryPlan:
         fingerprint=_key(planned.destination, planned.fingerprint),
         target_identity=planned.destination,
         artifact_errors=tuple(sorted(failures.items())),
+        verified_artifacts=tuple(sorted({
+            str(Path(record.local_path).resolve()) for record in job.records()
+            if record.idx in planned.already and record.local_path
+        })),
     )
 
 
@@ -146,19 +151,23 @@ def _traktor_plan(target, config: Config, job: state.Job) -> DeliveryPlan:
         return _unavailable(target.name, identity, "target is not installed on this machine")
     try:
         planned = traktor.plan(config)
+        if planned is None:
+            return _unavailable(target.name, identity, "traktor-nml is not installed on this machine")
+        paths = [record.local_path for record in importing.delivery_records(job) if record.local_path]
+        verified = traktor.verify(config, paths) if paths else None
     except (traktor.Missing, traktor.Failed) as error:
         return _unavailable(target.name, identity, str(error))
     except Exception as error:
         return _unavailable(target.name, identity, f"cannot read the Traktor collection: {error}")
-    if planned is None:
-        return _unavailable(target.name, identity, "traktor-nml is not installed on this machine")
     return DeliveryPlan(
         target=target.name,
         destination="the Traktor collection selected by the configured traktor-nml command",
         changes=planned.changes,
         requires_confirmation=planned.requires_confirmation,
-        fingerprint=_key(planned.destination, planned.changes),
-        target_identity=planned.destination,
+        fingerprint=_key(verified["collection"] if verified else planned.destination, planned.changes),
+        target_identity=verified["collection"] if verified else planned.destination,
+        verified_artifacts=tuple(sorted(path for path, present in verified["paths"].items() if present))
+                           if verified else (),
     )
 
 
@@ -187,6 +196,50 @@ def delivery_plans(config: Config, job: state.Job) -> list[DeliveryPlan]:
     for target in exporting.configured(config):
         plans.append(replace(_plan_target(target, config, job), artifact_identity=identities))
     return plans
+
+
+def delivery_receipts(config: Config, job: state.Job,
+                      plans: list[DeliveryPlan] | None = None) -> dict[int, dict[str, dict]]:
+    """Read durable per-file outcomes without invoking a collection writer."""
+    records = job.records()
+    work_ids = _work_ids(config, job, records)
+    planned = {plan.target: plan for plan in (plans if plans is not None
+                                               else delivery_plans(config, job))}
+    targets = exporting.configured(config)
+    result = {record.idx: {} for record in records}
+    for target in targets:
+        plan = planned.get(target.name)
+        for record in records:
+            result[record.idx][target.name] = _delivery_receipt(
+                config, target.name, plan, record, work_ids.get(record.idx, ""))
+    return result
+
+
+def _delivery_receipt(config: Config, target: str, plan: DeliveryPlan | None,
+                      record: state.Record, work_id: str) -> dict:
+    if not Path(record.local_path).is_file():
+        return {"status": "failed", "message": "current artifact is missing"}
+    if not work_id:
+        return {"status": "failed", "message": "record has no canonical work_id"}
+    if plan is None:
+        return {"status": "failed", "message": "target has no current delivery plan"}
+    artifact_errors = dict(plan.artifact_errors)
+    if record.idx in artifact_errors:
+        return {"status": "failed", "message": artifact_errors[record.idx]}
+    if plan.blocked:
+        return {"status": "failed", "message": plan.error or "target is unavailable"}
+    if str(Path(record.local_path).resolve()) not in plan.verified_artifacts:
+        return {"status": "pending", "message": "current collection does not verify this artifact"}
+    destination = _collection_key(plan.target_identity or plan.destination, record, work_id)
+    try:
+        status = store.delivery_status(config.state_root, work_id, target, destination)
+    except Exception as error:
+        return {"status": "failed", "message": f"could not read delivery status: {error}"}
+    if status == "success":
+        return {"status": "success", "message": "delivered to this collection"}
+    if status in {None, "pending"}:
+        return {"status": "pending", "message": "no current success receipt"}
+    return {"status": "failed", "message": "delivery receipt is failed or unrecognized"}
 
 
 def _stale(current: list[DeliveryPlan], approved: list[DeliveryPlan],
@@ -220,10 +273,10 @@ def _prepare(config: Config, target: str, planned: DeliveryPlan,
         status = store.delivery_status(config.state_root, work_id, target, destination)
     except Exception as error:
         return destination, ArtifactOutcome(record.idx, "failed", f"could not read delivery status: {error}")
-    if status == "success":
+    if status == "success" and str(Path(record.local_path).resolve()) in planned.verified_artifacts:
         return destination, ArtifactOutcome(record.idx, "success",
                                             "already delivered to this collection")
-    if status not in {None, "pending", "failed"}:
+    if status not in {None, "pending", "failed", "success"}:
         return destination, ArtifactOutcome(record.idx, "failed",
                                             f"unknown saved delivery status: {status}")
     try:
@@ -292,10 +345,15 @@ def _execute_target(target, config: Config, job: state.Job, records: list[state.
         if planned.requires_confirmation:
             traktor.apply(config)
             emit("delivery", "Traktor collection updated; open Traktor and run Check Consistency → Analyze")
-            message = "written by traktor-nml"
-        else:
-            message = "already in sync"
-        return [ArtifactOutcome(record.idx, "success", message) for record in records]
+        verified = traktor.verify(config, [record.local_path for record in records])
+        if verified["collection"] != planned.target_identity:
+            raise traktor.Failed("Traktor collection identity changed after the approved plan")
+        return [
+            ArtifactOutcome(record.idx, "success", "verified in the Traktor collection")
+            if verified["paths"][str(Path(record.local_path).resolve())]
+            else ArtifactOutcome(record.idx, "failed", "file is not present in the Traktor collection")
+            for record in records
+        ]
     message = f"durable delivery is unsupported for target {target.name}"
     return [ArtifactOutcome(record.idx, "failed", message) for record in records]
 

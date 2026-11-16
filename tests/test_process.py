@@ -891,3 +891,24 @@ def test_a_frozen_executable_runs_the_normalizer_in_its_own_process(monkeypatch,
 
     assert command[:4] == [r"C:\app\music-agent.exe", "--normalize", str(tmp_path / "report.txt"),
                            str(tmp_path / "normalize.py")]
+
+
+@pytest.mark.parametrize('checkpoint', [state.CONVERTED, state.NORMALIZED, state.RETRY_LATER])
+def test_resume_processes_saved_audio_checkpoint_without_replacing_file(tmp_path, checkpoint):
+    config = make_config(tmp_path)
+    config.lossless.mkdir(parents=True)
+    audio = aiff(config.lossless / 'Kiasmos - Blurred.aiff')
+    record = state.Record(1, 'Kiasmos', 'Blurred', status=checkpoint,
+                          local_path=str(audio), format='aiff', genre='Techno')
+    job = job_with(config, [record])
+    runner = FakeRunner()
+    tools = with_identification(runner, styles=('Minimal Techno',))
+
+    process.run(config, job.execution(), tools=tools, log=lambda message: None)
+
+    saved = job.records()[0]
+    assert saved.status == state.TAGGED
+    assert saved.local_path == str(audio)
+    assert tag.read(audio).title == 'Blurred'
+    assert runner.conversion_count == 0
+    assert bool(runner.normalizations()) == (checkpoint != state.NORMALIZED)

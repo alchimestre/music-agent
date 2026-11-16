@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from music_agent import deliveries
 from music_agent.config import DEFAULTS
@@ -116,9 +119,11 @@ def test_retry_skips_artifacts_already_delivered_to_same_destination(tmp_path, m
     config = replace(DEFAULTS, export_targets=("rekordbox",), state_root=tmp_path)
     job = FakeJob(tmp_path, records(tmp_path))
     target = FakeTarget("rekordbox")
+    present = {str(Path(job.records()[0].local_path).resolve())}
     monkeypatch.setattr(deliveries.exporting, "configured", lambda config: [target])
     monkeypatch.setattr(deliveries, "_plan_target", lambda target, config, job: deliveries.DeliveryPlan(
         target=target.name, destination="master.db", changes="2 to add", requires_confirmation=True,
+        verified_artifacts=tuple(sorted(present)),
     ))
     approved_plans = deliveries.delivery_plans(config, job)
     rows = {}
@@ -135,12 +140,14 @@ def test_retry_skips_artifacts_already_delivered_to_same_destination(tmp_path, m
 
     def deliver_target(target, config, job, selected, planned, emit):
         calls.append([record.idx for record in selected])
+        present.update(str(Path(record.local_path).resolve()) for record in selected)
         return [deliveries.ArtifactOutcome(record.idx, "success", "added") for record in selected]
 
     monkeypatch.setattr(deliveries, "_execute_target", deliver_target)
 
     first = deliveries.deliver(config, job, approved_plans=approved_plans,
                                emit=lambda stage, message: None)
+    approved_plans = deliveries.delivery_plans(config, job)
     second = deliveries.deliver(config, job, approved_plans=approved_plans,
                                 emit=lambda stage, message: None)
 
@@ -174,9 +181,11 @@ def test_replaced_artifact_gets_a_new_durable_delivery_key(tmp_path, monkeypatch
     config = replace(DEFAULTS, export_targets=("rekordbox",), state_root=tmp_path)
     job = FakeJob(tmp_path, records(tmp_path))
     target = FakeTarget("rekordbox")
+    present = set()
     monkeypatch.setattr(deliveries.exporting, "configured", lambda config: [target])
     monkeypatch.setattr(deliveries, "_plan_target", lambda target, config, job: deliveries.DeliveryPlan(
         target=target.name, destination="master.db", changes="2 to add", requires_confirmation=True,
+        verified_artifacts=tuple(sorted(present)),
     ))
     rows = {}
     destinations = []
@@ -192,6 +201,7 @@ def test_replaced_artifact_gets_a_new_durable_delivery_key(tmp_path, monkeypatch
 
     def deliver_target(target, config, job, selected, planned, emit):
         calls.append([record.idx for record in selected])
+        present.update(str(Path(record.local_path).resolve()) for record in selected)
         return [deliveries.ArtifactOutcome(record.idx, "success", "added") for record in selected]
 
     monkeypatch.setattr(deliveries, "_execute_target", deliver_target)
@@ -291,11 +301,15 @@ def test_traktor_plan_is_read_only(tmp_path, monkeypatch):
 
     config = replace(DEFAULTS, export_targets=("traktor",), state_root=tmp_path)
     job = FakeJob(tmp_path, records(tmp_path))
-    calls = []
     monkeypatch.setattr(traktor, "command", lambda config: ["traktor-nml"])
 
     def run(argv, **kwargs):
-        calls.append(argv[-1])
+        if "verify" in argv:
+            payload = {"collection": str(tmp_path / "collection.nml"),
+                       "paths": {str(Path(record.local_path).resolve()): False for record in job.records()}}
+            return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+        if argv[-1] != "plan":
+            raise AssertionError("A read-only plan must not apply collection changes")
         return SimpleNamespace(returncode=0, stdout="2 to repoint · 1 to add", stderr="")
 
     monkeypatch.setattr(traktor.subprocess, "run", run)
@@ -305,7 +319,6 @@ def test_traktor_plan_is_read_only(tmp_path, monkeypatch):
     assert plan.target == "traktor"
     assert plan.changes == "2 to repoint · 1 to add"
     assert plan.requires_confirmation
-    assert calls == ["plan"]
 
 
 def test_open_rekordbox_is_a_plan_error_before_database_open(tmp_path, monkeypatch):
@@ -323,3 +336,109 @@ def test_open_rekordbox_is_a_plan_error_before_database_open(tmp_path, monkeypat
     assert plan.error
     assert "close" in plan.error.lower()
     assert not plan.requires_confirmation
+
+
+@pytest.mark.parametrize("classification, expected", [
+    ("already", "success"), ("added", "pending"), ("repointed", "pending"),
+])
+def test_saved_success_requires_current_collection_membership(tmp_path, monkeypatch, classification, expected):
+    config = replace(DEFAULTS, export_targets=("rekordbox",), state_root=tmp_path)
+    job = FakeJob(tmp_path, records(tmp_path)[:1])
+    target = FakeTarget("rekordbox")
+    current = deliveries.importing.ImportPlan("master.db", (), **{classification: [1]})
+    monkeypatch.setattr(deliveries.exporting, "configured", lambda config: [target])
+    monkeypatch.setattr(deliveries.importing, "plan", lambda config, job: current)
+    monkeypatch.setattr(deliveries.store, "delivery_status", lambda *args: "success")
+    monkeypatch.setattr(deliveries.store, "set_delivery", lambda *args, **kwargs: None)
+    selected = []
+
+    def execute(target, config, job, records, planned, emit):
+        selected.extend(record.idx for record in records)
+        return [deliveries.ArtifactOutcome(record.idx, "success", "restored") for record in records]
+
+    monkeypatch.setattr(deliveries, "_execute_target", execute)
+    planned = deliveries.delivery_plans(config, job)
+    receipt = deliveries.delivery_receipts(config, job, planned)[1]["rekordbox"]
+    assert receipt["status"] == expected
+
+    deliveries.deliver(config, job, planned)
+    assert selected == ([] if classification == "already" else [1])
+
+
+def test_traktor_zero_change_plan_cannot_verify_unindexed_external_file(tmp_path, monkeypatch):
+    config = replace(DEFAULTS, export_targets=("traktor",), state_root=tmp_path)
+    job = FakeJob(tmp_path, records(tmp_path)[:1])
+    target = FakeTarget("traktor")
+    collection = str(tmp_path / "collection.nml")
+    monkeypatch.setattr(deliveries.exporting, "configured", lambda config: [target])
+    monkeypatch.setattr(deliveries.traktor, "plan", lambda config:
+                        deliveries.traktor.Plan("configured-command", "0 to repoint · 0 to add", False))
+    monkeypatch.setattr(deliveries.traktor, "verify", lambda config, paths:
+                        {"collection": collection, "paths": {path: False for path in paths}}, raising=False)
+    monkeypatch.setattr(deliveries.store, "delivery_status", lambda *args: "success")
+    monkeypatch.setattr(deliveries.store, "set_delivery", lambda *args, **kwargs: None)
+
+    planned = deliveries.delivery_plans(config, job)
+    outcome = deliveries.deliver(config, job, planned)[0]
+
+    assert outcome.success is False
+    assert outcome.artifacts[0].status == "failed"
+    assert deliveries.delivery_receipts(config, job)[1]["traktor"]["status"] != "success"
+
+
+@pytest.fixture
+def sqlite_collection(tmp_path, monkeypatch):
+    import sqlite3
+    from contextlib import contextmanager
+
+    config = replace(DEFAULTS, export_targets=("rekordbox",), state_root=tmp_path)
+    job = FakeJob(tmp_path, records(tmp_path)[:1])
+    master = tmp_path / "master.db"
+    setup = sqlite3.connect(master)
+    setup.execute("PRAGMA journal_mode=WAL")
+    setup.execute("CREATE TABLE tracks (path TEXT)")
+    setup.execute("INSERT INTO tracks VALUES (?)", (job.records()[0].local_path,))
+    setup.commit()
+    setup.close()
+    readers = []
+
+    @contextmanager
+    def database(config):
+        reader = sqlite3.connect(master)
+        readers.append(reader)
+        yield SimpleNamespace(get_content=lambda: [
+            SimpleNamespace(FolderPath=row[0]) for row in reader.execute("SELECT path FROM tracks")
+        ])
+
+    monkeypatch.setattr(deliveries.importing, "database", database)
+    monkeypatch.setattr(deliveries.importing, "database_path", lambda db: master)
+    monkeypatch.setattr(deliveries.importing, "is_running", lambda: False)
+    monkeypatch.setattr(deliveries.exporting, "configured", lambda config: [FakeTarget("rekordbox")])
+    monkeypatch.setattr(deliveries.store, "delivery_status", lambda *args: "success")
+    yield config, job, master
+    for reader in readers:
+        reader.close()
+
+
+def test_read_only_wal_sidecars_do_not_revoke_delivery_approval(sqlite_collection):
+    config, job, master = sqlite_collection
+    approved = deliveries.delivery_plans(config, job)
+
+    assert Path(f"{master}-wal").stat().st_size == 0
+    outcomes = deliveries.deliver(config, job, approved)
+
+    assert outcomes[0].success
+    assert outcomes[0].artifacts[0].status == "success"
+
+
+def test_committed_wal_changes_revoke_delivery_approval(sqlite_collection):
+    import sqlite3
+
+    config, job, master = sqlite_collection
+    approved = deliveries.delivery_plans(config, job)
+    with sqlite3.connect(master) as writer:
+        writer.execute("INSERT INTO tracks VALUES (?)", ("another-track.flac",))
+    outcomes = deliveries.deliver(config, job, approved)
+
+    assert not outcomes[0].success
+    assert "changed" in outcomes[0].message

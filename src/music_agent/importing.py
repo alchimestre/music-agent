@@ -175,14 +175,17 @@ def _known_paths(rows) -> set[str]:
 
 def _collection_fingerprint(source: Path) -> tuple[tuple[str, int | None, int | None], ...]:
     fingerprint = []
-    for suffix in ("", "-wal", "-shm"):
+    for suffix in ("", "-wal"):
         path = Path(f"{source}{suffix}")
         try:
             details = path.stat()
         except OSError:
             fingerprint.append((suffix, None, None))
         else:
-            fingerprint.append((suffix, details.st_size, details.st_mtime_ns))
+            if suffix == "-wal" and details.st_size == 0:
+                fingerprint.append((suffix, None, None))
+            else:
+                fingerprint.append((suffix, details.st_size, details.st_mtime_ns))
     return tuple(fingerprint)
 
 

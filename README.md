@@ -143,6 +143,60 @@ music-agent spotify remove PLAYLIST URI... --apply
 `remove` previews the removal of every matching URI occurrence; it writes only with `--apply`.
 Playlist reordering is not supported.
 
+### Delivery-aware runs
+
+Snapshot an account playlist and deliver its supported tracks to every configured collection:
+
+```sh
+music-agent spotify run "PLAYLIST" --json
+```
+
+`PLAYLIST` accepts a URL, URI, ID or unique exact case-insensitive account playlist name.
+Ordered source rows, original credits and duplicate occurrences stay attached to the run.
+Episodes, local tracks and invalid rows remain in the snapshot but are not acquired.
+
+Resume the same run without reacquiring retained audio or repeating successful deliveries:
+
+```sh
+music-agent spotify run --job ID --json
+```
+
+Preview removal of source URIs verified in every configured collection:
+
+```sh
+music-agent spotify reconcile --job ID
+```
+
+Apply the verified removal:
+
+```sh
+music-agent spotify reconcile --job ID --apply
+```
+
+`spotify run --remove-delivered` applies the same removal after delivery.
+Every duplicate occurrence must be verified before its URI is removed.
+Unknown write outcomes are checked against the remote playlist, never blindly retried.
+Unrelated additions are preserved. spogo has no snapshot/CAS control: a concurrent same-URI
+edit between the final read and removal cannot be detected atomically.
+
+Read current per-artifact collection receipts:
+
+```sh
+music-agent status --job ID --json
+```
+
+Each run writes `progress.json`, `receipt.json` and a full `run.log` under its state directory.
+JSON completion goes to stdout; bounded stage updates go to stderr.
+Receipts separate newly acquired files, already-held tracks, review reasons, blank genres and pending targets.
+`stop_reason` distinguishes `collection_blocked`, `transient_disconnected`, `displaced`,
+`no_acquisitions` and `user_stopped`; the run does not restart the daemon or retry indefinitely.
+Closed collection apps are required only for writes, not acquisition.
+Changed or missing audio invalidates its success receipts.
+Delivery receipts also require current collection membership; historical success alone is insufficient.
+Traktor requires `traktor-nml verify --json PATH...`; an older backend fails closed.
+Delivery approval ignores empty SQLite WAL files and shared-memory metadata; collection data changes require a new preview.
+
+
 Soulseek takes one client per account. A pass stops another client on this machine before it starts, then
 holds the session in a daemon that outlives it.
 
