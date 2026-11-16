@@ -623,6 +623,7 @@ def _prepare(
     # Held, but only as a lossy copy: an upgrade rather than a reason to skip, and the lane decides it, not
     # whether the lookup happened to match.
     record.replaces = held.path
+    record.genre = held.genre
     if record.duration_s is None and held.seconds is not None:
         record.duration_s = held.seconds
         job.append_event("reference", idx=record.idx, seconds=held.seconds,

@@ -694,6 +694,21 @@ def test_a_lossy_copy_held_is_an_upgrade_not_a_skip(tmp_path):
     assert "upgrades" in record.notes
 
 
+def test_an_upgrade_inherits_the_collections_curated_genre(tmp_path):
+    landed = tmp_path / "staging" / "Kiasmos - Blurred.flac"
+    config, job, daemon, calls = setup(tmp_path, results=GOOD,
+                                     download=f"downloading:transferring:90000:{landed}")
+    landed.write_bytes(b"the lossless one")
+    shelf = library.Library([
+        lanes.Held("Kiasmos", "Blurred", 449, path=str(tmp_path / "old.mp3"), genre="World"),
+    ], ["World"])
+
+    summary, _ = pass_once(config, job, daemon, Reference(), calls, shelf=shelf)
+
+    assert summary.downloaded == [1]
+    assert job.records()[0].genre == "World"
+
+
 def test_the_copy_in_the_collection_is_the_reference_when_musicbrainz_has_none(tmp_path):
     """This is not a bare tracklist, so the reference is not looked up: four of five lossy tracks in the
     collection have no MusicBrainz recording at all, and the copy in hand is the same track by definition."""

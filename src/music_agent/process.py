@@ -22,6 +22,7 @@ from typing import Protocol
 from . import genre, identify, state, tag
 from .config import Config
 from .lanes import Lanes, filename_for
+from .parsing import fold
 from .rules import LOSSLESS_EXTENSIONS
 
 
@@ -166,17 +167,18 @@ def identify_one(record: state.Record, tools: Tools, log) -> identify.Identified
         return replace(identify.from_filename(record.request), asked=False)
 
 
-def apply_genre(record: state.Record, found: identify.Identified, tools: Tools, log) -> genre.Choice:
-    """Resolve the genre against the collection's own vocabulary, or leave it blank.
-
-    Discogs styles come first and MusicBrainz genres second: that order was measured, and it is not what one
-    would guess — MusicBrainz's own genres had `electronic` claiming ten different library genres.
-    """
-    offered = list(found.styles) + list(found.genres)
-    if tools.vocabulary:
-        choice = genre.resolve(offered, vocabulary=tools.vocabulary, mappings=tools.mappings)
-    else:
+def apply_genre(record: state.Record, found: identify.Identified, tools: Tools, log, *,
+                existing: Sequence[str] = ()) -> genre.Choice:
+    """Keep a canonical family, otherwise resolve service and file genres through the taxonomy."""
+    offered = list(found.styles) + list(found.genres) + [name for name in existing if name]
+    families = {fold(name): name for name in tools.mappings.values() if name in tools.vocabulary}
+    kept = next((families[fold(name)] for name in existing if fold(name) in families), "")
+    if not tools.vocabulary:
         choice = genre.Choice(considered=tuple(offered), asked=False)
+    elif kept:
+        choice = genre.Choice(genre=kept, source=kept, considered=tuple(offered))
+    else:
+        choice = genre.resolve(offered, vocabulary=tools.vocabulary, mappings=tools.mappings)
 
     record.genre = choice.genre
     if choice.genre:
@@ -382,11 +384,8 @@ class Retagged:
 def retag(job: state.Job, *, tools: Tools | None = None, log=print) -> Retagged:
     """Re-derive the genre on tracks already placed, and write it even though one is there.
 
-    A run never re-genres a track, because a genre cannot be undone after import, so changing one has to be
-    deliberate: the table has changed, and the tracks tagged under the old one carry names the collection no
-    longer has. When the services answer that nothing resolves, the old name comes off, because the import
-    reads the *file*; when they cannot be reached at all, or there is no taxonomy to resolve against, nothing
-    is written.
+    Processing preserves canonical families; retag deliberately resolves them again. When nothing
+    resolves, the old name comes off. When the services or taxonomy cannot be consulted, nothing changes.
     """
     tools = tools or Tools()
     summary = Retagged()
@@ -545,12 +544,6 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
 
     for record in downloads:
         try:
-            choice = apply_genre(record, found[record.idx], tools, log)
-            if not choice.found and choice.considered:
-                # Counted so that a name fitting nothing on enough tracks can be proposed as a genre rather
-                # than staying blank for ever.
-                job.append_event(state.UNGENERED_EVENT, idx=record.idx,
-                                 names=list(choice.considered))
             landed = place(config, record, run=tools.runner, log=log)
         except NameTaken as error:
             # The lane holds that name, and `held` never skips a track whose length was never resolved, so
@@ -626,8 +619,7 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
         if record.status != state.NORMALIZED:
             continue
         try:
-            written = tag.write(Path(record.local_path),
-                                tags_for(found[record.idx], genre_name=record.genre), log=log)
+            _tag_one(job, record, found[record.idx], tools, log)
         except tag.TagError as error:
             record.status = state.RETRY_LATER
             record.notes = str(error)
@@ -635,14 +627,6 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
             job.append_event("tagging_failed", idx=record.idx, error=str(error))
             log(f"[{record.idx}] {record.label}: {error}")
             continue
-        if record.genre and "genre" not in written:
-            # An existing genre is never replaced, so the record has to follow the file rather than claim a
-            # genre the file does not carry — the import reads the record, not the tag.
-            kept = tag.read(Path(record.local_path)).genre
-            offered = list(found[record.idx].styles) + list(found[record.idx].genres)
-            log(f"      it already carried a genre, so {kept!r} stays, not {record.genre!r} "
-                f"(which came from {offered})")
-            record.genre = kept
         record.status = state.TAGGED
         summary.tagged.append(record.idx)
         if not record.genre:
@@ -652,6 +636,16 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
     job.write_status(config)
     # As in acquire: the run is finished by the import, which is where the pipeline ends.
     return summary
+
+
+def _tag_one(job: state.Job, record: state.Record, found: identify.Identified,
+             tools: Tools, log) -> None:
+    path = Path(record.local_path)
+    choice = apply_genre(record, found, tools, log,
+                         existing=(record.genre, tag.read(path).genre))
+    if not choice.found and choice.considered:
+        job.append_event(state.UNGENERED_EVENT, idx=record.idx, names=list(choice.considered))
+    tag.write(path, tags_for(found, genre_name=record.genre), replace_genre=True, log=log)
 
 
 def _resume_records(config: Config, records: list[state.Record]) -> None:
