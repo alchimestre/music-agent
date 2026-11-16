@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -66,3 +67,27 @@ def test_the_target_turns_a_refusal_into_a_failed_summary(monkeypatch):
 
     assert (result.failed, result.ran) == (1, False)
     assert "apply failed" in result.report()
+
+
+def test_verify_reads_per_file_membership_from_owner(tmp_path, monkeypatch):
+    present = str(tmp_path / "present.aiff")
+    absent = str(tmp_path / "absent.aiff")
+    collection = str(tmp_path / "collection.nml")
+    payload = {"collection": collection, "paths": {present: True, absent: False}}
+    run, _ = answered(0, json.dumps(payload))
+    monkeypatch.setattr(traktor, "command", lambda config: ["traktor-nml"])
+    monkeypatch.setattr(traktor.subprocess, "run", run)
+
+    assert traktor.verify(CONFIG, [present, absent]) == payload
+
+
+@pytest.mark.parametrize("paths", [{}, {"unexpected": True}, {"requested": "true"}])
+def test_verify_rejects_incomplete_or_nonboolean_owner_evidence(tmp_path, monkeypatch, paths):
+    requested = str(tmp_path / "requested.aiff")
+    evidence = {requested if key == "requested" else key: value for key, value in paths.items()}
+    run, _ = answered(0, json.dumps({"collection": str(tmp_path / "collection.nml"), "paths": evidence}))
+    monkeypatch.setattr(traktor, "command", lambda config: ["traktor-nml"])
+    monkeypatch.setattr(traktor.subprocess, "run", run)
+
+    with pytest.raises(traktor.Failed):
+        traktor.verify(CONFIG, [requested])

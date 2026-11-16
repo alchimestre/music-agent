@@ -707,7 +707,7 @@ class Pass:
             # for again, because until the import runs the collection still points at the copy it replaces.
             # A file already in its lane had this download: a second copy is refused by `place` as a name taken.
             if record.status in {state.CONVERTED, state.DOWNLOADED, state.NORMALIZED, state.TAGGED,
-                                 state.IMPORTED} or in_a_lane(self.lanes, record.local_path):
+                                 state.IMPORTED, state.RETRY_LATER} or in_a_lane(self.lanes, record.local_path):
                 return Outcome.ALREADY_DOWNLOADED
 
         if record.status == state.FOUND_IN_LIBRARY:

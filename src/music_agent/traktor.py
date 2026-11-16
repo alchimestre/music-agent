@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 from .config import Config
 
@@ -82,6 +83,39 @@ def apply(config: Config) -> str:
     if not ok:
         raise Failed(f"apply failed · {said}")
     return said
+
+
+def verify(config: Config, paths: list[str]) -> dict:
+    """Read current per-file collection presence from the collection's owner."""
+    argv = command(config)
+    if argv is None:
+        raise Missing("traktor-nml is not installed on this machine")
+    requested = sorted({str(Path(path).resolve()) for path in paths})
+    try:
+        done = subprocess.run(argv + ["verify", "--json", *requested],
+                              capture_output=True, text=True, timeout=900.0)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise Failed(f"verify did not run: {error}") from error
+    if done.returncode:
+        raise Failed(f"verify failed · {done.stderr.strip() or done.stdout.strip()}")
+    try:
+        payload = json.loads(done.stdout)
+    except ValueError as error:
+        raise Failed("traktor-nml returned invalid verification JSON") from error
+    return _verified_response(payload, requested)
+
+
+def _verified_response(payload, requested: list[str]) -> dict:
+    if not isinstance(payload, dict):
+        raise Failed("traktor-nml returned invalid collection verification")
+    collection = payload.get("collection")
+    paths = payload.get("paths")
+    if not isinstance(collection, str) or not Path(collection).is_absolute():
+        raise Failed("traktor-nml verification has no absolute collection identity")
+    if (not isinstance(paths, dict) or set(paths) != set(requested)
+            or any(type(present) is not bool for present in paths.values())):
+        raise Failed("traktor-nml verification must report every requested path as a boolean")
+    return payload
 
 
 def _run(argv: list[str], verb: str, timeout: float = 900.0) -> tuple[bool, str]:

@@ -602,6 +602,22 @@ def test_a_converted_record_is_not_fetched_a_second_time(tmp_path):
     assert tools_called(calls) == [], "the file is in hand; there is nothing to search for"
 
 
+
+def test_a_failed_conversion_keeps_its_download_on_retry(tmp_path):
+    config, job, daemon, calls = setup(tmp_path, results=GOOD)
+    retained = config.staging / 'Kiasmos - Blurred.flac'
+    retained.write_bytes(b'retained download')
+    record = job.records()[0]
+    record.status = state.RETRY_LATER
+    record.local_path = str(retained)
+    job.write_records([record])
+
+    summary, quiet = pass_once(config, job, daemon, Reference(), calls)
+
+    assert summary.already_downloaded == [1], quiet.lines
+    assert retained.read_bytes() == b'retained download'
+    assert tools_called(calls) == []
+
 def test_a_retry_later_record_whose_file_is_in_its_lane_is_not_fetched_again(tmp_path):
     """A normalize or tagging failure leaves RETRY_LATER with the placed file still in its lane, which the
     status guard did not cover: the retry downloaded a copy `place` then refused."""

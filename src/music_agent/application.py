@@ -7,7 +7,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import acquire, genre, library, process, reference, state, store, tracklist
+from . import acquire, genre, library, operations, process, reference, state, store, tracklist
 from .config import Config
 from .credentials import CredentialStore, CredentialStoreError
 from .resources import bundle_config
@@ -111,15 +111,16 @@ class Application:
         return rows
 
     def run(self, job_id: str, emit=lambda event: None) -> RunResult:
-        self.stop_event.clear()
-        job = self._job(job_id)
-        self._prerequisites()
-        shelf = library.open(self.config)
-        if any(row.status in state.LIVE and not row.decided() for row in job.records()):
-            self._acquire(job, shelf, emit)
-        if not self.stop_event.is_set():
-            self._process(job, shelf, emit)
-        return self._result(job)
+        with operations.lock(self.config.state_root):
+            self.stop_event.clear()
+            job = self._job(job_id)
+            self._prerequisites()
+            shelf = library.open(self.config)
+            if any(row.status in state.LIVE and not row.decided() for row in job.records()):
+                self._acquire(job, shelf, emit)
+            if not self.stop_event.is_set():
+                self._process(job, shelf, emit)
+            return self._result(job)
 
     def _acquire(self, job: state.Job, shelf, emit) -> None:
         emit(Progress('acquire', 'Starting Soulseek and reconciling transfers.', job.id))
@@ -167,7 +168,7 @@ class Application:
         if job_id not in self._approved_plans:
             raise ValueError('Preview destination changes before delivering.')
 
-        with store.writer_lock(self.config.state_root):
+        with operations.lock(self.config.state_root), store.writer_lock(self.config.state_root):
             return deliveries.deliver(self.config, self._job(job_id), self._approved_plans.pop(job_id),
                                       emit=lambda stage, message: emit(Progress(stage, message, job_id)))
 

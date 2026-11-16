@@ -135,6 +135,32 @@ music-agent spotify remove PLAYLIST URI... --apply
 `remove` is a dry run by default and removes all occurrences of each URI only with `--apply`. Reordering is
 not supported.
 
+### Delivery-aware account playlist runs
+
+For an account playlist requested by name, ID, URL or URI, use the deterministic workflow:
+
+```sh
+music-agent spotify run "SOURCE" --json
+```
+
+Add `--remove-delivered` only when source cleanup was requested.
+Resume with `music-agent spotify run --job ID --json`; do not create another job or reconstruct mappings.
+Identical ordered source snapshots reuse the same job. Unsupported source rows remain recorded but are not acquired.
+
+1. Read the compact completion JSON, not the full log.
+2. Report acquired and already-held counts, review labels/reasons/notes, blank genres and pending targets.
+3. Use `stop_reason` to distinguish collection-blocked, disconnected, displaced, no-acquisition and user-stopped runs.
+4. Read `progress.json` for bounded current stage updates; preserve required harness supervision/watchdogs.
+5. Use `spotify reconcile --job ID` to preview verified source cleanup; add `--apply` only for requested cleanup.
+
+`receipt.json` and `run.log` stay beside the job. `status --job ID --json` recomputes current delivery evidence.
+All configured targets must have current success receipts for every duplicate occurrence of a removed URI.
+Unknown removals are reconciled without retry; unrelated additions are preserved.
+spogo offers no snapshot/CAS removal: a same-URI concurrent edit cannot be detected atomically.
+Do not restart the daemon or loop on coded stop reasons. Closing a collection app is not needed for acquisition.
+Traktor delivery requires the owner's `verify --json PATH...` interface; never treat aggregate counts as per-file proof.
+
+
 
 ## 2. Acquire
 

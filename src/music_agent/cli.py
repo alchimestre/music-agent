@@ -10,6 +10,7 @@ import argparse
 import json
 import sys
 import time
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from . import acquire
@@ -28,6 +29,7 @@ from .rules import hms
 from . import slsk
 from . import state
 from . import store
+from . import operations
 from . import sweep
 from . import spotify_account
 from . import tidy
@@ -134,6 +136,7 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="list the tracks that need a decision, with what was offered")
     status.add_argument("--files", action="store_true",
                         help="list what is in a lane or in staging with nothing pointing at it")
+    status.add_argument("--json", action="store_true", help="print a structured completion receipt")
 
     review_command = commands.add_parser(
         "review", parents=[common],
@@ -221,6 +224,15 @@ def _build_parser() -> argparse.ArgumentParser:
     spotify_remove.add_argument("playlist")
     spotify_remove.add_argument("uris", nargs="+")
     spotify_remove.add_argument("--apply", action="store_true", help="remove all occurrences shown in the preview")
+    spotify_run = spotify_commands.add_parser(
+        "run", parents=[common], help="snapshot, acquire, process and verify every configured collection")
+    spotify_run.add_argument("source", nargs="?", help="playlist URL, URI, ID or exact account playlist name")
+    spotify_run.add_argument("--remove-delivered", action="store_true",
+                             help="remove source URIs only after verified delivery to every target")
+    spotify_run.add_argument("--json", action="store_true", help="print the completion receipt as JSON")
+    spotify_reconcile = spotify_commands.add_parser(
+        "reconcile", parents=[common], help="preview source removal from verified completion receipts")
+    spotify_reconcile.add_argument("--apply", action="store_true", help="apply the verified removal")
 
     return parser
 
@@ -496,7 +508,7 @@ def _start(config: config_module.Config, args: argparse.Namespace) -> state.Job 
 
 
 def _one_pass(config: config_module.Config, job: state.Job, *, retry: bool,
-              attempt: int = 1) -> acquire.Summary:
+              attempt: int = 1, log=print, stream=None, progress=None) -> acquire.Summary:
     """One pass, everything it needs and nothing else: the daemon, the shares, the records.
 
     A pass that stops is the pass falling short, not a reason to start another: what it brought in is already
@@ -515,7 +527,7 @@ def _one_pass(config: config_module.Config, job: state.Job, *, retry: bool,
     _stage("acquire", f"{len(job.records())} tracks · pass {attempt}"
                       f"{' · retry' if retry else ''}")
     return acquire.run(config, job.execution(), daemon, reference.lookup(config),
-                       library=shelf, retry=retry)
+                       library=shelf, retry=retry, log=log, stream=stream, progress=progress)
 
 
 def _ready(daemon: slsk.Daemon, config: config_module.Config) -> None:
@@ -755,6 +767,11 @@ def _status(config: config_module.Config, args: argparse.Namespace) -> int:
             return 1
         print(f"no runs yet under {config.state_root}")
         return 0
+    if getattr(args, "json", False):
+        from . import receipts
+
+        print(json.dumps(receipts.build_status(config, job), ensure_ascii=False))
+        return 0
 
     if args.files:
         return _files(config, job)
@@ -913,22 +930,61 @@ def _spotify(args: argparse.Namespace) -> int:
         return 1
 
 
+def _spotify_operation(config: config_module.Config, args: argparse.Namespace) -> int:
+    from . import spotify_reconcile, spotify_workflow
+
+    def emit(event: dict) -> None:
+        print(f"{event['stage']}: {event['message']}", file=sys.stderr, flush=True)
+
+    try:
+        if args.spotify_command == "reconcile":
+            job = spotify_workflow.submission(config, getattr(args, "job", None))
+            result = spotify_reconcile.reconcile(config, job, apply=args.apply)
+            print(json.dumps(result, ensure_ascii=False))
+            return int(bool(result.get("blocker")))
+        with redirect_stdout(sys.stderr):
+            result = spotify_workflow.start(
+                config, args.source, job_id=getattr(args, "job", None),
+                remove_delivered=args.remove_delivered, emit=emit)
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False))
+        else:
+            _receipt_summary(result)
+        return int(bool(result.get("blocker")) or not result["complete"])
+    except (spotify_account.SpotifyAccountError, ValueError, OSError, store.WriterLocked) as error:
+        print(error, file=sys.stderr)
+        return 1
+
+
+def _receipt_summary(report: dict) -> None:
+    print(f"run {report['job_id']} · {'complete' if report['complete'] else 'pending'}")
+    print(json.dumps(report['counts'], ensure_ascii=False))
+    for key in ("review", "ungenred", "delivery_pending"):
+        if report[key]:
+            print(f"{key}: {json.dumps(report[key], ensure_ascii=False)}")
+    if report.get("blocker"):
+        print(report["blocker"], file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    if args.command == "spotify":
+    if args.command == "spotify" and args.spotify_command not in {"run", "reconcile"}:
         return _spotify(args)
     try:
         config = config_module.load(getattr(args, "config", None))
     except ValueError as error:
         print(error, file=sys.stderr)
         return 1
+    if args.command == "spotify":
+        return _spotify_operation(config, args)
     if args.command == "status":
         return _status(config, args)
     try:
-        if args.command in _THREADED:
-            return _dispatch(config, args)
-        with store.writer_lock(config.state_root):
-            return _dispatch(config, args)
+        with operations.lock(config.state_root):
+            if args.command in _THREADED:
+                return _dispatch(config, args)
+            with store.writer_lock(config.state_root):
+                return _dispatch(config, args)
     except store.WriterLocked as error:
         print(error, file=sys.stderr)
         return 1
