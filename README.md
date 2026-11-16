@@ -78,8 +78,9 @@ Traktor's collection belongs to [traktor-nml](https://github.com/alchimestre/tra
 `collection.nml` and its rules, and `[traktor] command` says how to run it. Entries `dedupe` leaves behind are
 `traktor-nml purge`'s to remove.
 
-Genres come from music-tagger's taxonomy through `[genres] taxonomy`; a genre no line in it covers stays
-blank.
+Genres come from music-tagger's taxonomy through `[genres] taxonomy`. Processing keeps canonical families,
+including a collection genre inherited by a lossless upgrade. Other file tags and service genres resolve
+to a family or blank before export. Traktor additions and replacements read that file tag.
 
 ## When a track is left over
 

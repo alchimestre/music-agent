@@ -607,6 +607,42 @@ def test_a_genre_nothing_maps_is_left_for_the_skill_and_said_so(tmp_path):
     assert tag.read(config.lossless / "Kiasmos - Blurred.aiff").genre == ""
 
 
+@pytest.mark.parametrize("audio_file", [aiff, mp4])
+@pytest.mark.parametrize("checkpoint", [state.DOWNLOADED, state.NORMALIZED, state.RETRY_LATER])
+@pytest.mark.parametrize(("incoming", "styles", "inherited", "expected"), [
+    ("Electronic;Rock", ("Minimal Techno",), "", "Techno"),
+    ("Dub Techno", (), "", "Techno"),
+    ("World", ("Minimal Techno",), "", "World"),
+    ("Folk & Roots", ("Minimal Techno",), "", "Folk & Roots"),
+    ("Unmapped", (), "", ""),
+    ("Electronic", ("Minimal Techno",), "World", "World"),
+])
+def test_processing_writes_canonical_genres_before_export(
+    tmp_path, audio_file, checkpoint, incoming, styles, inherited, expected,
+):
+    config = make_config(tmp_path)
+    folder = config.staging if checkpoint == state.DOWNLOADED else config.lossless
+    folder.mkdir(parents=True, exist_ok=True)
+    suffix = ".aiff" if audio_file is aiff else ".m4a"
+    path = audio_file(folder / f"Kiasmos - Blurred{suffix}")
+    tag.write(path, tag.Tags(genre=incoming))
+    record = state.Record(1, "Kiasmos", "Blurred", status=checkpoint,
+                          local_path=str(path), format=suffix[1:], genre=inherited)
+    job = job_with(config, [record])
+    tools = with_identification(
+        FakeRunner(), styles=styles, vocabulary=["Techno", "World", "Folk & Roots"],
+        mappings={"minimal techno": "Techno", "dub techno": "Techno",
+                  "world": "World", "folk": "Folk & Roots"},
+    )
+
+    summary = process.run(config, job, tools=tools, log=lambda *_: None)
+
+    saved = job.records()[0]
+    assert saved.status == state.TAGGED
+    assert saved.genre == tag.read(Path(saved.local_path)).genre == expected
+    assert summary.ungenred == ([] if expected else [1])
+
+
 def test_a_track_the_services_know_nothing_about_says_so(tmp_path):
     """2026-10-13: with nothing offered the stage logged no genre line at all, so a reader of the run could
     not tell "no genre" from "no answer". The log is the only record of a track's source genres — the written

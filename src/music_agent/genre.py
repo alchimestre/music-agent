@@ -73,6 +73,7 @@ def table(path: str | Path | None = None) -> dict[str, str]:
         for name in group.get("from") or []:
             if str(name).strip():
                 mappings[fold(str(name))] = family
+        mappings[fold(family)] = family
     return mappings
 
 

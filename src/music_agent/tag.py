@@ -111,9 +111,8 @@ def read(path: Path) -> Tags:
 def write(path: Path, tags: Tags, *, replace_genre: bool = False, log=lambda *_: None) -> list[str]:
     """Set the frames this project owns. Returns the names of the ones that changed something.
 
-    A run never replaces a genre, because a genre cannot be undone after import, so only `music-agent
-    retag` passes `replace_genre` — which, when the tags carry no genre at all, takes an existing one *off*
-    rather than leaving a name the collection has not got.
+    Processing and retag use `replace_genre` to write the taxonomy's verdict, including removing an
+    unrecognized genre when the resolved value is blank.
     """
     suffix = path.suffix.lower()
     if suffix in {".aiff", ".aif", ".mp3"}:

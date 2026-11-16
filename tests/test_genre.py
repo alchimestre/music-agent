@@ -79,6 +79,17 @@ def test_every_from_name_maps_to_its_family_folded(tmp_path):
     }
 
 
+def test_family_names_resolve_without_repeating_them_in_from(tmp_path):
+    path = written(tmp_path, {"groups": [
+        {"tier1": "Folk & Roots", "from": ["Folk"]},
+    ]})
+
+    choice = genre.resolve(["Folk & Roots"], vocabulary=genre.families(path),
+                           mappings=genre.table(path))
+
+    assert choice.genre == "Folk & Roots"
+
+
 def test_a_name_two_groups_claim_goes_to_the_last_of_them(tmp_path):
     """Nothing stops a taxonomy listing a name twice, and nothing here notices: the later group
     overwrites the earlier one's answer."""

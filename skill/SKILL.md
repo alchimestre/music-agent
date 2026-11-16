@@ -296,9 +296,9 @@ stage-by-stage route.
 music-agent process
 ```
 
-Identifies every file from its own sound, resolves a genre, converts lossless audio to AIFF, normalizes
-loudness, and writes the tags rekordbox reads. Reported by the collection itself: a file already carrying a
-genre keeps it.
+Identifies every file from its own sound, converts lossless audio to AIFF, normalizes loudness, and writes
+the tags both collections read. A canonical genre family stays; raw file genres resolve through the taxonomy
+or come off. A lossless upgrade inherits the collection's canonical family.
 
 A lossy file keeps its own codec, and only two codecs are taken at all — **MP3 and AAC-in-m4a** — because
 those are the only two a rekordbox row can point at. A peer's `.ogg`, `.opus` or `.wma` is refused at the
@@ -317,8 +317,8 @@ The genre vocabulary is not this repo's, and deliberately so: it is **music-tagg
 the collection's families (tier 1) and the names the rest of the world uses for each. `[genres] taxonomy` in
 `config.toml` points at that file. With no taxonomy configured, no track gets a genre and one line says so.
 
-A name with no line in the taxonomy is left **blank** — never invented, because a genre cannot be undone after
-an import — and `status --queue` lists the tracks that came out ungenred with the names seen on them, most
+A name with no line in the taxonomy is left **blank**, including an unrecognized download tag.
+`status --queue` lists the tracks that came out ungenred with the names seen on them, most
 frequent first. That list is a report, not a question: nothing is asked, and which family a name belongs to is
 the library owner's call. The same list is what a missing taxonomy leaves behind, with nothing under it.
 
@@ -330,32 +330,27 @@ only writes the family into the Genre field.
 
 ## 6. Re-tag when the vocabulary has moved
 
-A run never replaces a genre: a file already carrying one keeps it, because a genre cannot be undone after
-import. So a line added to music-tagger's taxonomy, or a vocabulary that changes under you, reaches only the
-tracks processed *after* it.
+A run preserves a canonical family already carried by the track. It resolves raw tags again, including
+when processing resumes from a saved checkpoint.
 
 ```
 music-agent retag
 ```
 
-is the deliberate half of that rule, and the only way a genre changes on a file. It re-identifies each track
-already placed, resolves the genre again, and writes over whatever the file holds; where nothing resolves, the
-old name comes **off**, because a name the collection has not got is a row nothing will absorb. A track whose
-services could not be reached at all is left as it is — one lookup failing is not the taxonomy's verdict, and
-the next pass would put the name back. Say what it did — how many it re-tagged, how many it left blank, and
-how many it could not ask about.
+Re-identifies each track already placed and resolves its genre again, even when it carries a canonical
+family. Where nothing resolves, the old name comes off. A track whose services or taxonomy could not be
+consulted is left as it is. Report how many it re-tagged, left blank, or could not ask about.
 
-Retag after an import leaves the collection's rows holding the genre the file had *then*. Reload the tags for
-those tracks in rekordbox, or accept the difference.
+Retag changes files, not existing collection rows. Reload Tags for those tracks in rekordbox and Traktor.
+New Traktor additions and replacements take their Genre from the file, including a blank value.
 
 **Done when** the files carry what the taxonomy resolves today, and whatever came out blank is in the ungenred
 list.
 
 ## 7. Rebuild the records when they disagree with the files
 
-A status is the run's memory of what happened; the files are what is on disk. When the two part company — a
-pass that reset finished tracks, a repair that went too far — nothing else here can recover it, because
-`retag` only touches placed records and `process` only takes downloaded ones.
+When records disagree with files, rebuild them from disk. `retag` only touches placed records; `process`
+handles downloads and saved conversion or normalization checkpoints.
 
 ```
 music-agent reconcile
