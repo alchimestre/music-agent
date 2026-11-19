@@ -291,3 +291,21 @@ def test_a_merge_on_a_copy_of_the_real_collection(tmp_path):
     assert not [merge for merge in again.merges
                 if any(drop.content_id == duplicate_id for drop in merge.drops)], \
         "and a second pass has nothing left to do with the row it merged"
+
+
+def test_a_row_with_no_length_cannot_bridge_two_different_recordings():
+    merges = duplicates.find([copy(1, "unknown.mp3", seconds=None),
+                              copy(2, "short.aiff", seconds=200),
+                              copy(3, "long.aiff", seconds=260)])
+
+    assert [(merge.keep.content_id, [drop.content_id for drop in merge.drops]) for merge in merges] \
+        == [(2, [1])], "the measured pair is one track; the minute apart from it is not"
+
+
+def test_one_artist_does_not_make_two_collaborations_one_track():
+    merges = duplicates.find([copy(10, "a.aiff", seconds=300, artist="Altinbas"),
+                              copy(11, "b.aiff", seconds=300, artist="Altinbas & Cirkle"),
+                              copy(12, "c.aiff", seconds=300, artist="Altinbas & Phara")])
+
+    assert [(merge.keep.content_id, [drop.content_id for drop in merge.drops]) for merge in merges] \
+        == [(10, [11])], "a second collaboration sharing the lead must not be pulled in through the first"

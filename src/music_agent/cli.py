@@ -548,7 +548,7 @@ def _ready(daemon: slsk.Daemon, config: config_module.Config) -> None:
     """Point the daemon at this pass: staging, the two shared lanes, and a session to search with."""
     config.staging.mkdir(parents=True, exist_ok=True)
     daemon.set_dir(config.staging)
-    shared = daemon.share(slsk.shared_directories(config))
+    shared = daemon.share(slsk.share_paths(config))
     if int(shared.get("files") or 0) == 0:
         # Without shared files peers read the account as a leecher and queue or ban it. The two lanes are
         # handed over above; this says when the daemon did not take them.
@@ -712,7 +712,7 @@ def _review(config: config_module.Config, args: argparse.Namespace) -> int:
                 daemon = slsk.Daemon(config)
                 daemon.ensure()
                 daemon.set_dir(config.staging)
-                daemon.share(slsk.shared_directories(config))
+                daemon.share(slsk.share_paths(config))
                 return daemon
 
             if len(picks) == 1:

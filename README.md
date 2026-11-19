@@ -226,6 +226,7 @@ Delivery previews expire when their artifacts or destinations change. Cleanup ve
 Delivery recovery clears resolved collection blockers without hiding acquisition failures.
 CLI imports refresh the same verified per-file delivery receipts.
 Status distinguishes a finished pass from a fulfilled playlist. Keep the MCP server running during a pass.
+Acquisition counts include every source entry sharing work downloaded in that pass; cleanup still verifies each entry's delivery.
 The `skill/SKILL.md` instructions use these tools when available and the CLI otherwise.
 
 ## Tests

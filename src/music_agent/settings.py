@@ -122,6 +122,9 @@ def settings_text(config: Config) -> str:
                      'findtime_days': config.findtime_days, 'bantime_days': config.bantime_days,
                      'daemon_address': config.daemon_address},
         'export': {'targets': list(config.export_targets)},
+        'traktor': {'command': list(config.traktor_command)},
+        'tools': {'normalize': config.normalize_tool, 'ffmpeg': config.ffmpeg,
+                  'ffprobe': config.ffprobe, 'fpcalc': config.fpcalc},
         'genres': {'taxonomy': str(config.taxonomy)} if config.taxonomy else {},
     }
     if config.shared_dirs is not None:

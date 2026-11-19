@@ -1,9 +1,11 @@
+from dataclasses import replace
 from types import SimpleNamespace
 
 
 import pytest
 
-from music_agent import spotify_reconcile, state
+from music_agent import deliveries, receipts, spotify_reconcile, state
+from music_agent.config import DEFAULTS
 
 PLAYLIST = {
     'id': 'ABCDEFGHIJKLMNOPQRSTUV',
@@ -272,3 +274,64 @@ def test_acquired_retry_does_not_recover_unknown_delivered_scope_write(setup_rec
     assert [event['event'] for event in job.events() if event['event'].startswith('spotify_remove')] == [
         'spotify_remove_intent'
     ]
+
+
+@pytest.mark.parametrize("duplicate_verified", [True, False])
+def test_acquired_cleanup_follows_downloaded_work_without_skipping_delivery_checks(
+    tmp_path, monkeypatch, duplicate_verified,
+):
+    config = replace(DEFAULTS, state_root=tmp_path / "state")
+    audio = tmp_path / "acquired.flac"
+    audio.write_bytes(b"audio")
+    held_audio = tmp_path / "held.flac"
+    held_audio.write_bytes(b"held")
+    records = [
+        state.Record(idx=idx, artist="Artist", title="Duplicate", status=state.TAGGED,
+                     local_path=str(audio)) for idx in (1, 2)
+    ]
+    records.append(state.Record(idx=3, artist="Artist", title="Held", status=state.FOUND_IN_LIBRARY,
+                                local_path=str(held_audio)))
+    job = state.create(config, "duplicates", records=records)
+    job.append_event("spotify_source", snapshot={
+        **PLAYLIST, "tracks": [{"uri": uri} for uri in (A, A, B)],
+        "entries": [{"idx": idx, "position": idx - 1, "uri": uri}
+                    for idx, uri in enumerate((A, A, B), 1)],
+    })
+    job.append_event("downloaded", idx=job.execution().records()[0].idx, path=str(audio))
+    verified = {idx: {target: {"status": "success"} for target in config.export_targets}
+                for idx in (1, 2, 3)}
+    if not duplicate_verified:
+        verified[2]["traktor"]["status"] = "failed"
+    monkeypatch.setattr(deliveries, "delivery_receipts", lambda *_args: verified)
+    remote = SimpleNamespace(**PLAYLIST, tracks=[{"uri": uri} for uri in (A, A, B)])
+    monkeypatch.setattr(spotify_reconcile.spotify_account, "read_playlist", lambda _: remote)
+    monkeypatch.setattr(spotify_reconcile.spotify_account, "remove_tracks",
+                        lambda _, uris: setattr(remote, "tracks",
+                                                [row for row in remote.tracks if row["uri"] not in uris]))
+
+    report = spotify_reconcile.reconcile(config, job, apply=True, scope="acquired")
+
+    assert receipts.build(config, job)["acquired"] == [1, 2]
+    assert report["removed"] == (2 if duplicate_verified else 0)
+    assert report["remaining"] == ([B] if duplicate_verified else [A, A, B])
+
+
+def test_a_preview_reads_the_playlist_without_taking_the_writer_lock(tmp_path, monkeypatch):
+    """A preview writes nothing, so it must not lock the state directory for the length of a plan."""
+    config = replace(DEFAULTS, state_root=tmp_path / "state")
+    job = state.create(config, "preview")
+    job.append_event("spotify_source", snapshot={
+        **PLAYLIST, "tracks": [{"uri": A}], "entries": [{"idx": 1, "position": 0, "uri": A}],
+    })
+    monkeypatch.setattr(deliveries, "delivery_receipts", lambda *_args: {})
+    remote = SimpleNamespace(**PLAYLIST, tracks=[{"uri": A}])
+    monkeypatch.setattr(spotify_reconcile.spotify_account, "read_playlist", lambda _: remote)
+    entered = []
+    real = spotify_reconcile.store.writer_lock
+    monkeypatch.setattr(spotify_reconcile.store, "writer_lock",
+                        lambda *args, **kwargs: entered.append(args) or real(*args, **kwargs))
+
+    report = spotify_reconcile.reconcile(config, job, scope="delivered")
+
+    assert report["playlist"]["id"] == PLAYLIST["id"]
+    assert entered == [], "a read-only preview took the exclusive writer lock"

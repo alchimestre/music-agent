@@ -77,6 +77,21 @@ def test_a_missing_credential_names_the_variable(tmp_path, creds, monkeypatch):
         slsk.environment(make_config(tmp_path))
 
 
+def test_a_share_above_the_staging_folder_is_refused(tmp_path):
+    """A folder that contains staging exposes the partial downloads inside it, exactly as one inside does."""
+    config = replace(make_config(tmp_path), staging=tmp_path / "Music" / "music-agent" / "staging",
+                     shared_dirs=(tmp_path / "Music",))
+
+    with pytest.raises(ValueError, match="cannot share"):
+        slsk.share_paths(config)
+
+
+def test_the_two_lanes_are_shared_and_created_when_nothing_else_is_named(tmp_path):
+    config = replace(make_config(tmp_path), shared_dirs=None)
+
+    assert slsk.share_paths(config) == (config.lossless.resolve(), config.lossy.resolve())
+
+
 def test_the_socket_lives_where_the_config_says(tmp_path):
     assert slsk.socket_path(make_config(tmp_path)) == tmp_path / "daemon" / "daemon.sock"
 

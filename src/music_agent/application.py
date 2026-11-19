@@ -146,7 +146,7 @@ class Application:
         families = genre.families(self.config.taxonomy)
         tools = process.Tools.live(self.config, vocabulary=genre.vocabulary(shelf.genres(), families),
                                    mappings=genre.table(self.config.taxonomy))
-        process.run(self.config, job.execution(), tools=tools,
+        process.run(self.config, job.execution(), tools=tools, stop_event=self.stop_event,
                     log=lambda message: emit(Progress('process', message, job.id)))
         if not self.config.export_targets:
             result = self._result(job)

@@ -149,6 +149,15 @@ def _traktor_plan(target, config: Config, job: state.Job) -> DeliveryPlan:
     identity = traktor.destination(config)
     if not target.available(config):
         return _unavailable(target.name, identity, "target is not installed on this machine")
+    waiting = [record.replaces for record in importing.delivery_records(job)
+               if record.replaces and Path(record.replaces).is_file()]
+    if waiting:
+        # traktor-nml repoints an entry only onto a file whose predecessor is gone; planned while it is still
+        # there, the new copy is an addition and the old entry outlives it.
+        return _unavailable(
+            target.name, identity,
+            f"{len(waiting)} file(s) this run replaces are still present — deliver the collection that "
+            "removes them, then preview and deliver again")
     try:
         planned = traktor.plan(config)
         if planned is None:

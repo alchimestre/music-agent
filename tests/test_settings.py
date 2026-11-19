@@ -97,3 +97,17 @@ def test_an_untouched_share_list_keeps_the_two_lanes_shared(tmp_path):
     loaded = load_settings(path)
     assert loaded.shared_dirs is None
     assert slsk.shared_directories(loaded) == (loaded.lossless, loaded.lossy)
+
+
+def test_a_save_keeps_the_traktor_command_and_the_configured_tools(tmp_path):
+    settings = replace(configured(tmp_path), traktor_command=('/opt/traktor-nml', 'apply'),
+                       normalize_tool=tmp_path / 'normalize.py', ffmpeg='/opt/ffmpeg',
+                       ffprobe='/opt/ffprobe', fpcalc='/opt/fpcalc')
+    path = tmp_path / 'private' / 'settings.toml'
+
+    save_settings(path, settings)
+    loaded = load_settings(path)
+
+    assert loaded.traktor_command == ('/opt/traktor-nml', 'apply')
+    assert loaded.normalize_tool == tmp_path / 'normalize.py'
+    assert (loaded.ffmpeg, loaded.ffprobe, loaded.fpcalc) == ('/opt/ffmpeg', '/opt/ffprobe', '/opt/fpcalc')

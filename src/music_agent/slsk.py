@@ -76,6 +76,21 @@ def socket_path(config: Config) -> Path:
 CONTROL_ADDRESS = "127.0.0.1:27100"
 
 
+def share_paths(config: Config) -> tuple[Path, ...]:
+    """What to hand the daemon, refusing any root that would expose staging or application state."""
+    for lane in (config.lossless, config.lossy):
+        Path(lane).expanduser().mkdir(parents=True, exist_ok=True)
+    private = tuple(Path(root).expanduser().resolve()
+                    for root in (config.staging, config.state_root, state_dir(config), config.peers))
+    shared = tuple(Path(path).expanduser().resolve() for path in shared_directories(config))
+    for directory in shared:
+        # Both directions: a share *above* staging exposes it just as surely as one inside it.
+        if any(directory == root or root in directory.parents or directory in root.parents
+               for root in private):
+            raise ValueError(f"cannot share {directory}: it holds staging or application state")
+    return shared
+
+
 def managed_address(config: Config) -> str:
     """Where a daemon this process manages answers. Empty means its Unix socket in `state_dir`."""
     if config.daemon_address:

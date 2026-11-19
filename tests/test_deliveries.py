@@ -38,8 +38,10 @@ def records(tmp_path: Path):
     first.write_bytes(b"one")
     second.write_bytes(b"two")
     return [
-        SimpleNamespace(idx=1, work_id="work-one", label="One", status="tagged", local_path=str(first)),
-        SimpleNamespace(idx=2, work_id="work-two", label="Two", status="tagged", local_path=str(second)),
+        SimpleNamespace(idx=1, work_id="work-one", label="One", status="tagged",
+                        local_path=str(first), replaces=""),
+        SimpleNamespace(idx=2, work_id="work-two", label="Two", status="tagged",
+                        local_path=str(second), replaces=""),
     ]
 
 
@@ -475,3 +477,28 @@ def test_committed_wal_changes_revoke_delivery_approval(sqlite_collection):
 
     assert not outcomes[0].success
     assert "changed" in outcomes[0].message
+
+
+def test_traktor_is_not_planned_while_a_file_it_would_replace_is_still_present(tmp_path, monkeypatch):
+    """traktor-nml adds a file whose predecessor is gone: planned early, it adds instead of repointing."""
+    config = replace(DEFAULTS, export_targets=("traktor",), state_root=tmp_path)
+    old = tmp_path / "held.mp3"
+    old.write_bytes(b"held")
+    new = tmp_path / "upgrade.aiff"
+    new.write_bytes(b"upgrade")
+    job = FakeJob(tmp_path, [SimpleNamespace(idx=1, work_id="w1", label="Upgrade", status="tagged",
+                                             local_path=str(new), replaces=str(old))])
+    monkeypatch.setattr(deliveries.exporting, "configured", lambda config: [FakeTarget("traktor")])
+    monkeypatch.setattr(deliveries.traktor, "plan", lambda config:
+                        deliveries.traktor.Plan("configured-command", "0 to repoint · 1 to add", False))
+    monkeypatch.setattr(deliveries.traktor, "verify", lambda config, paths:
+                        {"collection": "collection", "paths": {path: True for path in paths}},
+                        raising=False)
+
+    blocked = deliveries.delivery_plans(config, job)[0]
+    old.unlink()
+    planned = deliveries.delivery_plans(config, job)[0]
+
+    assert blocked.blocked, "adding while the old entry still resolves is a duplicate in the collection"
+    assert "replaces" in blocked.error
+    assert not planned.blocked

@@ -290,3 +290,17 @@ def test_build_status_keeps_current_delivery_failure_after_prior_success(tmp_pat
     assert status["stage"] == "blocked"
     assert status["blocker"] == "traktor: collection unavailable"
     assert status["stop_reason"] == "collection_blocked"
+
+
+def test_a_resumed_pass_does_not_carry_the_previous_runs_blocker(tmp_path, monkeypatch):
+    job = FakeJob(tmp_path / "job", [record(1, tmp_path / "audio.flac")], [
+        {"event": "operation_finished", "stage": "blocked", "complete": False,
+         "blocker": "network stopped", "stop_reason": "transient_disconnected"},
+        {"event": "operation_started"},
+    ])
+    monkeypatch.setattr(receipts, "build", lambda config, job: {"complete": False, "records": []})
+
+    status = receipts.build_status(receipt_config(tmp_path), job)
+
+    assert status.get("stage") != "blocked"
+    assert not status.get("blocker"), "the closed run's blocker is not the running pass's"
