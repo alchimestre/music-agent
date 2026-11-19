@@ -520,7 +520,8 @@ def reconcile(config: Config, job: state.Job, *, log=print) -> Reconciled:
     return summary
 
 
-def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print) -> Summary:
+def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print,
+        stop_event=None) -> Summary:
     """Everything staging holds: identified, genred, converted, placed, normalized, tagged."""
     tools = tools or Tools()
     records = job.records()
@@ -529,9 +530,12 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
     placed = [record for record in records if record.status in {state.CONVERTED, state.NORMALIZED}]
     found: dict[int, identify.Identified] = {}
 
+    def stopped() -> bool:
+        return stop_event is not None and stop_event.is_set()
+
     downloads = [record for record in records if record.status == state.DOWNLOADED]
     identifying = downloads + placed
-    if identifying:
+    if identifying and not stopped():
         def identified(record: state.Record) -> identify.Identified:
             log(f"[{record.idx}] {record.label}: identifying")
             return identify_one(record, tools, log)
@@ -543,6 +547,8 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
             found = dict(zip((record.idx for record in identifying), answers))
 
     for record in downloads:
+        if stopped():
+            break
         try:
             landed = place(config, record, run=tools.runner, log=log)
         except NameTaken as error:
@@ -588,6 +594,8 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
 
     normalizing = [record for record in placed if record.status == state.CONVERTED]
     for folder in sorted({Path(record.local_path).parent for record in normalizing}):
+        if stopped():
+            break
         in_lane = [record for record in normalizing if Path(record.local_path).parent == folder]
         try:
             files = {Path(record.local_path).resolve() for record in in_lane}
@@ -616,6 +624,8 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
     job.write_records(records)
 
     for record in placed:
+        if stopped():
+            break
         if record.status != state.NORMALIZED:
             continue
         try:
@@ -645,7 +655,9 @@ def _tag_one(job: state.Job, record: state.Record, found: identify.Identified,
                          existing=(record.genre, tag.read(path).genre))
     if not choice.found and choice.considered:
         job.append_event(state.UNGENERED_EVENT, idx=record.idx, names=list(choice.considered))
-    tag.write(path, tags_for(found, genre_name=record.genre), replace_genre=True, log=log)
+    # An unasked choice is not the taxonomy's verdict: replacing the genre would take it off the file.
+    tag.write(path, tags_for(found, genre_name=record.genre),
+              replace_genre=choice.found or choice.asked, log=log)
 
 
 def _resume_records(config: Config, records: list[state.Record]) -> None:

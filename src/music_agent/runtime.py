@@ -325,16 +325,7 @@ def _restart_required(saved: RuntimeSettings, effective: RuntimeSettings) -> tup
 
 def _share_paths(config: Config) -> tuple[Path, ...]:
     """The configured roots, refusing any that would expose staging or application state."""
-    for lane in (config.lossless, config.lossy):
-        Path(lane).expanduser().mkdir(parents=True, exist_ok=True)
-    private = tuple(root.expanduser().resolve()
-                    for root in (config.staging, config.state_root, slsk.state_dir(config),
-                                 config.peers.parent))
-    shared = tuple(Path(path).expanduser().resolve() for path in slsk.shared_directories(config))
-    for directory in shared:
-        if any(directory == root or root in directory.parents for root in private):
-            raise ValueError(f"cannot share {directory}: it holds staging or application state")
-    return shared
+    return slsk.share_paths(config)
 
 
 def _transfer_state(item: dict[str, Any]) -> dict[str, Any]:

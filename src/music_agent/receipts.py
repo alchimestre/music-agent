@@ -6,7 +6,7 @@ import tempfile
 from collections import Counter
 from pathlib import Path
 
-from . import deliveries, spotify_source, state
+from . import deliveries, spotify_source, state, store
 from .config import Config
 
 
@@ -18,7 +18,7 @@ def build(config: Config, job: state.Job, plans=None) -> dict:
     target_names = [target.name for target in targets]
     statuses = deliveries.delivery_receipts(config, job, plans)
     source, memberships = _source(job)
-    acquired = _event_indices(events, "downloaded")
+    acquired = _acquired_memberships(config, job, records, events)
     already_held = _event_indices(events, "already_held")
     review = _review(job)
     ungenred = [record.idx for record in records if _request_fulfilled(record) and not record.genre.strip()]
@@ -72,6 +72,8 @@ def build_status(config: Config, job: state.Job) -> dict:
 
 def _last_operation(job: state.Job) -> dict | None:
     for event in reversed(job.events()):
+        if event.get("event") == "operation_started":
+            return None     # a pass is running: the run it started over is not what its status says
         if event.get("event") == "operation_finished":
             return event
 
@@ -107,6 +109,17 @@ def _current_deliveries_succeeded(report: dict) -> bool:
 def _request_fulfilled(record: state.Record) -> bool:
     return record.status in {state.TAGGED, state.IMPORTED, state.FOUND_IN_LIBRARY} and bool(
         record.local_path and Path(record.local_path).is_file())
+
+
+def _acquired_memberships(config: Config, job: state.Job, records: list[state.Record],
+                         events: list[dict]) -> list[int]:
+    indices = set(_event_indices(events, "downloaded"))
+    if not indices:
+        return []
+    work_ids = store.work_ids(config.state_root, job.id)
+    acquired_work = {work_ids[idx] for idx in indices if idx in work_ids}
+    return sorted(record.idx for record in records
+                  if record.idx in indices or work_ids.get(record.idx) in acquired_work)
 
 
 def _event_indices(events: list[dict], event: str) -> list[int]:

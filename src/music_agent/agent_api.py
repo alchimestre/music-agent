@@ -43,7 +43,7 @@ class AgentAPI:
         return {"job_id": job.id, "status": "started"}
 
     def pass_status(self, job_id: str) -> dict:
-        job = self._job(job_id)
+        job = spotify_workflow.submission(self.config, job_id)
         report = receipts.build_status(self.config, job)
         progress = self._progress(job)
         stage = report.get("stage") or progress.get("stage") or "pending"
@@ -80,7 +80,7 @@ class AgentAPI:
         }
 
     def deliver_pass(self, job_id: str, apply: bool = False) -> dict:
-        job = self._job(job_id)
+        job = spotify_workflow.submission(self.config, job_id)
         if not apply:
             plans = deliveries.delivery_plans(self.config, job)
             self._plans[job.id] = plans
@@ -107,7 +107,7 @@ class AgentAPI:
     def cleanup_playlist(self, job_id: str, scope: str = "acquired", apply: bool = False) -> dict:
         if scope not in {"acquired", "delivered"}:
             raise ValueError("Cleanup scope must be 'acquired' or 'delivered'.")
-        job = self._job(job_id)
+        job = spotify_workflow.submission(self.config, job_id)
         report = spotify_reconcile.reconcile(self.config, job, scope=scope, apply=apply)
         result = {"job_id": job.id, "scope": scope, "apply": apply,
                   "removed": report.get("removed", 0) if apply else 0,
@@ -145,14 +145,6 @@ class AgentAPI:
         finally:
             with self._guard:
                 self._active.discard(job.id)
-    def _job(self, job_id: str) -> state.Job:
-        if not job_id or Path(job_id).name != job_id or job_id in {".", ".."}:
-            raise ValueError("Invalid submission identifier.")
-        job = next((entry for entry in state.all_jobs(self.config) if entry.id == job_id), None)
-        if job is None:
-            raise ValueError(f"No submission named {job_id}.")
-        return job
-
     @staticmethod
     def _validate_source(source: str) -> str:
         if not isinstance(source, str) or not source.strip():

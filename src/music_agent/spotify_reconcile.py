@@ -1,3 +1,4 @@
+import contextlib
 from collections import Counter
 
 from . import operations, receipts, spotify_account, spotify_source, state, store
@@ -12,7 +13,9 @@ def reconcile(config, job: state.Job, *, apply: bool = False, scope: str = "deli
     if scope not in ("acquired", "delivered"):
         raise ValueError("scope must be 'acquired' or 'delivered'")
     with operations.lock(config.state_root):
-        with store.writer_lock(config.state_root):
+        # A preview writes nothing: holding the writer lock through a playlist read and two traktor-nml
+        # runs locks every other process out of the state directory for the length of a plan.
+        with (store.writer_lock(config.state_root) if apply else contextlib.nullcontext()):
             source = spotify_source.snapshot(job)
             report = _report(source, scope)
             if source is None:

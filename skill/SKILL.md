@@ -413,6 +413,10 @@ closed.
 it learns which file replaced which. It runs its `plan`, applies it if it would change anything, and reports
 both. Nothing about Traktor is decided here.
 
+That handshake needs the replaced file **gone first**: planned while it is still on disk, the new copy reads as
+an addition and the old entry outlives it. So a Traktor plan is refused while any file this run replaces is
+still present — deliver the collection that removes it, then preview and deliver again.
+
 `--target NAME` narrows the loop; `--without NAME` leaves one out. `dedupe`, `backfill` and `tidy` read
 rekordbox's database, and say so when rekordbox is not a configured target.
 

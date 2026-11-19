@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -948,3 +949,40 @@ def test_resume_processes_saved_audio_checkpoint_without_replacing_file(tmp_path
     assert tag.read(audio).title == 'Blurred'
     assert runner.conversion_count == 0
     assert bool(runner.normalizations()) == (checkpoint != state.NORMALIZED)
+
+
+def test_a_genre_the_taxonomy_could_not_rule_on_stays_on_the_file(tmp_path):
+    """An empty taxonomy is not a verdict: the file keeps the genre it arrived with."""
+    config = make_config(tmp_path)
+    config.lossless.mkdir(parents=True, exist_ok=True)
+    audio = aiff(config.lossless / "Kiasmos - Blurred.aiff")
+    tag.write(audio, tag.Tags(title="Blurred", artist="Kiasmos", genre="Techno"))
+    job = job_with(config, [state.Record(idx=1, artist="Kiasmos", title="Blurred",
+                                         status=state.NORMALIZED, local_path=str(audio),
+                                         format="aiff", genre="Techno")])
+    hearing, matches, brainz, discogs = identification(genres=("techno",))
+    tools = process.Tools(runner=FakeRunner(), hearing=hearing, matches=matches,
+                          brainz=brainz, discogs=discogs)     # no vocabulary, no mappings
+
+    summary = process.run(config, job, tools=tools, log=lambda *_: None)
+
+    assert summary.tagged == [1]
+    assert tag.read(audio).genre == "Techno", "the incoming genre is what the file still says"
+
+
+def test_a_stop_request_ends_the_stage_between_tracks(tmp_path):
+    """Closing the window must not wait for hours of tagging: the loop yields, the records stay resumable."""
+    config = make_config(tmp_path)
+    audio = tmp_path / "staging" / "Kiasmos - Blurred.flac"
+    audio.parent.mkdir(parents=True, exist_ok=True)
+    audio.write_bytes(b"audio")
+    job = job_with(config, [state.Record(idx=1, artist="Kiasmos", title="Blurred",
+                                        status=state.DOWNLOADED, local_path=str(audio))])
+    stop = threading.Event()
+    stop.set()
+
+    summary = process.run(config, job, tools=with_identification(FakeRunner()), log=lambda *_: None,
+                          stop_event=stop)
+
+    assert summary.placed == [] and summary.tagged == []
+    assert job.records()[0].status == state.DOWNLOADED, "nothing was touched, so the pass resumes"

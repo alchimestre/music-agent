@@ -186,7 +186,11 @@ def find(listed: list[Copy]) -> list[Merge]:
     buckets: dict[tuple[str, str], list[list[Copy]]] = defaultdict(list)
     for copy in sorted(listed, key=lambda one: (one.key, one.seconds or 0, one.content_id)):
         for bucket in buckets[copy.key]:
-            if agrees(bucket[0], copy) and parsing.same_credit(bucket[0].artist, copy.artist):
+            # A row with no length agrees with everything, so it must never be the one the length is
+            # measured against — and one member's credit cannot vouch for the rest.
+            measured = next((one for one in bucket if one.seconds is not None), None)
+            if (measured is None or agrees(measured, copy)) and all(
+                    parsing.same_credit(one.artist, copy.artist) for one in bucket):
                 bucket.append(copy)
                 break
         else:
