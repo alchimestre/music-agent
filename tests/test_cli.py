@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from argparse import ArgumentTypeError, Namespace
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -804,7 +805,10 @@ def test_peers_lists_the_ignored_and_lifts_one(tmp_path, capsys):
     assert "not on the ledger" in capsys.readouterr().out
 
 
-def test_a_pass_points_the_daemon_at_staging_and_shares_both_lanes(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("redirect_output", [False, True])
+def test_a_pass_points_the_daemon_at_staging_and_shares_both_lanes(
+    tmp_path, monkeypatch, capsys, redirect_output
+):
     """The daemon owns the files and the shares, so the pass sets both before it asks anything: staging where
     this run's downloads land, and the two lanes peers can browse. A daemon with no shared files reads as a
     leecher, and peers queue or ban it."""
@@ -816,8 +820,12 @@ def test_a_pass_points_the_daemon_at_staging_and_shares_both_lanes(tmp_path, mon
     monkeypatch.setattr(library, "open", lambda config: None)
     monkeypatch.setattr(acquire, "run", lambda *a, **k: acquire.Summary())
 
-    cli_module._one_pass(config, job, retry=False)
+    stream = StringIO() if redirect_output else None
+    cli_module._one_pass(config, job, retry=False, stream=stream)
 
     assert daemon.directory == str(config.staging)
     assert daemon.shares == [str(config.lossless), str(config.lossy)]
-    assert "no shared files" in capsys.readouterr().err
+    output = capsys.readouterr()
+    assert "no shared files" in output.err
+    if redirect_output:
+        assert output.out == ""

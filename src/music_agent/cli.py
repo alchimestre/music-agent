@@ -15,6 +15,8 @@ from pathlib import Path
 
 from . import acquire
 from . import config as config_module
+from . import deliveries
+from . import receipts
 from . import exporting
 from . import genre
 from . import importing
@@ -233,16 +235,13 @@ def _build_parser() -> argparse.ArgumentParser:
     spotify_reconcile = spotify_commands.add_parser(
         "reconcile", parents=[common], help="preview source removal from verified completion receipts")
     spotify_reconcile.add_argument("--apply", action="store_true", help="apply the verified removal")
+    spotify_reconcile.add_argument("--scope", choices=("acquired", "delivered"), default="delivered",
+                                    help="limit removal to newly acquired tracks or all delivered tracks")
 
     return parser
 
 
 def _import(config: config_module.Config, args: argparse.Namespace) -> int:
-    """Every configured collection, in the order the config names them.
-
-    Every stage before this one has to be run in order, so this is also the stage that ends a run. A target
-    that is not installed is reported and skipped; the others still receive the tracks.
-    """
     job = _target(config, args, "import")
     if job is None:
         return 1
@@ -261,6 +260,7 @@ def _import(config: config_module.Config, args: argparse.Namespace) -> int:
     _stage("import", f"{' → '.join(target.name for target in targets)} · run {job.id}")
     try:
         results = exporting.run(config, job, targets=targets, backup_first=not args.no_backup)
+        verification_failures = _refresh_import_receipts(config, job, targets)
     except importing.NotClosed as error:
         print(error, file=sys.stderr)
         return 1
@@ -268,7 +268,7 @@ def _import(config: config_module.Config, args: argparse.Namespace) -> int:
         print(f"the import stopped: {error}", file=sys.stderr)
         return 1
 
-    failed = 0
+    failed = verification_failures
     for target, result in zip(targets, results):
         line = (result.report() or "nothing to do").replace("\n", "\n" + " " * 13)
         print(f"  {target.name:<11}{line}")
@@ -281,6 +281,20 @@ def _import(config: config_module.Config, args: argparse.Namespace) -> int:
     if failed:
         print(f"music-agent status --job {job.id}")
     return 1 if failed else 0
+
+
+def _refresh_import_receipts(config, job, targets) -> int:
+    outcomes = deliveries.refresh_receipts(config, job, [target.name for target in targets])
+    job.append_event("delivery_finished", outcomes=[
+        {"target": outcome.target, "success": outcome.success} for outcome in outcomes
+    ])
+    receipt = receipts.build_status(config, job)
+    receipts.write(config, job, stage=receipt.get("stage", "pending"),
+                   blocker=receipt.get("blocker", ""), stop_reason=receipt.get("stop_reason", ""))
+    failures = [outcome for outcome in outcomes if not outcome.success]
+    for outcome in failures:
+        print(f"{outcome.target}: delivery verification failed: {outcome.message}", file=sys.stderr)
+    return len(failures)
 
 
 def _rekordbox(config: config_module.Config):
@@ -415,13 +429,13 @@ ACQUIRE_ERRORS = (slsk.MissingCredential, slsk.PortBusy, slsk.DaemonError, acqui
                   library.Unreadable, peers.Unreadable, exporting.UnknownTarget)
 
 
-def _stage(name: str, detail: str = "") -> None:
+def _stage(name: str, detail: str = "", *, stream=None) -> None:
     """One line saying which stage is running, and on what.
 
     A run is several stages long and each one used to start silently, so a long run read as if the previous
     stage were still going. This is the line that says where it is.
     """
-    print(f"\n── {name}" + (f" · {detail}" if detail else ""))
+    print(f"\n── {name}" + (f" · {detail}" if detail else ""), file=stream)
 
 
 def _report(summary, job: state.Job, failures: int = 0) -> None:
@@ -525,7 +539,7 @@ def _one_pass(config: config_module.Config, job: state.Job, *, retry: bool,
     daemon.ensure()
     _ready(daemon, config)
     _stage("acquire", f"{len(job.records())} tracks · pass {attempt}"
-                      f"{' · retry' if retry else ''}")
+                      f"{' · retry' if retry else ''}", stream=stream)
     return acquire.run(config, job.execution(), daemon, reference.lookup(config),
                        library=shelf, retry=retry, log=log, stream=stream, progress=progress)
 
@@ -939,7 +953,7 @@ def _spotify_operation(config: config_module.Config, args: argparse.Namespace) -
     try:
         if args.spotify_command == "reconcile":
             job = spotify_workflow.submission(config, getattr(args, "job", None))
-            result = spotify_reconcile.reconcile(config, job, apply=args.apply)
+            result = spotify_reconcile.reconcile(config, job, apply=args.apply, scope=args.scope)
             print(json.dumps(result, ensure_ascii=False))
             return int(bool(result.get("blocker")))
         with redirect_stdout(sys.stderr):

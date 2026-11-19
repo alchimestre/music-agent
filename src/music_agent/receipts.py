@@ -31,7 +31,7 @@ def build(config: Config, job: state.Job, plans=None) -> dict:
     delivered = {record.idx for record in records
                  if target_names and all(statuses.get(record.idx, {}).get(target, {}).get("status") == "success"
                                          for target in target_names)}
-    complete = not outstanding and len(delivered) == len(records) and bool(target_names)
+    complete = bool(records) and not outstanding and len(delivered) == len(records) and bool(target_names)
     counts = Counter(record.status for record in records)
     counts.update(requested=len(records), acquired=len(acquired), already_held=len(already_held),
                   review=len(review), ungenred=len(ungenred), delivered=len(delivered))
@@ -61,6 +61,11 @@ def build_status(config: Config, job: state.Job) -> dict:
         if stop_reason == "complete":
             stop_reason = "pending"
 
+    if (stop_reason == "collection_blocked" and _successful_delivery_after_operation(job)
+            and _current_deliveries_succeeded(report)):
+        blocker = ""
+        stage = "complete" if report["complete"] else "pending"
+        stop_reason = "complete" if report["complete"] else "pending"
     report.update(stage=stage, blocker=blocker, stop_reason=stop_reason)
     return report
 
@@ -75,6 +80,28 @@ def _last_operation(job: state.Job) -> dict | None:
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     return receipt if isinstance(receipt, dict) else None
+
+def _successful_delivery_after_operation(job: state.Job) -> bool:
+    for event in reversed(job.events()):
+        if event.get("event") == "operation_finished":
+            return False
+        if event.get("event") == "delivery_finished":
+            outcomes = event.get("outcomes")
+            return isinstance(outcomes, list) and bool(outcomes) and all(
+                isinstance(outcome, dict) and outcome.get("success") is True for outcome in outcomes)
+    return False
+
+
+def _current_deliveries_succeeded(report: dict) -> bool:
+    if report["complete"]:
+        return True
+    retained = [record for record in report.get("records", [])
+                if record.get("local_path")
+                and record.get("status") in {state.TAGGED, state.IMPORTED, state.FOUND_IN_LIBRARY}]
+    return bool(retained) and all(
+        record.get("deliveries") and all(outcome.get("status") == "success"
+                                        for outcome in record["deliveries"].values())
+        for record in retained)
 
 
 def _request_fulfilled(record: state.Record) -> bool:

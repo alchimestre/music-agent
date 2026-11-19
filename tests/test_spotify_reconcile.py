@@ -34,7 +34,7 @@ def setup_reconcile(tmp_path, monkeypatch):
          'deliveries': {'rekordbox': {'status': 'success'}, 'traktor': {'status': 'success'}}}
         for idx, uri, position in [(1, A, 0), (2, A, 1), (3, B, 2)]
     ]
-    monkeypatch.setattr('music_agent.receipts.build', lambda *_args, **_kwargs: {'records': records})
+
 
     class Remote:
         tracks = [A, A, B, EXTRA]
@@ -65,6 +65,9 @@ def setup_reconcile(tmp_path, monkeypatch):
                 raise TimeoutError('response lost after server mutation')
 
     monkeypatch.setattr('music_agent.spotify_account._command', Remote.command)
+    receipt = {'records': records, 'acquired': [1, 2, 3]}
+    monkeypatch.setattr('music_agent.receipts.build', lambda *_args, **_kwargs: receipt)
+    Remote.receipt = receipt
     return config, job, snapshot, records, Remote
 
 
@@ -73,6 +76,7 @@ def test_preview_requires_verified_occurrences_and_never_writes(setup_reconcile)
 
     report = spotify_reconcile.reconcile(config, job)
 
+    assert report['scope'] == 'delivered'
     assert report['eligible_occurrences'] and len(report['eligible_occurrences']) == 3
     assert report['removed'] == 0
     assert report['remaining'] == [A, A, B, EXTRA]
@@ -190,3 +194,81 @@ def test_later_delivery_removes_remaining_uri_without_repeating_prior_removal(se
     assert third['blocker']
     assert remote.tracks == [EXTRA, B]
     assert remote.writes == 2
+def test_acquired_scope_removes_22_tracks_and_leaves_one_held_track(setup_reconcile, monkeypatch):
+    config, job, snapshot, _, remote = setup_reconcile
+    tracks = [f'spotify:track:{index:022d}' for index in range(1, 24)]
+    snapshot['tracks'] = [{'uri': uri} for uri in tracks]
+    snapshot['entries'] = [
+        {'idx': idx, 'position': idx - 1, 'uri': uri}
+        for idx, uri in enumerate(tracks, 1)
+    ]
+    remote.tracks = tracks + [EXTRA]
+    remote.receipt['records'] = [
+        {'idx': idx, 'uri': uri, 'position': idx - 1, 'delivered': True,
+         'deliveries': {'rekordbox': {'status': 'success'}, 'traktor': {'status': 'success'}}}
+        for idx, uri in enumerate(tracks, 1)
+    ]
+    remote.receipt['acquired'] = list(range(1, 23))
+    monkeypatch.setattr('music_agent.spotify_source.snapshot', lambda _: snapshot)
+
+    report = spotify_reconcile.reconcile(config, job, apply=True, scope='acquired')
+
+    assert report['scope'] == 'acquired'
+    assert report['removed'] == 22
+    assert report['counts'] == {
+        'eligible_uris': 22, 'eligible_occurrences': 22, 'removed': 22, 'skipped_held': 1
+    }
+    assert report['skipped_held'] == 1
+    assert remote.tracks == [tracks[-1], EXTRA]
+
+
+def test_acquired_scope_never_removes_duplicate_uri_with_mixed_provenance(setup_reconcile):
+    config, job, _, _, remote = setup_reconcile
+    remote.receipt['acquired'] = [1, 3]
+
+    report = spotify_reconcile.reconcile(config, job, apply=True, scope='acquired')
+
+    assert remote.tracks == [A, A, EXTRA]
+    assert report['eligible_uris'] == [B]
+    assert report['skipped_held'] == 1
+    assert report['removed'] == 1
+
+
+def test_acquired_scope_ignores_stale_acquisition_receipt(setup_reconcile):
+    config, job, _, _, remote = setup_reconcile
+    remote.receipt['acquired'] = [999]
+
+    report = spotify_reconcile.reconcile(config, job, apply=True, scope='acquired')
+
+    assert remote.writes == 0
+    assert remote.tracks == [A, A, B, EXTRA]
+    assert report['eligible_uris'] == []
+    assert report['blocker']
+
+
+def test_reconcile_rejects_unknown_scope(setup_reconcile):
+    config, job, _, _, remote = setup_reconcile
+
+    with pytest.raises(ValueError, match='scope'):
+        spotify_reconcile.reconcile(config, job, scope='held')
+
+    assert remote.writes == 0
+
+
+def test_acquired_retry_does_not_recover_unknown_delivered_scope_write(setup_reconcile):
+    config, job, _, _, remote = setup_reconcile
+    job.append_event(
+        'spotify_remove_intent', intent='prior', playlist_id=PLAYLIST['id'],
+        before=[A, A, B, EXTRA], uris=[A, B], occurrences=3, scope='delivered',
+    )
+    remote.tracks = [EXTRA]
+
+    report = spotify_reconcile.reconcile(config, job, apply=True, scope='acquired')
+
+    assert report['removed'] == 0
+    assert report['blocker']
+    assert remote.writes == 0
+    assert remote.tracks == [EXTRA]
+    assert [event['event'] for event in job.events() if event['event'].startswith('spotify_remove')] == [
+        'spotify_remove_intent'
+    ]

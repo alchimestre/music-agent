@@ -68,6 +68,39 @@ def test_delivery_plans_are_read_only_and_keep_nonzero_target_plans(tmp_path, mo
     assert planned == ["rekordbox", "traktor"]
 
 
+@pytest.mark.parametrize("selected", ["rekordbox", "traktor"])
+def test_legacy_refresh_verifies_each_file_only_for_selected_targets(tmp_path, monkeypatch, selected):
+    config = replace(DEFAULTS, state_root=tmp_path, export_targets=("rekordbox",))
+    retained = records(tmp_path)
+    retained.append(SimpleNamespace(
+        idx=3, work_id="work-missing", label="Missing", status="tagged",
+        local_path=str(tmp_path / "missing.flac"),
+    ))
+    job = FakeJob(tmp_path, retained)
+    verified = (retained[0].local_path, retained[2].local_path)
+    plans = [deliveries.DeliveryPlan(
+        target=target, destination=f"{target}-collection", changes="",
+        requires_confirmation=False, verified_artifacts=verified,
+    ) for target in ("rekordbox", "traktor")]
+    monkeypatch.setattr(deliveries, "_plan_target", lambda target, config, job:
+                        next(plan for plan in plans if plan.target == target.name))
+    saved = {}
+    monkeypatch.setattr(
+        deliveries.store, "set_delivery",
+        lambda root, work_id, target, destination, status, error:
+        saved.update({(work_id, target): status}),
+    )
+
+    outcomes = deliveries.refresh_receipts(config, job, [selected])
+
+    assert saved == {
+        ("work-one", selected): "success",
+        ("work-two", selected): "failed",
+        ("work-missing", selected): "failed",
+    }
+    assert outcomes[0].success is False
+
+
 def test_delivery_failure_is_recorded_per_artifact_and_does_not_skip_other_target(tmp_path, monkeypatch):
     config = replace(DEFAULTS, export_targets=("rekordbox", "traktor"), state_root=tmp_path)
     job = FakeJob(tmp_path, records(tmp_path))

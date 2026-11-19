@@ -173,6 +173,8 @@ Apply the verified removal:
 ```sh
 music-agent spotify reconcile --job ID --apply
 ```
+CLI cleanup includes verified already-held tracks by default. Add `--scope acquired` to remove only this pass’s acquisitions.
+
 
 `spotify run --remove-delivered` applies the same removal after delivery.
 Every duplicate occurrence must be verified before its URI is removed.
@@ -206,8 +208,25 @@ about its network. Forward it on the router.
 
 ## Agents
 
-`skill/SKILL.md` ships with the project and is written for a harness. `run` first, then the stage commands,
-and the rare track the queue asks about.
+Install the MCP extra before loading the project’s `.mcp.json`:
+
+```sh
+uv sync --all-extras
+```
+
+| Tool | Operation |
+|---|---|
+| `run_playlist(source)` | Start one Spotify pass and return its job ID |
+| `pass_status(job_id)` | Read progress, review reasons, blank genres and collection outcomes |
+| `deliver_pass(job_id, apply=false)` | Preview delivery; apply the prior preview without acquiring or processing |
+| `cleanup_playlist(job_id, scope="acquired", apply=false)` | Preview or remove verified acquisitions; `delivered` also includes already-held tracks |
+
+The server reads `config.toml` and `.env`. Reload the agent session after registering it.
+Delivery previews expire when their artifacts or destinations change. Cleanup verifies Spotify after writing.
+Delivery recovery clears resolved collection blockers without hiding acquisition failures.
+CLI imports refresh the same verified per-file delivery receipts.
+Status distinguishes a finished pass from a fulfilled playlist. Keep the MCP server running during a pass.
+The `skill/SKILL.md` instructions use these tools when available and the CLI otherwise.
 
 ## Tests
 
