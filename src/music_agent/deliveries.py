@@ -215,6 +215,36 @@ def delivery_receipts(config: Config, job: state.Job,
     return result
 
 
+def refresh_receipts(config: Config, job: state.Job, targets: list[str]) -> list[DeliveryOutcome]:
+    """Verify each file after a legacy import without writing to any collection."""
+    if not targets:
+        return []
+    records = importing.delivery_records(job)
+    work_ids = _work_ids(config, job, records)
+    outcomes = []
+    for target in exporting.configured(config, only=targets):
+        plan = _plan_target(target, config, job)
+        artifacts = []
+        errors = dict(plan.artifact_errors)
+        for record in records:
+            work_id = work_ids.get(record.idx, "")
+            if not work_id:
+                artifacts.append(ArtifactOutcome(record.idx, "failed", "record has no canonical work_id"))
+                continue
+            path = Path(record.local_path)
+            verified = (not plan.blocked and record.idx not in errors and path.is_file()
+                        and str(path.resolve()) in plan.verified_artifacts)
+            status = "success" if verified else "failed"
+            message = ("delivered to this collection" if verified
+                       else errors.get(record.idx) or plan.error or "current artifact is not verified")
+            destination = _collection_key(plan.target_identity or plan.destination, record, work_id)
+            artifact = ArtifactOutcome(record.idx, status, message)
+            artifacts.append(_record_outcome(config, plan.target, destination, work_id, artifact))
+        success = not plan.blocked and all(artifact.status == "success" for artifact in artifacts)
+        outcomes.append(DeliveryOutcome(plan.target, success, _summary(artifacts), artifacts))
+    return outcomes
+
+
 def _delivery_receipt(config: Config, target: str, plan: DeliveryPlan | None,
                       record: state.Record, work_id: str) -> dict:
     if not Path(record.local_path).is_file():

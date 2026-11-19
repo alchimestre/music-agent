@@ -10,6 +10,24 @@ metadata:
   requires: "the music-agent CLI on PATH, with the credentials from .env loaded into its environment"
 ---
 
+## Agent tools
+
+When the `music-agent` MCP server is available, use its structured operations instead of shell orchestration:
+
+| Request | Tool |
+|---|---|
+| Run one Spotify playlist pass | `run_playlist(source)` |
+| Read a pass’s progress or outcome | `pass_status(job_id)` |
+| Recover delivery after a collection failure | `deliver_pass(job_id)` to preview, then `deliver_pass(job_id, apply=true)` |
+| Remove this pass’s acquired tracks from Spotify | `cleanup_playlist(job_id)` to preview, then `cleanup_playlist(job_id, apply=true)` |
+| Also remove verified already-held tracks | Explicitly select `scope="delivered"` for cleanup |
+
+`run_playlist` returns a job ID without waiting. Keep it; status and recovery use that same job.
+Delivery recovery never acquires or processes audio. Cleanup requires current success in every configured collection,
+records its intent and verifies the live playlist afterward. Do not replace it with raw URI removal or ad hoc receipt repair.
+No cleanup is implicit. Ask only when the requested cleanup scope is ambiguous.
+If these tools are absent, use the CLI commands below. Never inspect implementation code to run a normal pass.
+
 # The pipeline
 
 One command does all of it:
@@ -151,10 +169,11 @@ Identical ordered source snapshots reuse the same job. Unsupported source rows r
 2. Report acquired and already-held counts, review labels/reasons/notes, blank genres and pending targets.
 3. Use `stop_reason` to distinguish collection-blocked, disconnected, displaced, no-acquisition and user-stopped runs.
 4. Read `progress.json` for bounded current stage updates; preserve required harness supervision/watchdogs.
-5. Use `spotify reconcile --job ID` to preview verified source cleanup; add `--apply` only for requested cleanup.
+5. Use `spotify reconcile --job ID --scope acquired` to preview this pass’s acquired-track cleanup; add `--apply` only when requested.
 
 `receipt.json` and `run.log` stay beside the job. `status --job ID --json` recomputes current delivery evidence.
 All configured targets must have current success receipts for every duplicate occurrence of a removed URI.
+Omit `--scope acquired` only when cleanup explicitly includes already-held tracks; the CLI default is `delivered`.
 Unknown removals are reconciled without retry; unrelated additions are preserved.
 spogo offers no snapshot/CAS removal: a same-URI concurrent edit cannot be detected atomically.
 Do not restart the daemon or loop on coded stop reasons. Closing a collection app is not needed for acquisition.

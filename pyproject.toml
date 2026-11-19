@@ -21,6 +21,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+mcp = ["mcp==1.26.0"]
 desktop = [
     "PySide6==6.12.0",
     "keyring==25.7.0",
@@ -29,6 +30,7 @@ desktop = [
 [project.scripts]
 music-agent = "music_agent.cli:main"
 music-agent-desktop = "music_agent.desktop:main"
+music-agent-mcp = "music_agent.mcp_server:main"
 
 [project.urls]
 Repository = "https://github.com/alchimestre/music-agent"

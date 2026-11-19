@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from . import spotify, spotify_account, state, store, tracklist
@@ -78,12 +79,25 @@ def _latest_identical(config: Config, payload: dict[str, Any]) -> state.Job | No
     return None
 
 
-def admit(config: Config, source: str, name: str | None = None) -> state.Job:
-    """Snapshot and admit all supported source tracks under the canonical writer lock."""
+def admit(config: Config, source: str, name: str | None = None, *,
+          job_id: str | None = None) -> state.Job:
+    """Snapshot a playlist into a new submission or a previously reserved job ID."""
     playlist = resolve(source)
     payload, records = _source_snapshot(playlist)
     if not records:
         raise ValueError("Spotify playlist has no supported tracks to admit.")
+    if job_id is not None:
+        if not job_id or Path(job_id).name != job_id or job_id in {".", ".."}:
+            raise ValueError("Invalid submission identifier.")
+        job = state.Job(Path(config.state_root) / job_id)
+        with store.writer_lock(config.state_root):
+            if not store.job_exists(config.state_root, job_id):
+                raise ValueError(f"No submission named {job_id}.")
+            if job.records() or snapshot(job) is not None:
+                raise ValueError("Reserved submission must be empty.")
+            job.write_records(records)
+            job.append_event("spotify_source", snapshot=payload)
+        return job
     with store.writer_lock(config.state_root):
         existing = _latest_identical(config, payload)
         if existing is not None:

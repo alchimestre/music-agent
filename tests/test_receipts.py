@@ -48,6 +48,15 @@ def receipt_config(tmp_path):
     return replace(DEFAULTS, state_root=tmp_path, export_targets=("rekordbox", "traktor"))
 
 
+def test_empty_reserved_submission_is_not_complete(tmp_path, monkeypatch):
+    job = FakeJob(tmp_path / "reserved", [])
+    monkeypatch.setattr(receipts.deliveries, "delivery_receipts", lambda config, job, plans=None: {})
+
+    report = receipts.build(receipt_config(tmp_path), job)
+
+    assert report["complete"] is False
+
+
 def test_duplicate_memberships_get_separate_rows_for_every_target(tmp_path, monkeypatch):
     audio = tmp_path / "audio.flac"
     first = record(1, audio)
@@ -209,3 +218,75 @@ def test_write_atomically_persists_stage_and_blocker(tmp_path, monkeypatch):
     assert saved == report
     assert report["stage"] == "acquire"
     assert report["blocker"] == "waiting"
+
+
+def test_build_status_clears_recovered_collection_blocker(tmp_path, monkeypatch):
+    job = FakeJob(tmp_path / "job", [], [
+        {"event": "operation_finished", "complete": False, "stage": "blocked",
+         "blocker": "traktor: collection unavailable", "stop_reason": "collection_blocked"},
+        {"event": "delivery_finished", "outcomes": [{"target": "traktor", "success": True}]},
+    ])
+    config = receipt_config(tmp_path)
+    monkeypatch.setattr(receipts, "build", lambda config, job: {"complete": True})
+
+    status = receipts.build_status(config, job)
+
+    assert status["stage"] == "complete"
+    assert status["blocker"] == ""
+    assert status["stop_reason"] == "complete"
+
+
+def test_build_status_preserves_acquisition_failure_after_delivery(tmp_path, monkeypatch):
+    job = FakeJob(tmp_path / "job", [], [
+        {"event": "operation_finished", "complete": False, "stage": "blocked",
+         "blocker": "network stopped", "stop_reason": "displaced"},
+        {"event": "delivery_finished", "outcomes": [{"target": "traktor", "success": True}]},
+    ])
+    config = receipt_config(tmp_path)
+    monkeypatch.setattr(receipts, "build", lambda config, job: {"complete": False})
+
+    status = receipts.build_status(config, job)
+
+    assert status["stage"] == "blocked"
+    assert status["blocker"] == "network stopped"
+    assert status["stop_reason"] == "displaced"
+
+
+def test_build_status_clears_collection_blocker_when_other_tracks_remain(tmp_path, monkeypatch):
+    job = FakeJob(tmp_path / "job", [], [
+        {"event": "operation_finished", "complete": False, "stage": "blocked",
+         "blocker": "traktor: collection unavailable", "stop_reason": "collection_blocked"},
+        {"event": "delivery_finished", "outcomes": [{"target": "traktor", "success": True}]},
+    ])
+    report = {"complete": False, "records": [
+        {"idx": 1, "status": state.TAGGED, "local_path": "/audio/ready.flac",
+         "deliveries": {"traktor": {"status": "success"}}},
+        {"idx": 2, "status": state.PENDING, "local_path": "",
+         "deliveries": {"traktor": {"status": "failed"}}},
+    ]}
+    monkeypatch.setattr(receipts, "build", lambda config, job: report)
+
+    status = receipts.build_status(receipt_config(tmp_path), job)
+
+    assert status["stage"] == "pending"
+    assert status["blocker"] == ""
+    assert status["stop_reason"] == "pending"
+
+
+def test_build_status_keeps_current_delivery_failure_after_prior_success(tmp_path, monkeypatch):
+    job = FakeJob(tmp_path / "job", [], [
+        {"event": "operation_finished", "complete": False, "stage": "blocked",
+         "blocker": "traktor: collection unavailable", "stop_reason": "collection_blocked"},
+        {"event": "delivery_finished", "outcomes": [{"target": "traktor", "success": True}]},
+    ])
+    report = {"complete": False, "records": [
+        {"idx": 1, "status": state.TAGGED, "local_path": "/audio/ready.flac",
+         "deliveries": {"traktor": {"status": "failed"}}},
+    ]}
+    monkeypatch.setattr(receipts, "build", lambda config, job: report)
+
+    status = receipts.build_status(receipt_config(tmp_path), job)
+
+    assert status["stage"] == "blocked"
+    assert status["blocker"] == "traktor: collection unavailable"
+    assert status["stop_reason"] == "collection_blocked"
