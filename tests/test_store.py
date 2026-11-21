@@ -129,3 +129,50 @@ def test_execution_view_collapses_work_and_keeps_all_job_memberships(tmp_path):
     assert [record.idx for record in all_records] == [1, 2]
     assert [record.decision for record in all_records] == [state.SKIPPED, state.ACCEPTED]
     assert [record.local_path for record in all_records] == ["shared.flac", "shared.flac"]
+
+
+def test_base_job_write_ignores_stale_work_in_duplicate_membership(tmp_path):
+    config = make_config(tmp_path)
+    job = state.create(config, "duplicates", [make_record(1), make_record(2)])
+    records = job.records()
+    records[0].status = state.DOWNLOADED
+    records[0].local_path = "shared.flac"
+    records[0].tried.append("peer:shared.flac")
+    records[1].decision = state.SKIPPED
+
+    job.write_records(records)
+
+    first, second = job.records()
+    assert first.status == second.status == state.DOWNLOADED
+    assert first.local_path == second.local_path == "shared.flac"
+    assert first.tried == second.tried == ["peer:shared.flac"]
+    assert first.decision == state.UNDECIDED
+    assert second.decision == state.SKIPPED
+
+
+def test_a_slower_run_cannot_blank_work_another_run_downloaded(tmp_path):
+    config = make_config(tmp_path)
+    first = state.create(config, "first", records=[make_record(1)])
+    second = state.create(config, "second", records=[make_record(1)])
+    record = first.records()[0]
+    record.status = state.DOWNLOADED
+    record.local_path = "shared.flac"
+    first.write_records([record])
+
+    stale = second.records()[0]
+    stale.status = state.PENDING
+    stale.local_path = ""
+    second.write_records([stale])
+
+    assert first.records()[0].local_path == "shared.flac"
+    assert first.records()[0].status == state.DOWNLOADED
+
+
+def test_a_stale_projection_is_rebuilt_from_committed_state(tmp_path):
+    config = make_config(tmp_path)
+    job = state.create(config, "projected", records=[make_record(1)])
+    job.tracks_path.write_text("", encoding="utf-8")
+
+    store.ensure_projection(config.state_root, job.id)
+
+    assert [entry["idx"] for entry in store.read_jsonl(job.tracks_path)] == [1]

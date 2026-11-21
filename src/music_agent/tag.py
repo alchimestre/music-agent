@@ -11,11 +11,13 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from mutagen.id3 import TALB, TCON, TDRC, TIT2, TPE1, TPE2, TPUB, TXXX, UFID
+
 # The frames this project owns in an ID3 tag; the freeform ones follow MusicBrainz's tagging guidelines
 # so that anything else reading these files understands them.
 _ID3_FRAMES = {
-    "title": "TIT2", "artist": "TPE1", "album": "TALB", "album_artist": "TPE2",
-    "year": "TDRC", "label": "TPUB", "genre": "TCON",
+    "title": TIT2, "artist": TPE1, "album": TALB, "album_artist": TPE2,
+    "year": TDRC, "label": TPUB, "genre": TCON,
 }
 _ID3_FREEFORM = {
     "catalog_number": "CATALOGNUMBER",
@@ -65,12 +67,17 @@ class Tags:
 def read(path: Path) -> Tags:
     """What the file already says, as far as this project's own fields go.
 
-    The MusicBrainz ids it returns are the cache: a file that already carries them is not identified again.
+    The MusicBrainz ids it returns are the identification cache: a file that carries a `release_id` is not
+    identified again.
     """
     from mutagen import File as MutagenFile
 
     audio = MutagenFile(path)
-    tags = getattr(audio, "tags", None)
+    return read_tags(getattr(audio, "tags", None))
+
+
+def read_tags(tags) -> Tags:
+    """Read the owned fields from a file already opened by mutagen."""
     if tags is None:
         return Tags()
 
@@ -82,30 +89,40 @@ def read(path: Path) -> Tags:
                 # A container that will not take the key at all reads the same as one that does not carry
                 # it: Vorbis raises ValueError for ID3's names rather than saying "not here".
                 continue
-            text = getattr(value, "text", None)
-            if text:
-                return str(text[0])
-            if isinstance(value, list) and value:
-                return str(value[0])
-            if isinstance(value, str):
-                return value
+            found = _text_of(value)
+            if found:
+                return found
         return ""
 
     # Each list holds the container's own spellings: ID3 for AIFF, `©nam` for MP4, and the plain names a
     # Vorbis comment carries — which is what an ogg, an opus and a flac are written with.
     return Tags(
-        title=first(["TIT2", "\xa9nam", "title"]),
-        artist=first(["TPE1", "\xa9ART", "artist"]),
-        album=first(["TALB", "\xa9alb", "album"]),
-        album_artist=first(["TPE2", "aART", "albumartist"]),
-        year=first(["TDRC", "\xa9day", "date"]),
-        label=first(["TPUB", "----:com.apple.iTunes:LABEL", "label"]),
-        genre=first(["TCON", "\xa9gen", "genre"]),
+        title=first([_ID3_FRAMES["title"].__name__, "\xa9nam", "title"]),
+        artist=first([_ID3_FRAMES["artist"].__name__, "\xa9ART", "artist"]),
+        album=first([_ID3_FRAMES["album"].__name__, "\xa9alb", "album"]),
+        album_artist=first([_ID3_FRAMES["album_artist"].__name__, "aART", "albumartist"]),
+        year=first([_ID3_FRAMES["year"].__name__, "\xa9day", "date"]),
+        label=first([_ID3_FRAMES["label"].__name__, "----:com.apple.iTunes:LABEL", "label"]),
+        genre=first([_ID3_FRAMES["genre"].__name__, "\xa9gen", "genre"]),
         catalog_number=first(["TXXX:CATALOGNUMBER", "----:com.apple.iTunes:CATALOGNUMBER", "catalognumber"]),
         release_id=first(["TXXX:MusicBrainz Album Id", "----:com.apple.iTunes:MusicBrainz Album Id"]),
         release_group_id=first(["TXXX:MusicBrainz Release Group Id",
                                 "----:com.apple.iTunes:MusicBrainz Release Group Id"]),
+        recording_id=first([f"UFID:{_ID3_RECORDING}", "----:com.apple.iTunes:MusicBrainz Track Id"]),
     )
+
+
+def _text_of(value) -> str:
+    """The first string a frame or atom holds, whichever container wrote it."""
+    if isinstance(value, UFID):
+        return value.data.decode("utf-8", "replace")
+    text = getattr(value, "text", None)
+    if text:
+        return str(text[0])
+    if isinstance(value, list) and value:
+        item = value[0]
+        return item.decode("utf-8", "replace") if isinstance(item, bytes) else str(item)
+    return value if isinstance(value, str) else ""
 
 
 def write(path: Path, tags: Tags, *, replace_genre: bool = False, log=lambda *_: None) -> list[str]:
@@ -124,10 +141,7 @@ def write(path: Path, tags: Tags, *, replace_genre: bool = False, log=lambda *_:
 
 def _write_id3(path: Path, tags: Tags, *, replace_genre: bool = False) -> list[str]:
     from mutagen import File as MutagenFile
-    from mutagen.id3 import TALB, TCON, TDRC, TIT2, TPE1, TPE2, TPUB, TXXX, UFID
 
-    frames = {"title": TIT2, "artist": TPE1, "album": TALB, "album_artist": TPE2,
-              "year": TDRC, "label": TPUB, "genre": TCON}
     audio = MutagenFile(path)
     if audio is None:
         raise TagError(f"mutagen cannot open {path}")
@@ -143,7 +157,8 @@ def _write_id3(path: Path, tags: Tags, *, replace_genre: bool = False) -> list[s
         if name in _ID3_FRAMES:
             if name == "genre" and not replace_genre and "TCON" in audio.tags:
                 continue                        # an existing genre is never replaced
-            audio.tags[_ID3_FRAMES[name]] = frames[name](encoding=3, text=[value])
+            frame = _ID3_FRAMES[name]
+            audio.tags[frame.__name__] = frame(encoding=3, text=[value])
             written.append(name)
         elif name in _ID3_FREEFORM:
             key = f"TXXX:{_ID3_FREEFORM[name]}"
@@ -183,7 +198,7 @@ def _write_mp4(path: Path, tags: Tags, *, replace_genre: bool = False) -> list[s
 
 
 def _write_vorbis(path: Path, tags: Tags, *, replace_genre: bool = False, log=lambda *_: None) -> list[str]:
-    """Everything else the library holds — an ogg, an opus, a flac that never needed converting.
+    """What a lane may still hold from before every lossless file was converted: a flac, an ogg, an opus.
 
     The generic interface writes the ordinary fields and not the ids, a smaller cache than the other two
     formats keep, so a file in this shape is tagged rather than refused.

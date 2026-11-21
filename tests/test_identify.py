@@ -316,6 +316,54 @@ def test_the_live_seams_need_their_credentials(monkeypatch, tmp_path):
         identify.live(config_module.DEFAULTS)
 
 
+def test_musicbrainz_search_keeps_each_recordings_own_score(monkeypatch):
+    client = identify.MusicBrainz("test")
+    recordings = [
+        {"id": "lower-score", "ext:score": "85", "length": "312000"},
+        {"id": "higher-score", "ext:score": "95", "length": "305000"},
+    ]
+    monkeypatch.setattr(client, "_ask", lambda *args, **kwargs: {"recording-list": recordings})
+
+    matches = client.search(request())
+
+    assert [(match.score, match.recordings[0].id) for match in matches] == [
+        (0.85, "lower-score"), (0.95, "higher-score")]
+    assert identify.best(matches, 312).id == "higher-score"
+
+
+def test_musicbrainz_genres_share_the_rate_limit_and_can_fail(monkeypatch):
+    import musicbrainzngs
+
+    now = 10.0
+    calls = []
+
+    def sleep(seconds):
+        nonlocal now
+        now += seconds
+
+    def release(*args, **kwargs):
+        calls.append(("release", now))
+        return {}
+
+    def genres(*args, **kwargs):
+        calls.append(("genres", now))
+        raise OSError("unavailable")
+
+    monkeypatch.setattr(identify.time, "monotonic", lambda: now)
+    monkeypatch.setattr(identify.time, "sleep", sleep)
+    monkeypatch.setattr(identify.MusicBrainz, "_last_request", 0.0)
+    monkeypatch.setattr(musicbrainzngs, "get_release_by_id", release)
+    monkeypatch.setattr(identify.urllib.request, "urlopen", genres)
+    first = identify.MusicBrainz("test")
+    other = identify.MusicBrainz("test")
+
+    first.release("release")
+    assert other.genres("group") == ()
+    first.release("release")
+
+    assert calls == [("release", 10.0), ("genres", 11.0), ("release", 12.0)]
+
+
 def test_an_acoustid_result_becomes_recordings_with_their_release_group():
     """The shape the live service answers with, taken from a real response."""
     result = {

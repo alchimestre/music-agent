@@ -49,13 +49,19 @@ class PortBusy(RuntimeError):
 
 
 class DaemonError(RuntimeError):
-    """The daemon refused a call, or the socket stopped answering."""
+    """The daemon refused a call, or the socket stopped answering.
 
-    def __init__(self, method: str, message: str, exit_status: int | None = None) -> None:
+    `unanswered` tells the two apart: set when the daemon said nothing — no reply in time, a socket that
+    closed — and clear when it answered with an error of its own.
+    """
+
+    def __init__(self, method: str, message: str, exit_status: int | None = None, *,
+                 unanswered: bool = False) -> None:
         super().__init__(f"{method}: {message}")
         self.method = method
         self.message = message
         self.exit_status = exit_status
+        self.unanswered = unanswered
 
 
 def state_dir(config: Config) -> Path:
@@ -78,15 +84,25 @@ CONTROL_ADDRESS = "127.0.0.1:27100"
 
 def share_paths(config: Config) -> tuple[Path, ...]:
     """What to hand the daemon, refusing any root that would expose staging or application state."""
+    shared = check_shares(config)
     for lane in (config.lossless, config.lossy):
         Path(lane).expanduser().mkdir(parents=True, exist_ok=True)
-    private = tuple(Path(root).expanduser().resolve()
-                    for root in (config.staging, config.state_root, state_dir(config), config.peers))
+    return shared
+
+
+def check_shares(config: Config, *, private: Iterable[Path] = ()) -> tuple[Path, ...]:
+    """The shared directories, or ValueError when one holds or sits inside staging or application state.
+
+    Creates nothing, so settings can validate before anything is saved. `private` adds roots the config
+    cannot know, such as the directory its own file lives in.
+    """
+    roots = tuple(Path(root).expanduser().resolve()
+                  for root in (config.staging, config.state_root, state_dir(config), config.peers, *private))
     shared = tuple(Path(path).expanduser().resolve() for path in shared_directories(config))
     for directory in shared:
         # Both directions: a share *above* staging exposes it just as surely as one inside it.
         if any(directory == root or root in directory.parents or directory in root.parents
-               for root in private):
+               for root in roots):
             raise ValueError(f"cannot share {directory}: it holds staging or application state")
     return shared
 
@@ -146,6 +162,13 @@ def _control_token(config: Config) -> str:
         return ""
 
 
+# The window a search is given: the query goes out, peers answer on their own connections, and the pass reads
+# once at the end. The pace is one search every 6.47s — the network's rate — so a longer window is time the
+# pass spends asleep with nothing to do. Five seconds fills the 60 offers it keeps from the hundreds a common
+# title returns; the daemon is told the same.
+SEARCH_TIMEOUT = 5.0
+
+
 def environment(config: Config) -> dict[str, str]:
     username = config.credential(config.slsk_username_env)
     password = config.credential(config.slsk_password_env)
@@ -160,18 +183,15 @@ def environment(config: Config) -> dict[str, str]:
     env.pop("SOULSEEK_SERVER", None)
     env["SOULSEEK_USERNAME"] = username
     env["SOULSEEK_STATE_DIR"] = str(state_dir(config))
-    env["SOULSEEK_LISTENER_PORT"] = str(config.soulseek_listen_port)
-    env["SOULSEEK_MAX_CONCURRENT_DOWNLOADS"] = str(config.max_downloads)
-    env["SOULSEEK_UPLOAD_SLOTS"] = str(config.upload_slots)
     if config.soulseek_server:
         env["SOULSEEK_SERVER"] = config.soulseek_server
-    env["SOULSEEK_SEARCH_TIMEOUT"] = "5"
+    env["SOULSEEK_SEARCH_TIMEOUT"] = f"{SEARCH_TIMEOUT:g}"
     return env
 
 
 # A connect can fail on a daemon that is still starting or briefly busy. Waiting this long before
-# concluding nothing is there is what keeps a transient miss from starting a second daemon, which has to
-# kill the first to take the port.
+# concluding nothing is there is what keeps a transient miss from starting a second daemon, which
+# `free_ports` would refuse as a busy port.
 CONNECT_GRACE = 0.5
 
 # Clients whose presence means the account is already in use. They are reported, never signalled:
@@ -197,6 +217,14 @@ def free_ports(config: Config, *, log=print) -> list[int]:
     message = "the Soulseek daemon cannot start: " + "; ".join(details) + "; stop it yourself"
     log(message)
     raise PortBusy(message)
+
+
+def session_loss_of(status: dict[str, Any]) -> str | None:
+    """The daemon's session loss, as a string or in a `kind` field."""
+    value = status.get("session_loss")
+    if isinstance(value, dict):
+        value = value.get("kind")
+    return value if isinstance(value, str) and value else None
 
 
 class Daemon:
@@ -233,12 +261,16 @@ class Daemon:
         if self._connect_again():
             return
         self.start()
+        self.await_start()
+
+    def await_start(self) -> None:
+        """Wait for a daemon this client started to answer."""
         deadline = time.monotonic() + STARTUP_TIMEOUT
         while not self._open():
             if time.monotonic() > deadline:
                 raise DaemonError("start", f"no daemon on {self.endpoint()} after "
                                            f"{STARTUP_TIMEOUT:g}s — see "
-                                           f"{state_dir(self._config) / 'daemon.log'}")
+                                           f"{state_dir(self._config) / 'daemon.log'}", unanswered=True)
             time.sleep(0.25)
 
     def endpoint(self) -> str:
@@ -350,34 +382,33 @@ class Daemon:
                 return False
         self._sock = sock
         self._buffer = b""
+        try:
+            self._authenticate(address)
+        except BaseException:
+            self.close()
+            raise
+        return True
+
+    def _authenticate(self, address: str) -> None:
         params: dict[str, Any] = {"protocol": PROTOCOL}
         if address:
             params["token"] = _control_token(self._config)
-        try:
-            answer = self.call("auth", params, timeout=STARTUP_TIMEOUT)
-        except DaemonError as error:
-            self.close()
-            raise
+        answer = self.call("auth", params, timeout=STARTUP_TIMEOUT)
         if answer.get("protocol") != PROTOCOL:
-            self.close()
             raise DaemonError("auth", f"the daemon speaks protocol {answer.get('protocol')}, this client "
                                       f"{PROTOCOL} — pin the binary and the client to one version")
-        self.username = str(answer.get("username") or "")
-        self._check_account()
-        return True
+        username = str(answer.get("username") or "")
+        wanted = self._config.credential(self._config.slsk_username_env)
+        if wanted and username and wanted.lower() != username.lower():
+            raise DaemonError("auth", f"the daemon is logged in as {username!r}, and this machine's "
+                                      f"{self._config.slsk_username_env} names {wanted!r} — stop it with "
+                                      f"`soulseek-rs daemon stop`, then run the pass again")
+        self.username = username
 
     def _connect_again(self) -> bool:
         """One more try after a grace: a daemon that was momentarily busy is not one to replace."""
         time.sleep(CONNECT_GRACE)
         return self._open()
-
-    def _check_account(self) -> None:
-        """The daemon's account is the one this machine configured; another one would mix two libraries."""
-        wanted = self._config.credential(self._config.slsk_username_env)
-        if wanted and self.username and wanted.lower() != self.username.lower():
-            raise DaemonError("auth", f"the daemon is logged in as {self.username!r}, and this machine's "
-                                      f"{self._config.slsk_username_env} names {wanted!r} — stop it with "
-                                      f"`soulseek-rs daemon stop`, then run the pass again")
 
     def call(self, method: str, params: dict | None = None,
              timeout: float = CALL_TIMEOUT) -> dict[str, Any]:
@@ -390,7 +421,7 @@ class Daemon:
             if self._sock is None:
                 self.ensure()
             if self._sock is None:
-                raise DaemonError(method, "the daemon's socket is closed")
+                raise DaemonError(method, "the daemon's socket is closed", unanswered=True)
             message_id = next(self._ids)
             line = json.dumps({"jsonrpc": "2.0", "id": message_id, "method": method,
                                "params": params or {}}) + "\n"
@@ -398,7 +429,8 @@ class Daemon:
                 self._sock.sendall(line.encode("utf-8"))
             except OSError as error:
                 self.close()
-                raise DaemonError(method, f"the socket closed on the write: {error}") from error
+                raise DaemonError(method, f"the socket closed on the write: {error}",
+                                  unanswered=True) from error
             deadline = time.monotonic() + timeout
             while True:
                 stashed = self._replies.pop(message_id, None)
@@ -406,15 +438,16 @@ class Daemon:
                     return self._answer(stashed, method)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise DaemonError(method, f"no answer within {timeout:g}s")
+                    raise DaemonError(method, f"no answer within {timeout:g}s", unanswered=True)
                 try:
                     self._sock.settimeout(remaining)
                     message = json.loads(self._readline(deadline))
                 except socket.timeout:
-                    raise DaemonError(method, f"no answer within {timeout:g}s") from None
+                    raise DaemonError(method, f"no answer within {timeout:g}s", unanswered=True) from None
                 except OSError as error:
                     self.close()
-                    raise DaemonError(method, f"the socket closed on the read: {error}") from error
+                    raise DaemonError(method, f"the socket closed on the read: {error}",
+                                      unanswered=True) from error
                 except json.JSONDecodeError:
                     continue                     # a line that is not ours is not an answer either way
                 if message.get("id") != message_id:
@@ -446,7 +479,7 @@ class Daemon:
                 return
             with self._lock:
                 if self._sock is None:
-                    return
+                    break
                 try:
                     self._sock.settimeout(min(remaining, 0.25))
                     chunk = self._sock.recv(65536)
@@ -454,12 +487,14 @@ class Daemon:
                     continue
                 except OSError:
                     self.close()
-                    return
+                    break
                 if not chunk:
                     self.close()
-                    return
+                    break
                 self._buffer += chunk
                 self._take_replies()
+        # Returning early on a dropped socket would turn paused workers into a busy loop.
+        time.sleep(max(0.0, deadline - time.monotonic()))
 
     def _take_replies(self) -> None:
         """Keep every complete message. Called with the lock held."""
@@ -532,7 +567,7 @@ class Daemon:
 
     def disconnected(self) -> bool:
         """Whether the daemon's link to the server is down. It logs back in from this on its own."""
-        return self.status().get("session_loss") == "disconnected"
+        return session_loss_of(self.status()) == "disconnected"
 
     def session_lost(self) -> bool:
         """Whether the account's session was taken by another login.
@@ -541,7 +576,7 @@ class Daemon:
         its own; `displaced` is another client logging in as this account, and no retry of ours can win that.
         Only the second stops a pass.
         """
-        return self.status().get("session_loss") == "displaced"
+        return session_loss_of(self.status()) == "displaced"
 
     def set_dir(self, directory: Path | str) -> None:
         self.call("download.set_dir", {"directory": str(directory)})
@@ -560,7 +595,6 @@ class Daemon:
         with self._search_lock:
             lock = self._searches.setdefault(query, threading.Lock())
         with lock:
-            self._forget(query)
             try:
                 self.call("search.start", {"query": query})
                 self.settle(timeout)

@@ -9,7 +9,8 @@ import tempfile
 from dataclasses import replace
 from pathlib import Path
 
-from .config import DEFAULTS, Config, load
+from . import slsk
+from .config import DEFAULTS, Config, listen_port, load
 
 
 def settings_path() -> Path:
@@ -28,6 +29,7 @@ def load_settings(path: Path | None = None) -> Config:
     music = Path.home() / 'Music' / 'music-agent'
     return replace(DEFAULTS, staging=music / 'staging', lossless=music / 'lossless',
                    lossy=music / 'lossy', state_root=root / 'jobs', peers=root / 'peers.json',
+                   soulseek_listen_port=listen_port(DEFAULTS.soulseek_listen_port),
                    export_targets=(), soulseek_state_dir=str(root / 'soulseek'))
 
 
@@ -59,7 +61,8 @@ def validate_settings(config: Config, path: Path) -> None:
     loudness = (config.target_lufs, config.true_peak_db, config.tolerance_lu)
     if not all(math.isfinite(value) for value in loudness) or config.tolerance_lu < 0:
         raise ValueError('Loudness values must be finite; tolerance cannot be negative.')
-    if not 1 <= config.soulseek_listen_port <= 65535:
+    port = config.soulseek_configured_listen_port
+    if not 1 <= config.soulseek_listen_port <= 65535 or (port is not None and not 1 <= port <= 65535):
         raise ValueError('Peer listening port must be between 1 and 65535.')
     if min(config.workers, config.max_downloads, config.upload_slots) < 1:
         raise ValueError('Workers, downloads, and upload slots must be positive.')
@@ -74,12 +77,8 @@ def validate_settings(config: Config, path: Path) -> None:
     outputs = (config.staging.resolve(), config.lossless.resolve(), config.lossy.resolve())
     if any(overlap(left, right) for index, left in enumerate(outputs) for right in outputs[index + 1:]):
         raise ValueError('Staging and output directories must not overlap.')
-    private = (config.staging, config.state_root, config.peers.parent, path.parent)
-    if config.soulseek_state_dir:
-        private += (Path(config.soulseek_state_dir),)
+    slsk.check_shares(config, private=(path.parent,))
     for shared in config.shared_dirs or ():
-        if any(overlap(shared.resolve(), root.resolve()) for root in private):
-            raise ValueError('A shared folder overlaps staging or private application data.')
         check_access(shared, writable=False)
     for directory in outputs:
         check_access(directory, writable=True)
@@ -113,10 +112,10 @@ def settings_text(config: Config) -> str:
         'credentials': {'musicbrainz_contact': config.musicbrainz_contact_env,
                         'acoustid_key': config.acoustid_key_env, 'discogs_token': config.discogs_token_env,
                         'soulseek_user': config.slsk_username_env,
-                        'soulseek_password': config.slsk_password_env, 'contact': config.musicbrainz_contact},
+                        'soulseek_password': config.slsk_password_env},
         'soulseek': {'command': list(config.soulseek_command), 'state_dir': config.soulseek_state_dir,
                      'username': config.soulseek_username, 'server': config.soulseek_server,
-                     'listen_port': config.soulseek_listen_port, 'upload_slots': config.upload_slots,
+                     'upload_slots': config.upload_slots,
                      'max_downloads': config.max_downloads, 'workers': config.workers,
                      'search_interval': config.search_interval, 'maxretry': config.maxretry,
                      'findtime_days': config.findtime_days, 'bantime_days': config.bantime_days,
@@ -127,8 +126,20 @@ def settings_text(config: Config) -> str:
                   'ffprobe': config.ffprobe, 'fpcalc': config.fpcalc},
         'genres': {'taxonomy': str(config.taxonomy)} if config.taxonomy else {},
     }
+    port = config.soulseek_configured_listen_port
+    defaults = (DEFAULTS.soulseek_listen_port, listen_port(DEFAULTS.soulseek_listen_port))
+    if port is None and config.soulseek_listen_port not in defaults:
+        port = config.soulseek_listen_port
+    if port is not None:
+        sections['soulseek']['listen_port'] = port
+    if config.musicbrainz_contact:
+        sections['credentials']['contact'] = config.musicbrainz_contact
     if config.shared_dirs is not None:
         sections['paths']['shared'] = [str(root) for root in config.shared_dirs]
+    return _toml_text(sections)
+
+
+def _toml_text(sections: dict) -> str:
     lines = []
     for section, values in sections.items():
         lines.append(f'[{section}]')

@@ -1,7 +1,7 @@
 """The processing stage: staged downloads into the collection, identified and tagged on the way.
 
-Identification and tagging run **ahead of** conversion, because the converter carries metadata across, so the
-fingerprint is of the file as downloaded. Lossy files are never converted; both lanes are treated alike.
+Identification fingerprints the download before conversion. Tags are written after placement and
+normalization. Lossy files are never converted.
 """
 
 from __future__ import annotations
@@ -18,6 +18,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Protocol
+
+from mutagen import MutagenError
 
 from . import genre, identify, state, tag
 from .config import Config
@@ -118,6 +120,19 @@ class Tools:
         return cls(hearing=hearing, matches=matches, brainz=brainz, discogs=discogs,
                    vocabulary=list(vocabulary), mappings=mappings or {})
 
+    @classmethod
+    def for_collection(cls, config: Config, genres: Sequence[str], *, warn=None) -> Tools:
+        """Build the stage tools from the collection vocabulary and the taxonomy."""
+        families, mappings = genre.taxonomy(config.taxonomy)
+        if not families:
+            message = (f"no genre taxonomy at {config.taxonomy or '(unset)'} — no genres will be assigned; "
+                       "point [genres] taxonomy in config.toml at music-tagger's taxonomy.json")
+            if warn is None:
+                print(message, file=sys.stderr)
+            else:
+                warn(message)
+        return cls.live(config, vocabulary=genre.vocabulary(genres, families), mappings=mappings)
+
 
 @dataclass
 class Summary:
@@ -155,7 +170,7 @@ def tags_for(found: identify.Identified, *, genre_name: str = "") -> tag.Tags:
 def identify_one(record: state.Record, tools: Tools, log) -> identify.Identified:
     """What the file is, or what its name says it is when nothing can be asked."""
     if not tools.identifies:
-        return identify.from_filename(record.request)
+        return replace(identify.from_filename(record.request), asked=False)
     try:
         return identify.identify(Path(record.local_path), record.request,
                                  hearing=tools.hearing, matches=tools.matches, brainz=tools.brainz,
@@ -173,7 +188,7 @@ def apply_genre(record: state.Record, found: identify.Identified, tools: Tools, 
     offered = list(found.styles) + list(found.genres) + [name for name in existing if name]
     families = {fold(name): name for name in tools.mappings.values() if name in tools.vocabulary}
     kept = next((families[fold(name)] for name in existing if fold(name) in families), "")
-    if not tools.vocabulary:
+    if not tools.vocabulary or not tools.mappings:
         choice = genre.Choice(considered=tuple(offered), asked=False)
     elif kept:
         choice = genre.Choice(genre=kept, source=kept, considered=tuple(offered))
@@ -198,8 +213,9 @@ def apply_genre(record: state.Record, found: identify.Identified, tools: Tools, 
 
 def convert(config: Config, source: Path, *, run: Runner, log) -> Path:
     """Convert one lossless source without exposing partial output or losing the download."""
-    produced = source.with_suffix(".aiff")
-    if produced.exists():
+    produced = source if source.suffix.lower() == ".aiff" else source.with_suffix(".aiff")
+    in_place = produced == source
+    if not in_place and produced.exists():
         raise ProcessError(f"conversion output already exists: {produced}")
 
     with tempfile.TemporaryDirectory(prefix="music-agent-convert-", dir=source.parent) as folder:
@@ -216,24 +232,31 @@ def convert(config: Config, source: Path, *, run: Runner, log) -> Path:
         if result.returncode != 0 or not temporary.is_file():
             raise ProcessError(f"conversion failed: {_failure_detail(result)}")
         try:
-            _promote_conversion(temporary, produced)
+            if in_place:
+                temporary.replace(produced)
+            else:
+                _promote_conversion(temporary, produced)
         except FileExistsError as error:
             raise ProcessError(f"conversion output already exists: {produced}") from error
         except OSError as error:
             raise ProcessError(f"cannot promote converted file: {error}") from error
-        try:
-            source.unlink()
-        except OSError as error:
-            try:
-                produced.unlink(missing_ok=True)
-            except OSError as cleanup_error:
-                raise ProcessError(
-                    f"cannot remove converted source: {source}; cannot clean {produced}: {cleanup_error}"
-                ) from error
-            raise ProcessError(f"cannot remove converted source: {source}") from error
-
+        if not in_place:
+            _remove_converted_source(source, produced)
     log(f"      converted to {produced.name}")
     return produced
+
+
+def _remove_converted_source(source: Path, produced: Path) -> None:
+    try:
+        source.unlink()
+    except OSError as error:
+        try:
+            produced.unlink(missing_ok=True)
+        except OSError as cleanup_error:
+            raise ProcessError(
+                f"cannot remove converted source: {source}; cannot clean {produced}: {cleanup_error}"
+            ) from error
+        raise ProcessError(f"cannot remove converted source: {source}") from error
 
 
 def _ffmpeg_command(
@@ -270,51 +293,59 @@ def _promote_conversion(temporary: Path, produced: Path) -> None:
         os.link(temporary, produced)
 
 
-def discard(record: state.Record) -> Path:
-    """Delete a copy the collection already has.
-
-    The row it would have become does not exist, so nothing points at the file, and one left in staging reads
-    as work in progress to whoever opens the folder.
-    """
-    source = Path(record.local_path)
-    source.unlink()
-    return source
-
-
 def decodable(config: Config, source: Path, *, run: Runner) -> bool:
-    """Whether ffprobe can open the file at all, before anything is spent converting it."""
-    result = run([str(config.ffprobe), "-v", "error", "-show_entries", "format=format_name",
-                  "-of", "csv=p=0", str(source)])
-    return result.returncode == 0 and bool((result.stdout or "").strip())
+    """Whether ffprobe sees an audio stream."""
+    return _audio_stream(config, source, run=run) is not None
+
+
+def _audio_stream(config: Config, source: Path, *, run: Runner) -> dict | None:
+    result = run([str(config.ffprobe), "-v", "error", "-select_streams", "a:0",
+                  "-show_entries", "stream=codec_name,sample_rate", "-of", "json", str(source)])
+    if result.returncode != 0:
+        return None
+    try:
+        streams = json.loads(result.stdout or "{}").get("streams", [])
+    except json.JSONDecodeError:
+        return None
+    return streams[0] if streams else None
 
 
 def place(config: Config, record: state.Record, *, run: Runner, log) -> Path:
     """Get one file into the lane it belongs in, under the name the collection uses."""
+    target, needs_conversion = _placement(config, record, run=run)
+    return _place(record, target, needs_conversion, config, run=run, log=log)
+
+
+def _placement(config: Config, record: state.Record, *, run: Runner) -> tuple[Path, bool]:
     source = Path(record.local_path)
     if not source.is_file():
         raise ProcessError(f"the staged file is gone: {source}")
-    if not decodable(config, source, run=run):
-        # A decoder failure means this is not audio the pipeline can place. Catch it before conversion so the
-        # unreadable-download path removes it instead of retaining a file no stage can use.
-        raise Unreadable(f"the file is not audio ffmpeg can read: {source.name}")
-
     suffix = source.suffix.lower()
     lossless = suffix.lstrip(".") in LOSSLESS_EXTENSIONS
     folder = config.lossless if lossless else config.lossy
-    folder.mkdir(parents=True, exist_ok=True)
-
-    if lossless and suffix not in {".aiff", ".aif"}:
-        source = convert(config, source, run=run, log=log)
-        record.local_path = str(source)     # the converted file is the one that will be placed, or parked
-
-    # One extension for one format: pyrekordbox's `add_content` upper-cases the suffix and has no `AIF`
-    # member, so a `.aif` copy is renamed as it is placed, never converted — the audio is already what the
-    # collection wants.
-    target = folder / filename_for(record, ".aiff" if source.suffix.lower() == ".aif" else source.suffix)
+    target = folder / filename_for(record, ".aiff" if lossless else suffix)
     if target.exists():
-        # Never overwrite: a name already taken is something the dedupe did not catch, and a quiet
-        # replacement would destroy a file rather than report a conflict. The caller deletes this copy.
         raise NameTaken(target)
+    stream = _audio_stream(config, source, run=run)
+    if stream is None:
+        raise Unreadable(f"the file is not audio ffmpeg can read: {source.name}")
+    canonical_aiff = (suffix in {".aiff", ".aif"} and stream.get("codec_name") == "pcm_s16be"
+                      and stream.get("sample_rate") == "44100")
+    return target, lossless and not canonical_aiff
+
+
+def _place(record: state.Record, target: Path, needs_conversion: bool,
+           config: Config, *, run: Runner, log) -> Path:
+    # An earlier download from the same batch may have filled this name since preflight.
+    if target.exists():
+        raise NameTaken(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    source = Path(record.local_path)
+    if needs_conversion:
+        source = convert(config, source, run=run, log=log)
+        record.local_path = str(source)
+        if target.exists():
+            raise NameTaken(target)
     shutil.move(str(source), target)
     log(f"[{record.idx}] {record.label}: → {target}")
     return target
@@ -328,7 +359,7 @@ def normalizer_command(config: Config, folder: Path, report: Path) -> list[str]:
     """
     script = str(config.normalize_tool)
     interpreter = [sys.executable]
-    if not Path(sys.executable).stem.lower().startswith("python"):
+    if getattr(sys, "frozen", False) or "__compiled__" in globals():
         interpreter = [sys.executable, "--normalize", str(report)]
     return [
         *interpreter, script, str(folder),
@@ -454,16 +485,10 @@ class Reconciled:
         return " · ".join(parts)
 
 
-def _downloaded(config: Config, job: state.Job) -> set[int]:
+def _downloaded(job: state.Job) -> set[int]:
     """The indices this run fetched, read from its own events."""
-    fetched: set[int] = set()
-    for line in (config.state_root / job.id / state.EVENTS).read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        event = json.loads(line)
-        if event.get("event") == "downloaded" and event.get("idx") is not None:
-            fetched.add(event["idx"])
-    return fetched
+    return {event["idx"] for event in job.events()
+            if event.get("event") == "downloaded" and event.get("idx") is not None}
 
 
 def reconcile(config: Config, job: state.Job, *, log=print) -> Reconciled:
@@ -474,7 +499,7 @@ def reconcile(config: Config, job: state.Job, *, log=print) -> Reconciled:
     records. A record whose file is not on disk is reported, never guessed at.
     """
     summary = Reconciled()
-    fetched = _downloaded(config, job)
+    fetched = _downloaded(job)
     on_disk = Lanes.scan(config)
 
     records = job.records()
@@ -528,70 +553,102 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
     summary = Summary()
     _resume_records(config, records)
     placed = [record for record in records if record.status in {state.CONVERTED, state.NORMALIZED}]
-    found: dict[int, identify.Identified] = {}
 
     def stopped() -> bool:
         return stop_event is not None and stop_event.is_set()
 
-    downloads = [record for record in records if record.status == state.DOWNLOADED]
-    identifying = downloads + placed
-    if identifying and not stopped():
-        def identified(record: state.Record) -> identify.Identified:
-            log(f"[{record.idx}] {record.label}: identifying")
-            return identify_one(record, tools, log)
-
-        # The timeout is process-global, so it has to bracket the pool rather than each call: a thread
-        # restoring the previous value while three others are still waiting is the hang this prevents.
-        with identify.bounded(), ThreadPoolExecutor(max_workers=min(IDENTIFIERS, len(identifying))) as pool:
-            answers = pool.map(identified, identifying)
-            found = dict(zip((record.idx for record in identifying), answers))
-
-    for record in downloads:
+    ready = _check_downloads(config, job, records, summary, tools, stopped, log)
+    identifying = [record for record in records if record.idx in ready] + placed
+    found = _identify_tracks(identifying, tools, stopped, log)
+    for record in records:
         if stopped():
             break
+        if record.idx not in ready:
+            continue
+        target, needs_conversion = ready[record.idx]
         try:
-            landed = place(config, record, run=tools.runner, log=log)
-        except NameTaken as error:
-            # The lane holds that name, and `held` never skips a track whose length was never resolved, so
-            # this is a copy the collection already has. It is deleted, and the record settles: nothing keeps
-            # a second copy of anything.
-            gone = discard(record)
-            record.local_path = ""
-            record.status = state.FOUND_IN_LIBRARY
-            record.notes = f"{error} — this copy was removed"
-            summary.already.append(record.idx)
-            job.append_event("already_held", idx=record.idx, held=str(error.target), removed=str(gone))
-            log(f"[{record.idx}] {record.label}: the collection already holds that name — "
-                f"{gone.name} removed")
-            job.write_records(records)
-            continue
-        except Unreadable as error:
-            # Nothing can use this copy, so it goes: a file in staging reads as work in progress, and the
-            # record would otherwise carry a path to a file no stage will take. Clearing the path lets a
-            # later pass ask the network again.
-            removed = record.local_path
-            if removed:
-                Path(removed).unlink(missing_ok=True)
-            record.local_path = ""
-            record.status = state.RETRY_LATER
-            record.notes = str(error)
-            summary.failed.append(record.idx)
-            job.append_event("placement_failed", idx=record.idx, error=str(error), removed=removed)
-            log(f"[{record.idx}] {record.label}: {error}")
-            continue
+            landed = _place(record, target, needs_conversion, config, run=tools.runner, log=log)
         except ProcessError as error:
-            record.status = state.RETRY_LATER
-            record.notes = str(error)
-            summary.failed.append(record.idx)
-            job.append_event("placement_failed", idx=record.idx, error=str(error))
-            log(f"[{record.idx}] {record.label}: {error}")
-            continue
-        record.local_path = str(landed)     # the record follows the file
-        record.status = state.CONVERTED
-        placed.append(record)
-        summary.placed.append(record.idx)
-        job.write_records(records)          # a crash costs the current track and nothing else
+            _placement_failed(job, records, record, error, summary, log)
+        else:
+            record.local_path = str(landed)
+            record.status = state.CONVERTED
+            placed.append(record)
+            summary.placed.append(record.idx)
+            job.write_records(records)
 
+    _normalize_tracks(config, job, placed, summary, tools, stopped, log)
+    job.write_records(records)
+    _tag_tracks(job, placed, found, summary, tools, stopped, log)
+    job.write_records(records)
+    job.write_status(config)
+    return summary
+
+
+def _check_downloads(config, job, records, summary, tools, stopped, log) -> dict[int, tuple[Path, bool]]:
+    ready = {}
+    for record in records:
+        if stopped():
+            break
+        if record.status != state.DOWNLOADED:
+            continue
+        try:
+            ready[record.idx] = _placement(config, record, run=tools.runner)
+        except ProcessError as error:
+            _placement_failed(job, records, record, error, summary, log)
+    return ready
+
+
+def _placement_failed(job, records, record, error: ProcessError, summary, log) -> None:
+    if isinstance(error, NameTaken):
+        source = Path(record.local_path)
+        same_path = source.resolve() == error.target.resolve()
+        record.local_path = ""
+        record.status = state.FOUND_IN_LIBRARY
+        record.notes = str(error) if same_path else f"{error} — this copy was removed"
+        job.write_records(records)
+        if not same_path:
+            source.unlink(missing_ok=True)
+        summary.already.append(record.idx)
+        job.append_event("already_held", idx=record.idx, held=str(error.target),
+                         removed="" if same_path else str(source))
+        log(f"[{record.idx}] {record.label}: {record.notes}")
+        return
+    removed = record.local_path if isinstance(error, Unreadable) else ""
+    if removed:
+        record.local_path = ""
+    record.status = state.RETRY_LATER
+    record.notes = str(error)
+    job.write_records(records)
+    if removed:
+        Path(removed).unlink(missing_ok=True)
+    summary.failed.append(record.idx)
+    details = {"removed": removed} if removed else {}
+    job.append_event("placement_failed", idx=record.idx, error=str(error), **details)
+    log(f"[{record.idx}] {record.label}: {error}")
+
+
+def _identify_tracks(records, tools, stopped, log) -> dict[int, identify.Identified | tag.Tags]:
+    if not records or stopped():
+        return {}
+
+    def identified(record: state.Record) -> identify.Identified | tag.Tags:
+        try:
+            written = tag.read(Path(record.local_path))
+        except (MutagenError, OSError):
+            written = tag.Tags()
+        if written.release_id:
+            return written
+        log(f"[{record.idx}] {record.label}: identifying")
+        return identify_one(record, tools, log)
+
+    # The socket timeout is process-global and must remain set until the last worker exits.
+    with identify.bounded(), ThreadPoolExecutor(max_workers=min(IDENTIFIERS, len(records))) as pool:
+        answers = pool.map(identified, records)
+        return {record.idx: answer for record, answer in zip(records, answers)}
+
+
+def _normalize_tracks(config, job, placed, summary, tools, stopped, log) -> None:
     normalizing = [record for record in placed if record.status == state.CONVERTED]
     for folder in sorted({Path(record.local_path).parent for record in normalizing}):
         if stopped():
@@ -621,8 +678,8 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
             record.status = state.NORMALIZED
             summary.normalized.append(record.idx)
 
-    job.write_records(records)
 
+def _tag_tracks(job, placed, found, summary, tools, stopped, log) -> None:
     for record in placed:
         if stopped():
             break
@@ -642,22 +699,25 @@ def run(config: Config, job: state.Job, *, tools: Tools | None = None, log=print
         if not record.genre:
             summary.ungenred.append(record.idx)
 
-    job.write_records(records)
-    job.write_status(config)
-    # As in acquire: the run is finished by the import, which is where the pipeline ends.
-    return summary
 
-
-def _tag_one(job: state.Job, record: state.Record, found: identify.Identified,
+def _tag_one(job: state.Job, record: state.Record, found: identify.Identified | tag.Tags,
              tools: Tools, log) -> None:
     path = Path(record.local_path)
-    choice = apply_genre(record, found, tools, log,
-                         existing=(record.genre, tag.read(path).genre))
+    if isinstance(found, tag.Tags):
+        tag.write(path, found, log=log)
+        record.genre = tag.read(path).genre
+        return
+    existing = tag.read(path).genre
+    if not found.asked:
+        tag.write(path, tags_for(found), log=log)
+        record.genre = existing
+        return
+    choice = apply_genre(record, found, tools, log, existing=(record.genre, existing))
     if not choice.found and choice.considered:
         job.append_event(state.UNGENERED_EVENT, idx=record.idx, names=list(choice.considered))
-    # An unasked choice is not the taxonomy's verdict: replacing the genre would take it off the file.
-    tag.write(path, tags_for(found, genre_name=record.genre),
-              replace_genre=choice.found or choice.asked, log=log)
+    tag.write(path, tags_for(found, genre_name=choice.genre), replace_genre=choice.asked, log=log)
+    if not choice.asked:
+        record.genre = existing
 
 
 def _resume_records(config: Config, records: list[state.Record]) -> None:

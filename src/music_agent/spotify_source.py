@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
-from . import spotify, spotify_account, state, store, tracklist
+from . import parsing, spotify, spotify_account, state, store, tracklist
 from .config import Config
 from .playlists import PlaylistError
 
@@ -65,7 +64,7 @@ def _record_for(raw: dict[str, Any], idx: int) -> state.Record | None:
     artist = ", ".join(artists)
     if not artist.strip() or not raw["name"].strip() or not isinstance(raw.get("uri"), str):
         return None
-    request = tracklist.request_for(artist, raw["name"])
+    request = tracklist.request_for(artist, parsing.track_title(raw["name"]))
     if not request.title:
         return None
     return state.Record(idx=idx, artist=request.artist, title=request.title, mix=request.mix)
@@ -79,25 +78,12 @@ def _latest_identical(config: Config, payload: dict[str, Any]) -> state.Job | No
     return None
 
 
-def admit(config: Config, source: str, name: str | None = None, *,
-          job_id: str | None = None) -> state.Job:
-    """Snapshot a playlist into a new submission or a previously reserved job ID."""
+def admit(config: Config, source: str, name: str | None = None) -> state.Job:
+    """Reuse an identical source snapshot or admit it as a new job."""
     playlist = resolve(source)
     payload, records = _source_snapshot(playlist)
     if not records:
         raise ValueError("Spotify playlist has no supported tracks to admit.")
-    if job_id is not None:
-        if not job_id or Path(job_id).name != job_id or job_id in {".", ".."}:
-            raise ValueError("Invalid submission identifier.")
-        job = state.Job(Path(config.state_root) / job_id)
-        with store.writer_lock(config.state_root):
-            if not store.job_exists(config.state_root, job_id):
-                raise ValueError(f"No submission named {job_id}.")
-            if job.records() or snapshot(job) is not None:
-                raise ValueError("Reserved submission must be empty.")
-            job.write_records(records)
-            job.append_event("spotify_source", snapshot=payload)
-        return job
     with store.writer_lock(config.state_root):
         existing = _latest_identical(config, payload)
         if existing is not None:

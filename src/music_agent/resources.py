@@ -17,9 +17,7 @@ from music_agent.config import Config
 
 # Beside the executable rather than inside the Qt payload: the installer copies one directory verbatim.
 RESOURCE_DIRECTORY = Path("resources") / "bin"
-# The normalizer is not a package this repository may redistribute, so a build that lacks a licensed copy
-# must point at the missing file and let the prerequisite check refuse to process, never fall back to a
-# checkout's copy.
+# The release ships the MIT-licensed normalizer; do not fall back to a checkout if it is missing.
 NORMALIZER_NAME = "loudness_normalizer.py"
 
 

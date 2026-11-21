@@ -64,13 +64,7 @@ class Rekordbox:
     def rows(self, config: Config) -> tuple[list, list[str]]:
         from . import library
 
-        try:
-            return library.read_database()
-        except Exception as error:              # pyrekordbox raises its own types and its own messages
-            raise library.Unreadable(
-                f"cannot read the rekordbox collection ({error}) — is rekordbox installed, and is the "
-                "database where pyrekordbox expects it?"
-            ) from error
+        return library.read_database()
 
     def import_run(self, config: Config, job: state.Job, *,
                    backup_first: bool = True, log=print) -> Summary:
@@ -98,14 +92,23 @@ class Traktor:
 
     def import_run(self, config: Config, job: state.Job, *,
                    backup_first: bool = True, log=print) -> Summary:
-        from . import traktor
+        from . import importing, store, traktor
 
         try:
-            plan = traktor.sync(config, log=log)
-        except traktor.Failed as error:
+            if job is not None:
+                store.ensure_projection(config.state_root, job.id)
+            originals = (traktor.replacements(config, importing.delivery_records(job))
+                         if config.export_targets == ("traktor",) else {})
+            if originals:
+                plan, _ = traktor.sync_replacements(
+                    config, originals, [str(new) for new in originals.values()], log=log)
+                ran = True
+            else:
+                plan = traktor.sync(config, log=log)
+                ran = plan is not None and not traktor.nothing_to_do(plan)
+        except (traktor.Failed, traktor.Missing, OSError, store.WriterLocked) as error:
             return Summary(lines=[str(error)], failed=1, ran=False)
-        return Summary(lines=[plan] if plan else [],
-                       ran=plan is not None and not traktor.nothing_to_do(plan))
+        return Summary(lines=[plan] if plan else [], ran=ran)
 
 
 REGISTRY: dict[str, Target] = {
@@ -148,7 +151,7 @@ def run(config: Config, job: state.Job, *, targets: list[Target] | None = None,
     the tracks. If nothing ran at all, the run stays open, because no collection received it.
     """
     results: list[Summary] = []
-    for target in (targets if targets is not None else configured(config)):
+    for target in (configured(config) if targets is None else targets):
         if not target.available(config):
             log(f"{target.name}: not installed on this machine — skipped")
             results.append(Summary(lines=["not installed on this machine"], ran=False))

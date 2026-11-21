@@ -281,12 +281,15 @@ def pick(track: Track) -> Verdict | None:
     """The candidate the system takes on its own, or None when nothing is takeable.
 
     A length checked against the reference outranks one that could not be checked at all; below that the
-    ladder is blind to everything but lossless, bitrate and queue depth, so a tie goes to the first as
+    ladder is blind to everything but lossless, bitrate and peer speed, so a tie goes to the first as
     offered. The choice is logged, and that log is what makes an arbitrary tie visible afterwards.
     """
-    return min(takeable(track),
-               key=lambda v: (0 if v.label is Label.READY else 1, rank(v.candidate)),
-               default=None)
+    return min(takeable(track), key=ladder, default=None)
+
+
+def ladder(verdict: Verdict) -> tuple[int, tuple[int, int, int]]:
+    """The order in which the pass tries takeable offers."""
+    return (0 if verdict.label is Label.READY else 1, rank(verdict.candidate))
 
 
 def in_review(track: Track) -> bool:

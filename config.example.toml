@@ -1,4 +1,4 @@
-# Copy to `config.toml` and edit. Credentials and the Soulseek ports live in `.env`.
+# Copy to `config.toml` and edit. Credentials live in `.env`, and so does the Soulseek listening port.
 
 [paths]
 # Relative paths resolve against this file's directory.
@@ -8,6 +8,8 @@ lossy      = "~/Music/music-agent/lossy"
 state      = "~/Music/music-agent/state"
 # The ignore list, beside the runs rather than inside one: it belongs to the account, not to a pass.
 peers      = "~/Music/music-agent/state/peers.json"
+# Directories the daemon shares instead of the two lanes; an empty list shares nothing. Never staging or state.
+# shared   = ["~/Music/music-agent/lossless", "~/Music/music-agent/lossy"]
 
 [loudness]
 target_lufs  = -14.0
@@ -24,8 +26,15 @@ command = ["soulseek-rs", "daemon"]
 # daemon's own default (`~/.local/share/soulseek-rs/state`). Both ends have to look in the same place.
 state_dir = ""
 
-# The listening port is in `.env`. The daemon registers exactly that one; its neighbour is only swept in
-# case a client that used both is still alive. The download directory is not here either: `paths.staging` is
+# Defaults shown, uncommented only to change them.
+# server         = ""             # empty: the daemon's own server
+# upload_slots   = 2
+# daemon_address = ""             # loopback host:port; empty: the Unix socket in `state_dir`
+# username       = ""             # a value here is used instead of the variable named under [credentials]
+# listen_port    = 20000          # read only when SLSK_LISTEN_PORT is unset
+
+# The listening port is `SLSK_LISTEN_PORT` in `.env`, which wins over `listen_port` above. The daemon
+# registers exactly that one. The download directory is not here either: `paths.staging` is
 # set on the daemon at the start of every pass, and the two lanes under `paths` are what it shares. Staging
 # is not one of them. A client that reports no shared files reads as a leecher, and peers queue or ban those.
 max_downloads = 20
@@ -67,6 +76,10 @@ acoustid_key        = "ACOUSTID_API_KEY"
 discogs_token       = "DISCOGS_TOKEN"
 soulseek_user       = "SLSK_USERNAME"
 soulseek_password   = "SLSK_PASSWORD"
+# contact = ""                    # the MusicBrainz contact itself, used instead of its variable
 
 [tools]
 # normalize = "vendor/loudness_normalizer/loudness_normalizer.py"
+# ffmpeg    = "ffmpeg"
+# ffprobe   = "ffprobe"
+# fpcalc    = "fpcalc"

@@ -50,18 +50,19 @@ class Leftovers:
         return "\n".join(lines)
 
 
-def find(config: Config) -> Leftovers:
+def find(config: Config, *, owned: set[Path] | None = None) -> Leftovers:
+    """What staging holds that no run's record names; `owned` is `lanes.claimed` when the caller has it."""
     if not config.staging.is_dir():
         return Leftovers((), ())
-    named = lanes.claimed(config)
+    named = lanes.claimed(config) if owned is None else owned
     partial: list[Path] = []
     loose: list[Path] = []
     for path in sorted(config.staging.iterdir()):
-        if path.is_dir() or path.name.startswith("."):     # `.DS_Store` is the Finder's, not the pipeline's
+        if path.name.startswith(".") or not path.is_file() or path.resolve() in named:
             continue
         if path.name.endswith(PART):
             partial.append(path)
-        elif path.resolve() not in named:
+        else:
             loose.append(path)
     return Leftovers(tuple(partial), tuple(loose))
 

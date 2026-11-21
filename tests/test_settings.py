@@ -1,4 +1,5 @@
 from dataclasses import replace
+import tomllib
 
 import pytest
 
@@ -13,7 +14,8 @@ def configured(tmp_path):
                    export_targets=(), soulseek_username='account', musicbrainz_contact='contact')
 
 
-def test_settings_roundtrip_keeps_explicit_empty_shares_and_no_secrets(tmp_path):
+def test_settings_roundtrip_keeps_explicit_empty_shares_and_no_secrets(tmp_path, monkeypatch):
+    monkeypatch.delenv('SLSK_LISTEN_PORT', raising=False)
     settings = configured(tmp_path)
     settings = replace(settings, secrets={settings.slsk_password_env: 'private-password'},
                        soulseek_listen_port=31000, upload_slots=4, search_interval=3.5)
@@ -26,7 +28,35 @@ def test_settings_roundtrip_keeps_explicit_empty_shares_and_no_secrets(tmp_path)
     assert loaded.upload_slots == 4
     assert loaded.staging == settings.staging
     assert loaded.secrets == {}
+    assert loaded.musicbrainz_contact == settings.musicbrainz_contact
     assert 'private-password' not in path.read_text()
+
+
+def test_saving_settings_does_not_persist_environment_defaults(tmp_path, monkeypatch):
+    monkeypatch.setenv('SLSK_LISTEN_PORT', '41000')
+    path = tmp_path / 'private' / 'settings.toml'
+    initial = load_settings(path)
+    assert initial.soulseek_listen_port == 41000
+    settings = replace(configured(tmp_path), musicbrainz_contact='',
+                       soulseek_listen_port=initial.soulseek_listen_port)
+
+    save_settings(path, settings)
+    saved = tomllib.loads(path.read_text())
+    assert 'listen_port' not in saved['soulseek']
+    assert 'contact' not in saved['credentials']
+
+
+def test_saving_settings_keeps_the_explicit_port_under_an_environment_override(tmp_path, monkeypatch):
+    monkeypatch.delenv('SLSK_LISTEN_PORT', raising=False)
+    path = tmp_path / 'private' / 'settings.toml'
+    save_settings(path, replace(configured(tmp_path), soulseek_listen_port=31000))
+    monkeypatch.setenv('SLSK_LISTEN_PORT', '41000')
+
+    overridden = load_settings(path)
+    assert overridden.soulseek_listen_port == 41000
+    save_settings(path, overridden)
+    monkeypatch.delenv('SLSK_LISTEN_PORT')
+    assert load_settings(path).soulseek_listen_port == 31000
 
 
 def test_rejected_form_does_not_replace_saved_settings(tmp_path):

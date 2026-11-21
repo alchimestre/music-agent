@@ -4,10 +4,12 @@ With no path given, the file beside the package is read first — a checkout —
 `~/.config/music-agent/config.toml`, which is where an installed copy finds one; with neither, the defaults are
 a working configuration. `config.example.toml` is the template that ships — copy it and edit. It holds the
 directories, the loudness targets and tolerances, the search pace, the programs the pipeline drives, and the
-*names* of the environment variables carrying the credentials — never the secrets, so it is safe to commit.
+*names* of the environment variables carrying credentials, not the secrets themselves.
+`[credentials] contact` is the literal MusicBrainz contact; `musicbrainz_contact` names its environment variable.
 
-The Soulseek listening ports are not in it either: they come from the environment
-(`SLSK_LISTEN_PORT`, `SLSK_USERNAME`, `SLSK_PASSWORD`), like the credentials.
+The Soulseek listening port is the exception to "in the file": `SLSK_LISTEN_PORT`, when set, wins over
+`[soulseek] listen_port`, because it is a fact about this machine's network. The account's username and
+password are read from the environment variables named in `[credentials]`.
 """
 
 from __future__ import annotations
@@ -93,6 +95,7 @@ class Config:
     ffmpeg: str = "ffmpeg"
     ffprobe: str = "ffprobe"
     fpcalc: str = "fpcalc"
+    soulseek_configured_listen_port: int | None = None
 
     def credential(self, name: str) -> str:
         if name in self.secrets:
@@ -110,17 +113,10 @@ def _resolve(value: str, base: Path) -> Path:
     return path if path.is_absolute() else (base / path).resolve()
 
 
-def _port_from_env(name: str, default: int) -> int:
-    """A listening port from the environment, where this machine keeps the network's own facts."""
-    value = os.environ.get(name)
-    return int(value) if value else default
-
-
-def _listening_ports() -> dict[str, int]:
-    """The listening port, under the field name `Config` gives it."""
-    return {
-        "soulseek_listen_port": _port_from_env("SLSK_LISTEN_PORT", DEFAULTS.soulseek_listen_port),
-    }
+def listen_port(configured: int) -> int:
+    """`SLSK_LISTEN_PORT` when the environment sets it, else the configured port."""
+    value = os.environ.get("SLSK_LISTEN_PORT")
+    return int(value) if value else configured
 
 
 DEFAULTS = Config(
@@ -219,6 +215,75 @@ def _refuse_unknown(known: tuple[str, ...], data: dict, sections: dict[str, _Sec
 SECTIONS = ("paths", "loudness", "credentials", "soulseek", "traktor", "export", "genres", "tools")
 
 
+def _path_fields(paths: _Section, base: Path) -> dict:
+    return {
+        "staging": _resolve(paths.get("staging", str(DEFAULTS.staging)), base),
+        "lossless": _resolve(paths.get("lossless", str(DEFAULTS.lossless)), base),
+        "lossy": _resolve(paths.get("lossy", str(DEFAULTS.lossy)), base),
+        "state_root": _resolve(paths.get("state", str(DEFAULTS.state_root)), base),
+        "peers": _resolve(paths.get("peers", str(DEFAULTS.peers)), base),
+        "shared_dirs": (tuple(_resolve(value, base) for value in paths.get("shared"))
+                        if "shared" in paths.data else DEFAULTS.shared_dirs),
+    }
+
+
+def _loudness_fields(loudness: _Section) -> dict:
+    return {
+        "target_lufs": float(loudness.get("target_lufs", DEFAULTS.target_lufs)),
+        "true_peak_db": float(loudness.get("true_peak_db", DEFAULTS.true_peak_db)),
+        "tolerance_lu": float(loudness.get("tolerance_lu", DEFAULTS.tolerance_lu)),
+    }
+
+
+def _credential_fields(credentials: _Section) -> dict:
+    """`musicbrainz_contact` names an environment variable; `contact` is the address itself."""
+    return {
+        "musicbrainz_contact_env": credentials.get("musicbrainz_contact", DEFAULTS.musicbrainz_contact_env),
+        "acoustid_key_env": credentials.get("acoustid_key", DEFAULTS.acoustid_key_env),
+        "discogs_token_env": credentials.get("discogs_token", DEFAULTS.discogs_token_env),
+        "slsk_username_env": credentials.get("soulseek_user", DEFAULTS.slsk_username_env),
+        "slsk_password_env": credentials.get("soulseek_password", DEFAULTS.slsk_password_env),
+        "musicbrainz_contact": str(credentials.get("contact", DEFAULTS.musicbrainz_contact)),
+    }
+
+
+def _soulseek_fields(soulseek: _Section) -> dict:
+    configured_port = soulseek.get("listen_port", DEFAULTS.soulseek_configured_listen_port)
+    if configured_port is not None:
+        configured_port = int(configured_port)
+    return {
+        "soulseek_command": _command(soulseek.get("command", DEFAULTS.soulseek_command)),
+        "soulseek_state_dir": str(soulseek.get("state_dir", DEFAULTS.soulseek_state_dir)),
+        "soulseek_listen_port": listen_port(
+            DEFAULTS.soulseek_listen_port if configured_port is None else configured_port),
+        "soulseek_configured_listen_port": configured_port,
+        "max_downloads": int(soulseek.get("max_downloads", DEFAULTS.max_downloads)),
+        "workers": int(soulseek.get("workers", DEFAULTS.workers)),
+        "search_interval": float(soulseek.get("search_interval", DEFAULTS.search_interval)),
+        "maxretry": int(soulseek.get("maxretry", DEFAULTS.maxretry)),
+        "findtime_days": int(soulseek.get("findtime_days", DEFAULTS.findtime_days)),
+        "bantime_days": int(soulseek.get("bantime_days", DEFAULTS.bantime_days)),
+        "soulseek_server": str(soulseek.get("server", DEFAULTS.soulseek_server)),
+        "upload_slots": int(soulseek.get("upload_slots", DEFAULTS.upload_slots)),
+        "daemon_address": str(soulseek.get("daemon_address", DEFAULTS.daemon_address)),
+        "soulseek_username": str(soulseek.get("username", DEFAULTS.soulseek_username)),
+    }
+
+
+def _pipeline_fields(traktor: _Section, export: _Section, genres: _Section, tools: _Section,
+                     base: Path) -> dict:
+    taxonomy = genres.get("taxonomy")
+    return {
+        "traktor_command": _command(traktor.get("command", DEFAULTS.traktor_command)),
+        "export_targets": _names(export.get("targets", DEFAULTS.export_targets)),
+        "taxonomy": _resolve(taxonomy, base) if taxonomy else DEFAULTS.taxonomy,
+        "normalize_tool": _resolve(tools.get("normalize", str(DEFAULTS.normalize_tool)), base),
+        "ffmpeg": str(tools.get("ffmpeg", DEFAULTS.ffmpeg)),
+        "ffprobe": str(tools.get("ffprobe", DEFAULTS.ffprobe)),
+        "fpcalc": str(tools.get("fpcalc", DEFAULTS.fpcalc)),
+    }
+
+
 def load(path: Path | None = None) -> Config:
     """Read the config, falling back to the defaults for anything it does not set.
 
@@ -234,60 +299,17 @@ def load(path: Path | None = None) -> Config:
         path = Path(path).expanduser()
     base = path.parent
     if not path.is_file():
-        # The defaults are a working configuration, but the ports still come from the environment.
-        return replace(DEFAULTS, **_listening_ports())
+        return replace(DEFAULTS, soulseek_listen_port=listen_port(DEFAULTS.soulseek_listen_port))
 
     data = tomllib.loads(path.read_text(encoding="utf-8-sig"))
-
     sections = {name: _Section(name, data.get(name, {})) for name in SECTIONS}
-    paths = sections["paths"]
-    loudness = sections["loudness"]
-    credentials = sections["credentials"]
-    soulseek = sections["soulseek"]
-    traktor = sections["traktor"]
-    export = sections["export"]
-    genres = sections["genres"]
-    tools = sections["tools"]
-
-    taxonomy = genres.get("taxonomy")
     config = Config(
-        staging=_resolve(paths.get("staging", str(DEFAULTS.staging)), base),
-        lossless=_resolve(paths.get("lossless", str(DEFAULTS.lossless)), base),
-        lossy=_resolve(paths.get("lossy", str(DEFAULTS.lossy)), base),
-        state_root=_resolve(paths.get("state", str(DEFAULTS.state_root)), base),
-        peers=_resolve(paths.get("peers", str(DEFAULTS.peers)), base),
-        target_lufs=float(loudness.get("target_lufs", DEFAULTS.target_lufs)),
-        true_peak_db=float(loudness.get("true_peak_db", DEFAULTS.true_peak_db)),
-        tolerance_lu=float(loudness.get("tolerance_lu", DEFAULTS.tolerance_lu)),
-        musicbrainz_contact_env=credentials.get("musicbrainz_contact",
-                                                DEFAULTS.musicbrainz_contact_env),
-        acoustid_key_env=credentials.get("acoustid_key", DEFAULTS.acoustid_key_env),
-        discogs_token_env=credentials.get("discogs_token", DEFAULTS.discogs_token_env),
-        soulseek_command=_command(soulseek.get("command", DEFAULTS.soulseek_command)),
-        soulseek_state_dir=str(soulseek.get("state_dir", DEFAULTS.soulseek_state_dir)),
-        traktor_command=_command(traktor.get("command", DEFAULTS.traktor_command)),
-        export_targets=_names(export.get("targets", DEFAULTS.export_targets)),
-        soulseek_listen_port=int(soulseek.get("listen_port", _listening_ports()["soulseek_listen_port"])),
-        max_downloads=int(soulseek.get("max_downloads", DEFAULTS.max_downloads)),
-        workers=int(soulseek.get("workers", DEFAULTS.workers)),
-        search_interval=float(soulseek.get("search_interval", DEFAULTS.search_interval)),
-        maxretry=int(soulseek.get("maxretry", DEFAULTS.maxretry)),
-        findtime_days=int(soulseek.get("findtime_days", DEFAULTS.findtime_days)),
-        bantime_days=int(soulseek.get("bantime_days", DEFAULTS.bantime_days)),
-        slsk_username_env=credentials.get("soulseek_user", DEFAULTS.slsk_username_env),
-        slsk_password_env=credentials.get("soulseek_password", DEFAULTS.slsk_password_env),
-        taxonomy=(_resolve(taxonomy, base) if taxonomy else DEFAULTS.taxonomy),
-        normalize_tool=_resolve(tools.get("normalize", str(DEFAULTS.normalize_tool)), base),
-        shared_dirs=(tuple(_resolve(value, base) for value in paths.get("shared", []))
-                     if "shared" in paths.data else None),
-        soulseek_server=str(soulseek.get("server", "")),
-        upload_slots=int(soulseek.get("upload_slots", 2)),
-        daemon_address=str(soulseek.get("daemon_address", "")),
-        soulseek_username=str(soulseek.get("username", "")),
-        musicbrainz_contact=str(credentials.get("contact", "")),
-        ffmpeg=str(tools.get("ffmpeg", "ffmpeg")),
-        ffprobe=str(tools.get("ffprobe", "ffprobe")),
-        fpcalc=str(tools.get("fpcalc", "fpcalc")),
+        **_path_fields(sections["paths"], base),
+        **_loudness_fields(sections["loudness"]),
+        **_credential_fields(sections["credentials"]),
+        **_soulseek_fields(sections["soulseek"]),
+        **_pipeline_fields(sections["traktor"], sections["export"], sections["genres"], sections["tools"],
+                           base),
     )
     _refuse_unknown(SECTIONS, data, sections)
     return config

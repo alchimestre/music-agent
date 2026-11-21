@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from music_agent import cli, deliveries, state
+from music_agent import cli, deliveries, passes, state
 from music_agent.config import DEFAULTS
 
 
@@ -20,9 +20,9 @@ def test_cli_json_keeps_unavailable_target_pending_without_reacquiring(tmp_path,
     def forbidden(*args, **kwargs):
         raise AssertionError('A tagged resume must not contact Soulseek')
 
-    monkeypatch.setattr(cli, '_one_pass', forbidden)
+    monkeypatch.setattr(passes, 'one_pass', forbidden)
     monkeypatch.setattr(cli.config_module, 'load', lambda path: config)
-    monkeypatch.setattr(deliveries, '_plan_target', lambda target, config, job:
+    monkeypatch.setattr(deliveries, '_plan_target', lambda target, config, job, records:
                         deliveries.DeliveryPlan(target.name, 'unavailable', '', False,
                                                 error='collection is unavailable', blocked=True))
     exit_code = cli.main(['spotify', 'run', '--job', job.id, '--json'])
@@ -55,7 +55,7 @@ def test_acquisition_stop_reason_is_coded_without_retrying(tmp_path, monkeypatch
         attempts.append(job.id)
         raise acquire.ServerStuck('network stopped', lost_session=lost_session)
 
-    monkeypatch.setattr(cli, '_one_pass', disconnected)
+    monkeypatch.setattr(passes, 'one_pass', disconnected)
     report = spotify_workflow.run(config, job)
 
     assert report['stop_reason'] == expected
@@ -115,8 +115,8 @@ def test_retained_processing_failure_is_not_retried_after_a_new_download(tmp_pat
         processing_job.write_records(records)
         return type('Summary', (), {'report': lambda self: ''})()
 
-    monkeypatch.setattr(cli, '_one_pass', acquire_new_track)
-    monkeypatch.setattr(cli, '_tools', lambda config: object())
+    monkeypatch.setattr(passes, 'one_pass', acquire_new_track)
+    monkeypatch.setattr(passes, 'tools', lambda config: object())
     monkeypatch.setattr(process, 'run', process_audio)
     monkeypatch.setattr(spotify_workflow, '_deliver', lambda *args: [])
 
@@ -134,7 +134,7 @@ def test_retained_processing_failure_is_not_retried_after_a_new_download(tmp_pat
         ('displaced', 'missing', 'displaced', 'network stopped'),
         ('transient', 'corrupt', 'transient_disconnected', 'network stopped'),
         ('user_stopped', 'stale_complete', 'user_stopped',
-         'interrupted; resume this submission with --job'),
+         'interrupted; resume this job with --job'),
     ],
 )
 def test_status_json_keeps_last_operation_outcome_with_fresh_evidence(
@@ -157,7 +157,7 @@ def test_status_json_keeps_last_operation_outcome_with_fresh_evidence(
         raise acquire.ServerStuck('network stopped', lost_session=failure == 'displaced')
     monkeypatch.setattr(cli.config_module, 'load', lambda path: config)
 
-    monkeypatch.setattr(cli, '_one_pass', disconnected)
+    monkeypatch.setattr(passes, 'one_pass', disconnected)
     spotify_workflow.run(config, job)
     receipt_path = job.root / 'receipt.json'
     if receipt_state == 'missing':

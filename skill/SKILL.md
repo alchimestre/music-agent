@@ -1,7 +1,7 @@
 ---
 name: music-agent
 description: >
-  Drive the music-agent CLI: turn a tracklist — a file, or a public Spotify or Deezer playlist — into
+  Drive the music-agent CLI: turn a tracklist — a file, or a public Spotify, Deezer or YouTube playlist — into
   tracks acquired from Soulseek, processed once, and exported to every configured collection (`rekordbox`
   and Traktor by default). Covers `run`, which does all of it in one command, the stage commands behind it,
   what each stage prints, and the rare track the queue still asks about. Use when a tracklist should become
@@ -46,7 +46,7 @@ The stage commands are the same code, one stage at a time, for when a stage need
 a failure, or on a run that was interrupted.
 
 `music-agent` reads `config.toml` beside the package, or `~/.config/music-agent/config.toml` for an installed
-copy, so it works from any directory. The credentials and the two Soulseek ports come from the environment —
+copy, so it works from any directory. The credentials and the Soulseek listening port come from the environment —
 copy `.env.example` to `.env` and fill it in — and every command that reaches the network stops with a
 missing key until they are loaded.
 
@@ -161,7 +161,7 @@ For an account playlist requested by name, ID, URL or URI, use the deterministic
 music-agent spotify run "SOURCE" --json
 ```
 
-Add `--remove-delivered` only when source cleanup was requested.
+Add `--remove-delivered` only when source cleanup was requested; it removes with scope `delivered`, which includes already-held tracks.
 Resume with `music-agent spotify run --job ID --json`; do not create another job or reconstruct mappings.
 Identical ordered source snapshots reuse the same job. Unsupported source rows remain recorded but are not acquired.
 
@@ -169,15 +169,15 @@ Identical ordered source snapshots reuse the same job. Unsupported source rows r
 2. Report acquired and already-held counts, review labels/reasons/notes, blank genres and pending targets.
 3. Use `stop_reason` to distinguish collection-blocked, disconnected, displaced, no-acquisition and user-stopped runs.
 4. Read `progress.json` for bounded current stage updates; preserve required harness supervision/watchdogs.
-5. Use `spotify reconcile --job ID --scope acquired` to preview this pass’s acquired-track cleanup; add `--apply` only when requested.
+5. Use `spotify reconcile --job ID` to preview this pass’s acquired-track cleanup; add `--apply` only when requested.
 
 `receipt.json` and `run.log` stay beside the job. `status --job ID --json` recomputes current delivery evidence.
 All configured targets must have current success receipts for every duplicate occurrence of a removed URI.
-Omit `--scope acquired` only when cleanup explicitly includes already-held tracks; the CLI default is `delivered`.
+Add `--scope delivered` only when cleanup explicitly includes already-held tracks; the default is `acquired` on every surface.
 Unknown removals are reconciled without retry; unrelated additions are preserved.
 spogo offers no snapshot/CAS removal: a same-URI concurrent edit cannot be detected atomically.
 Do not restart the daemon or loop on coded stop reasons. Closing a collection app is not needed for acquisition.
-Traktor delivery requires the owner's `verify --json PATH...` interface; never treat aggregate counts as per-file proof.
+Traktor delivery requires `traktor-nml verify --json PATH...`; never treat aggregate counts as per-file proof.
 
 
 
@@ -218,8 +218,8 @@ Tracks a stopped pass never reached are reported as **not searched** and left ex
 
 The one port that must be free is `SLSK_LISTEN_PORT` (20000 by default). A Soulseek client left on it by an
 earlier run is logged in on the same account, so the server hands it every search reply and the pass sees an
-empty network. A pass sweeps it before starting the daemon, stopping that client and saying which; anything
-else holding it is named and the pass stops rather than killing a stranger's process.
+empty network. A pass refuses to start while another client of the account, or any process, holds the port: it
+names what it found and signals nothing. Stop that client yourself, then run again.
 
 One pass at a time, and never kill one mid-session. A pass that is killed abruptly — SIGKILL, a closed
 terminal — leaves the server holding that session until its own timeout, and every login after it is refused
@@ -275,7 +275,7 @@ to say so.
 **The length decides between offers, never whether to take one.** A reference length that resolved is what
 tells two offers apart — the ±1 s window — and it is compared only where there is something to compare it to.
 With one offer and no length to check, the file is taken on its name; with several, the ladder decides: lossless
-before lossy, then the higher bitrate, then the shorter queue. That is a real trade — an arbitrary tie can pick
+before lossy, then the higher bitrate, then the faster peer. That is a real trade — an arbitrary tie can pick
 the wrong file — and the pass logs which candidate it took and why, so the choice is visible afterwards rather
 than silent.
 
@@ -292,13 +292,13 @@ A batch is one login, not one per track:
 music-agent review --accept 12 --candidate 2   # fetch that one and hand the record to process
 music-agent review --accept 4:1,5:1,9:2        # a batch — IDX:CANDIDATE per track
 music-agent review --skip 2,17,28              # passed over for now
-music-agent review --not-found 12              # no usable copy exists; nothing will ask again
+music-agent review --not-found 12              # no usable copy exists; this run asks no more
 ```
 
 `--accept` is the only one that needs the network: it fetches that file from that peer, and takes a file
 already in staging from there rather than fetching it twice. A batch goes through **one** server and as many
 transfers as `workers` allows, and reports per track what came through and what was refused. `--skip` and
-`--not-found` are writes and nothing else, and every later pass leaves a decided track alone.
+`--not-found` are writes and nothing else, and every later pass of this run leaves a decided track alone.
 
 ```
 music-agent acquire --retry
@@ -315,16 +315,16 @@ stage-by-stage route.
 music-agent process
 ```
 
-Identifies every file from its own sound, converts lossless audio to AIFF, normalizes loudness, and writes
-the tags both collections read. A canonical genre family stays; raw file genres resolve through the taxonomy
+Identifies every file from its own sound, converts lossless audio to 16-bit/44.1 kHz AIFF (an AIFF in any
+other format too), normalizes loudness, and writes the tags both collections read. A canonical genre family stays; raw file genres resolve through the taxonomy
 or come off. A lossless upgrade inherits the collection's canonical family.
 
 A lossy file keeps its own codec, and only two codecs are taken at all — **MP3 and AAC-in-m4a** — because
 those are the only two a rekordbox row can point at. A peer's `.ogg`, `.opus` or `.wma` is refused at the
 search, so it is never fetched in the first place.
 
-Where the lane already holds the file's name, nothing is overwritten: the download is moved to
-`paths.duplicates` and the record settles as one the collection already holds. That is the one case a
+Where the lane already holds the file's name, nothing is overwritten: the download is deleted and the record
+settles as one the collection already holds. That is the one case a
 duplicate reaches this stage, and it comes from a track whose length was never resolved — the check that
 skips what the collection already has cannot answer without one.
 
@@ -414,8 +414,11 @@ it learns which file replaced which. It runs its `plan`, applies it if it would 
 both. Nothing about Traktor is decided here.
 
 That handshake needs the replaced file **gone first**: planned while it is still on disk, the new copy reads as
-an addition and the old entry outlives it. So a Traktor plan is refused while any file this run replaces is
-still present — deliver the collection that removes it, then preview and deliver again.
+an addition and the old entry outlives it. So with another target also delivering in the same run, a Traktor
+plan is refused while any file this run replaces is still present — deliver the collection that removes it,
+then preview and deliver again. When Traktor is the only target, the pipeline moves each replaced file into a
+`.music-agent-replaces-*` directory beside it, plans, applies, verifies every new file, and only then deletes
+the old audio; anything failing between those steps puts the file back.
 
 `--target NAME` narrows the loop; `--without NAME` leaves one out. `dedupe`, `backfill` and `tidy` read
 rekordbox's database, and say so when rekordbox is not a configured target.
@@ -452,7 +455,7 @@ collection already held — usually a lossy copy the pipeline had already upgrad
 copy survives — **lossless beats lossy**, then the row more of the library leans on (plays, playlist lines, My
 Tags, cues), then the measured one, then the older — and everything the other still held moves onto it: a
 playlist line or a My Tag is dropped only where the survivor already has one in the same place. The redundant
-**file** leaves the lanes for `paths.duplicates` rather than being deleted.
+**file** is deleted from the lanes.
 
 **`backfill`** is the other direction: a file in a lane with no row gets one, minted from what the file itself
 says (its tags, falling back to its name — never invented), and a file whose track the collection already holds

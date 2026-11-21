@@ -3,17 +3,15 @@ name = "music-agent"
 version = "0.1.0"
 readme = "README.md"
 license = "MIT"
-description = "Acquire, process and import tracks into a rekordbox collection: Soulseek, loudness normalization, tagging from MusicBrainz"
+description = "Acquire, process and import tracks into rekordbox and Traktor collections: Soulseek, loudness normalization, tagging from MusicBrainz"
 requires-python = ">=3.13"
-# musicbrainzngs is pinned: 0.7.1 returns no `genres` include, which is why the genre path calls ws/2
-# directly. pyrekordbox is pinned to the schema version this was written against. mutagen reads a length
-# straight from a header, in about a millisecond, which is what makes indexing the library directories cheap
-# enough to do every run.
+# The genre path bypasses musicbrainzngs 0.7.1 because it does not return the `genres` include.
+# The pyrekordbox pin fixes the database schema this code expects.
 dependencies = [
     "musicbrainzngs==0.7.1",
     "pyrekordbox==0.4.3",
-    "mutagen",
-    "pyacoustid",
+    "mutagen==1.48.1",
+    "pyacoustid==1.3.1",
     "filelock==4.2.6",
     "platformdirs==4.14.2",
     # The cipher behind the rekordbox database: the integration cannot open the collection without it.
@@ -29,7 +27,7 @@ desktop = [
 
 [project.scripts]
 music-agent = "music_agent.cli:main"
-music-agent-desktop = "music_agent.desktop:main"
+music-agent-desktop = "music_agent.launch:main"
 music-agent-mcp = "music_agent.mcp_server:main"
 
 [project.urls]

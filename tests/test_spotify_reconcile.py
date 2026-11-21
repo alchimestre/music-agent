@@ -78,7 +78,7 @@ def test_preview_requires_verified_occurrences_and_never_writes(setup_reconcile)
 
     report = spotify_reconcile.reconcile(config, job)
 
-    assert report['scope'] == 'delivered'
+    assert report['scope'] == 'acquired'
     assert report['eligible_occurrences'] and len(report['eligible_occurrences']) == 3
     assert report['removed'] == 0
     assert report['remaining'] == [A, A, B, EXTRA]

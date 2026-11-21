@@ -7,7 +7,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import acquire, genre, library, operations, process, reference, state, store, tracklist
+from . import acquire, exporting, library, operations, passes, process, reference, state, store, tracklist
 from .config import Config
 from .credentials import CredentialStore, CredentialStoreError
 from .resources import bundle_config
@@ -87,7 +87,7 @@ class Application:
         self.credential_error = ''
 
     def preview(self, source: str) -> Preview:
-        return preview_source(self.config, source)
+        return preview_source(self.config, source, show_matches=True)
 
     def enqueue(self, preview: Preview) -> str:
         with store.writer_lock(self.config.state_root):
@@ -95,25 +95,27 @@ class Application:
             job.append_event('submission', source=preview.source)
             return job.id
 
-    def snapshot(self) -> list[QueueRow]:
+    def snapshot(self, job_id: str | None = None) -> list[QueueRow]:
         rows = []
-        for job in state.all_jobs(self.config):
+        jobs = [operations.find_job(self.config, job_id)] if job_id is not None else state.all_jobs(self.config)
+        for job in jobs:
             events = job.events()
             source = next((event.get('source', '') for event in events
                            if event.get('event') == 'submission'), '')
             peers = {event['idx']: event.get('peer', '') for event in events
                      if event.get('event') == 'transfer_started' and event.get('idx') is not None}
+            work_ids = store.work_ids(self.config.state_root, job.id)
             for record in job.records():
                 rows.append(QueueRow(job.id, record.idx, record.label, record.status,
                                      record.decision, record.notes, record.local_path,
-                                     job.work_id(record.idx), source=source,
+                                     work_ids.get(record.idx, ''), source=source,
                                      peer=peers.get(record.idx, '')))
         return rows
 
     def run(self, job_id: str, emit=lambda event: None) -> RunResult:
         with operations.lock(self.config.state_root):
             self.stop_event.clear()
-            job = self._job(job_id)
+            job = operations.find_job(self.config, job_id)
             self._prerequisites()
             shelf = library.open(self.config)
             if any(row.status in state.LIVE and not row.decided() for row in job.records()):
@@ -127,10 +129,9 @@ class Application:
         status = self.runtime.start()
         if status.error:
             raise RuntimeError(status.error)
-        self.runtime.apply_settings(self.config)
         acquire.run(self.config, job.execution(), self.runtime.daemon, reference.lookup(self.config),
                     library=shelf, stream=io.StringIO(), stop_event=self.stop_event,
-                    pause_event=self.pause_event,
+                    pause_event=self.pause_event, retry=bool(job.searched()),
                     log=lambda message: emit(Progress('acquire', message, job.id)),
                     progress=lambda row: self._transfer_progress(job, row, emit))
 
@@ -143,23 +144,25 @@ class Application:
 
     def _process(self, job: state.Job, shelf, emit) -> None:
         emit(Progress('process', 'Identifying, converting, normalizing, and tagging.', job.id))
-        families = genre.families(self.config.taxonomy)
-        tools = process.Tools.live(self.config, vocabulary=genre.vocabulary(shelf.genres(), families),
-                                   mappings=genre.table(self.config.taxonomy))
+        tools = passes.tools(self.config, shelf=shelf,
+                             warn=lambda message: emit(Progress('process', message, job.id)))
         process.run(self.config, job.execution(), tools=tools, stop_event=self.stop_event,
                     log=lambda message: emit(Progress('process', message, job.id)))
         if not self.config.export_targets:
-            result = self._result(job)
-            if not result.failed and not result.review and all(
-                    record.status in {state.TAGGED, state.IMPORTED, state.FOUND_IN_LIBRARY}
-                    or record.decided() and record.decision != state.ACCEPTED
-                    for record in job.records()):
-                job.finish()
+            self._finish(job)
+
+    def _finish(self, job: state.Job) -> None:
+        if self.stop_event.is_set() or job.finished():
+            return
+        if all(record.status in state.FINISHED or
+               (record.decided() and record.decision != state.ACCEPTED)
+               for record in job.records()):
+            job.finish()
 
     def delivery_plans(self, job_id: str):
         from . import deliveries
 
-        plans = deliveries.delivery_plans(self.config, self._job(job_id))
+        plans = deliveries.delivery_plans(self.config, operations.find_job(self.config, job_id))
         self._approved_plans[job_id] = plans
         return plans
 
@@ -168,23 +171,25 @@ class Application:
         if job_id not in self._approved_plans:
             raise ValueError('Preview destination changes before delivering.')
 
-        with operations.lock(self.config.state_root), store.writer_lock(self.config.state_root):
-            return deliveries.deliver(self.config, self._job(job_id), self._approved_plans.pop(job_id),
-                                      emit=lambda stage, message: emit(Progress(stage, message, job_id)))
+        with operations.lock(self.config.state_root):
+            job = operations.find_job(self.config, job_id)
+            installed = {target.name for target in exporting.configured(self.config)
+                         if target.available(self.config)}
+            approved = self._approved_plans.pop(job_id)
+            outcomes = deliveries.deliver(self.config, job, approved,
+                                          emit=lambda stage, message: emit(Progress(stage, message, job_id)))
+            operations.record_delivery(self.config, job, outcomes, plans=approved)
+            successful = {outcome.target for outcome in outcomes if outcome.success}
+            delivered = any(outcome.artifacts for outcome in outcomes if outcome.target in successful)
+            if delivered and installed and installed <= successful and not job.finished():
+                job.finish()
+            return outcomes
 
     def shutdown(self) -> None:
         self.stop_event.set()
         self.pause_event.clear()
         if self.runtime.status().managed:
             self.runtime.stop()
-
-    def _job(self, job_id: str) -> state.Job:
-        if not job_id or Path(job_id).name != job_id or job_id in {'.', '..'}:
-            raise ValueError('Invalid submission identifier.')
-        job = next((job for job in state.all_jobs(self.config) if job.id == job_id), None)
-        if job is None:
-            raise ValueError('Submission does not exist.')
-        return job
 
     def _prerequisites(self) -> None:
         for name in (self.config.musicbrainz_contact_env, self.config.acoustid_key_env):
@@ -195,19 +200,18 @@ class Application:
 
     def _result(self, job: state.Job) -> RunResult:
         records = job.records()
-        completed = {state.TAGGED, state.IMPORTED, state.FOUND_IN_LIBRARY}
-        return RunResult(job.id, completed=sum(record.status in completed for record in records),
-                         review=sum(record.needs_you() and not record.decided() for record in records),
+        return RunResult(job.id, completed=sum(record.status in state.FINISHED for record in records),
+                         review=state.review_count(records, job.searched()),
                          failed=sum(record.status == state.FAILED for record in records),
                          ungenred=[record.label for record in records
-                                   if record.status in completed and not record.genre],
+                                   if record.status in state.FINISHED and not record.genre],
                          already_held=sum(record.status == state.FOUND_IN_LIBRARY for record in records),
                          outstanding=sum(record.status in state.LIVE and not record.decided()
                                          for record in records),
                          delivery_pending=self.config.export_targets)
 
 
-def preview_source(config: Config, source: str) -> Preview:
+def preview_source(config: Config, source: str, *, show_matches: bool = False) -> Preview:
     from . import deezer, spotify, youtube
 
     reader = next((module for module in (deezer, spotify, youtube)
@@ -227,6 +231,8 @@ def preview_source(config: Config, source: str) -> Preview:
                             mix=request.mix, duration_s=request.ref_duration,
                             replaces=request.replaces)
                for index, request in enumerate(requests, 1)]
+    if not show_matches:
+        return Preview(name, source, records, [])
     matches = store.preview_submission(config.state_root, records)
     shelf = library.Library(library.read_directories(config), [])
     held = {}

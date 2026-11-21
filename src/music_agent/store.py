@@ -9,16 +9,20 @@ import shutil
 import sqlite3
 import threading
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
+from typing import TYPE_CHECKING
 
 from filelock import FileLock, Timeout
 
 from .parsing import fold, is_original
 from .rules import DURATION_WINDOW
 from .tracklist import request_for
+
+if TYPE_CHECKING:
+    from .state import Record
 
 DATABASE = "state.sqlite3"
 LOCK_FILE = ".writer.lock"
@@ -27,6 +31,7 @@ DELIVERY_STATUSES = frozenset({"pending", "success", "failed"})
 LOCAL_FIELDS = ("idx", "artist", "title", "mix", "duration_s", "replaces", "decision", "notes")
 WORK_FIELDS = ("status", "local_path", "format", "genre", "candidates", "tried", "refused")
 ARTIFACT_STATUSES = frozenset({"downloaded", "converted", "normalized", "tagged", "imported"})
+SCHEMA_VERSION = 1
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -134,18 +139,7 @@ def writer_lock(root: Path) -> Iterator[None]:
                 state.lock.release()
 
 
-def writer_lock_held(root: Path) -> bool:
-    """Whether the calling thread is inside `writer_lock` for this root.
-
-    Read without `state.guard`: taking it would wait on another thread that may be waiting on this caller.
-    """
-    path = Path(root).resolve() / LOCK_FILE
-    state = _LOCK_STATES.get(path)
-    return (state is not None and state.pid == os.getpid()
-            and state.owners.get(threading.get_ident(), 0) > 0)
-
-
-def _now() -> str:
+def now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -154,8 +148,10 @@ def _initialize(root: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(database_path(root), timeout=30)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute("PRAGMA journal_mode = WAL")
-    connection.executescript(_SCHEMA)
+    if connection.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.executescript(_SCHEMA)
+        connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     return connection
 
 
@@ -280,6 +276,18 @@ def _carries_artifact(state: dict) -> bool:
     return bool(state.get("local_path")) or state.get("status") in ARTIFACT_STATUSES
 
 
+def _keeps_artifact(stored: str, incoming: str) -> bool:
+    """Whether a shared work state may replace the stored one without losing a reported artifact.
+
+    A run legitimately clears its path when it settles the track (`found_in_library`) or releases a corrupt
+    download; what must not happen is one run putting work another run already fetched back to be fetched.
+    """
+    before, after = json.loads(stored), json.loads(incoming)
+    if not _carries_artifact(before):
+        return True
+    return after.get("status") not in {"", "pending"}
+
+
 def _merge_work_state(connection: sqlite3.Connection, candidate: _WorkCandidate,
                       record: dict) -> None:
     """Adopt a reported artifact onto work that has none, never replacing settled work."""
@@ -294,10 +302,11 @@ def _merge_work_state(connection: sqlite3.Connection, candidate: _WorkCandidate,
                        (_json(incoming), candidate.work_id))
 
 
-def _admit_records(connection: sqlite3.Connection, job_id: str, records: Sequence[object],
-                   catalog: dict[str, list[_WorkCandidate]]) -> list[AdmissionMatch]:
+def _admit_records(connection: sqlite3.Connection, job_id: str,
+                   records: Sequence[object]) -> list[AdmissionMatch]:
     matches: list[AdmissionMatch] = []
     seen_indices: set[int] = set()
+    catalog: dict[str, list[_WorkCandidate]] | None = None
     for item in records:
         record = _record_data(item)
         idx = record["idx"]
@@ -311,6 +320,8 @@ def _admit_records(connection: sqlite3.Connection, job_id: str, records: Sequenc
             matches.append(AdmissionMatch(idx, prior["work_id"], True, False))
             continue
         identity = _identity_key(record)
+        if catalog is None:
+            catalog = _work_catalog(connection)
         candidates = catalog.setdefault(identity, [])
         duration = record.get("duration_s")
         candidate = _matching_work(candidates, duration)
@@ -354,7 +365,7 @@ def preview_submission(root: Path, records: Sequence[object]) -> list[AdmissionM
     return matches
 
 
-def _read_jsonl(path: Path) -> list[dict]:
+def read_jsonl(path: Path) -> list[dict]:
     if not path.is_file():
         return []
     entries: list[dict] = []
@@ -392,61 +403,45 @@ def _prepare_legacy_record(data: dict):
     return record
 
 
-def _import_legacy_job(root: Path, job_root: Path) -> bool:
-    if job_exists(root, job_root.name):
-        return False
+def _import_legacy_job(connection: sqlite3.Connection, root: Path, job_root: Path) -> None:
     _backup_legacy(job_root)
-    legacy_records = [_prepare_legacy_record(data) for data in _read_jsonl(job_root / "tracks.jsonl")]
-    events = _read_jsonl(job_root / "events.jsonl")
-    connection = _initialize(root)
-    imported = False
-    try:
-        with _transaction(connection):
-            row = connection.execute("SELECT 1 FROM jobs WHERE job_id = ?", (job_root.name,)).fetchone()
-            if row is not None:
-                return False
-            created = next((event for event in events if event.get("event") == "created"), {})
-            name = str(created.get("name", job_root.name))
-            connection.execute("INSERT INTO jobs(job_id, name, created_at) VALUES (?, ?, ?)",
-                               (job_root.name, name, created.get("ts", _now())))
-            catalog = _work_catalog(connection)
-            _admit_records(connection, job_root.name, legacy_records, catalog)
-            for seq, event in enumerate(events, start=1):
-                connection.execute("INSERT INTO events(job_id, seq, event_json) VALUES (?, ?, ?)",
-                                   (job_root.name, seq, _json(event)))
-            imported = True
-    finally:
-        connection.close()
-    if imported:
-        _refresh_projection(root, job_root.name)
-    return imported
+    records = [_prepare_legacy_record(data) for data in read_jsonl(job_root / "tracks.jsonl")]
+    events = read_jsonl(job_root / "events.jsonl")
+    created = next((event for event in events if event.get("event") == "created"), {})
+    name = str(created.get("name", job_root.name))
+    with _transaction(connection):
+        connection.execute("INSERT INTO jobs(job_id, name, created_at) VALUES (?, ?, ?)",
+                           (job_root.name, name, created.get("ts", now())))
+        _admit_records(connection, job_root.name, records)
+        connection.executemany("INSERT INTO events(job_id, seq, event_json) VALUES (?, ?, ?)",
+                               ((job_root.name, seq, _json(event)) for seq, event in enumerate(events, 1)))
+    _refresh_projection(connection, root, job_root.name)
 
 
-def _import_legacy_locked(root: Path) -> int:
-    if not root.is_dir():
-        return 0
-    known = set(job_ids(root))
+def _has_legacy_files(job_root: Path) -> bool:
+    return (job_root / "tracks.jsonl").is_file() or (job_root / "events.jsonl").is_file()
+
+
+def _import_legacy_locked(connection: sqlite3.Connection, root: Path) -> int:
+    known = {row[0] for row in connection.execute("SELECT job_id FROM jobs")}
     imported = 0
     for job_root in sorted(path for path in root.iterdir() if path.is_dir()):
-        if job_root.name in known:
+        if job_root.name in known or not _has_legacy_files(job_root):
             continue
-        if not ((job_root / "tracks.jsonl").is_file() or (job_root / "events.jsonl").is_file()):
-            continue
-        if _import_legacy_job(root, job_root):
-            imported += 1
+        _import_legacy_job(connection, root, job_root)
+        imported += 1
     return imported
 
 
 _LEGACY_SCANNED: set[Path] = set()
 
 
-def _import_legacy_once(root: Path) -> int:
+def _import_legacy_once(connection: sqlite3.Connection, root: Path) -> None:
     """Import legacy job directories once per process; later imports are explicit calls."""
     if root in _LEGACY_SCANNED:
-        return 0
-    imported = _import_legacy_locked(root)
+        return
+    _import_legacy_locked(connection, root)
     _LEGACY_SCANNED.add(root)
-    return imported
 
 
 def import_legacy(root: Path) -> int:
@@ -454,8 +449,8 @@ def import_legacy(root: Path) -> int:
     root = Path(root)
     if not root.is_dir():
         return 0
-    with writer_lock(root):
-        imported = _import_legacy_locked(root)
+    with writer_lock(root), closing(_initialize(root)) as connection:
+        imported = _import_legacy_locked(connection, root)
         _LEGACY_SCANNED.add(root)
         return imported
 
@@ -471,27 +466,26 @@ def job_exists(root: Path, job_id: str) -> bool:
     return row is not None
 
 
-def _ensure_job_locked(root: Path, job_id: str) -> None:
-    job_root = Path(root) / job_id
-    if not job_exists(root, job_id):
-        has_projection = (job_root / "tracks.jsonl").is_file() or (job_root / "events.jsonl").is_file()
-        if has_projection:
-            _import_legacy_job(root, job_root)
-    connection = _initialize(root)
-    try:
-        if connection.execute("SELECT 1 FROM jobs WHERE job_id = ?", (job_id,)).fetchone():
-            return
-        with _transaction(connection):
-            connection.execute("INSERT INTO jobs(job_id, name, created_at) VALUES (?, ?, ?)",
-                               (job_id, job_id, _now()))
-    finally:
-        connection.close()
+def _has_job(connection: sqlite3.Connection, job_id: str) -> bool:
+    return connection.execute("SELECT 1 FROM jobs WHERE job_id = ?", (job_id,)).fetchone() is not None
 
 
-def _job_records(connection: sqlite3.Connection, job_id: str) -> list[dict]:
+def _ensure_job_locked(connection: sqlite3.Connection, root: Path, job_id: str) -> None:
+    if _has_job(connection, job_id):
+        return
+    job_root = root / job_id
+    if _has_legacy_files(job_root):
+        _import_legacy_job(connection, root, job_root)
+        return
+    with _transaction(connection):
+        connection.execute("INSERT INTO jobs(job_id, name, created_at) VALUES (?, ?, ?)",
+                           (job_id, job_id, now()))
+
+
+def _job_records(connection: sqlite3.Connection, job_id: str) -> list[Record]:
     from .state import Record
 
-    results: list[dict] = []
+    results: list[Record] = []
     rows = connection.execute(
         "SELECT m.record_json, w.state_json FROM memberships m "
         "JOIN work_items w ON w.work_id = m.work_id WHERE m.job_id = ? ORDER BY m.idx",
@@ -500,7 +494,7 @@ def _job_records(connection: sqlite3.Connection, job_id: str) -> list[dict]:
     for row in rows:
         record = json.loads(row["record_json"])
         record.update(json.loads(row["state_json"]))
-        results.append(Record.from_json(record).to_json())
+        results.append(Record.from_json(record))
     return results
 
 
@@ -520,21 +514,41 @@ def _atomic_jsonl(path: Path, entries: Sequence[dict]) -> None:
             temporary.unlink()
 
 
-def _refresh_projection(root: Path, job_id: str) -> None:
-    connection = _connect(root)
-    if connection is None:
-        return
-    try:
-        records = _job_records(connection, job_id)
-        events = _job_events(connection, job_id)
-    finally:
-        connection.close()
+def _refresh_projection(connection: sqlite3.Connection, root: Path, job_id: str, *,
+                        tracks: bool = True, events: bool = True) -> None:
+    """Rewrite the JSONL views a write changed, from the connection that wrote it, before the lock is released."""
     from .state import EVENTS, TRACKS
 
     job_root = Path(root) / job_id
     job_root.mkdir(parents=True, exist_ok=True)
-    _atomic_jsonl(job_root / TRACKS, records)
-    _atomic_jsonl(job_root / EVENTS, events)
+    tracks_path = job_root / TRACKS
+    events_path = job_root / EVENTS
+    if tracks or not tracks_path.is_file():
+        _atomic_jsonl(tracks_path, [record.to_json() for record in _job_records(connection, job_id)])
+    if events or not events_path.is_file():
+        _atomic_jsonl(events_path, _job_events(connection, job_id))
+
+
+def ensure_projection(root: Path, job_id: str) -> None:
+    """Rebuild a job's tracks.jsonl when it no longer matches committed state; Traktor's tool reads it."""
+    from .state import TRACKS
+
+    root = Path(root)
+    if not database_path(root).is_file():
+        return
+    with writer_lock(root):
+        connection = _connect(root)
+        if connection is None:
+            return
+        try:
+            if not _has_job(connection, job_id):
+                return
+            path = root / job_id / TRACKS
+            expected = [record.to_json() for record in _job_records(connection, job_id)]
+            if read_jsonl(path) != expected:
+                _refresh_projection(connection, root, job_id, events=False)
+        finally:
+            connection.close()
 
 
 def rebuild_projections(root: Path) -> None:
@@ -547,102 +561,103 @@ def rebuild_projections(root: Path) -> None:
         if connection is None:
             return
         try:
-            known_jobs = [row[0] for row in connection.execute("SELECT job_id FROM jobs ORDER BY job_id")]
+            for job_id in [row[0] for row in connection.execute("SELECT job_id FROM jobs ORDER BY job_id")]:
+                _refresh_projection(connection, root, job_id)
         finally:
             connection.close()
-        for job_id in known_jobs:
-            _refresh_projection(root, job_id)
 
 
 def admit_submission(root: Path, job_id: str, records: Sequence[object],
                      name: str | None = None) -> list[AdmissionMatch]:
     """Create or extend a submission and admit its ordered memberships atomically."""
     root = Path(root)
-    with writer_lock(root):
-        _import_legacy_once(root)
-        connection = _initialize(root)
-        try:
-            with _transaction(connection):
-                row = connection.execute("SELECT 1 FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
-                if row is None:
-                    connection.execute("INSERT INTO jobs(job_id, name, created_at) VALUES (?, ?, ?)",
-                                       (job_id, name or job_id, _now()))
-                    created = {"ts": _now(), "event": "created", "name": name or job_id}
-                    connection.execute("INSERT INTO events(job_id, seq, event_json) VALUES (?, 1, ?)",
-                                       (job_id, _json(created)))
-                catalog = _work_catalog(connection)
-                matches = _admit_records(connection, job_id, records, catalog)
-        finally:
-            connection.close()
-        _refresh_projection(root, job_id)
+    with writer_lock(root), closing(_initialize(root)) as connection:
+        _import_legacy_once(connection, root)
+        with _transaction(connection):
+            if not _has_job(connection, job_id):
+                connection.execute("INSERT INTO jobs(job_id, name, created_at) VALUES (?, ?, ?)",
+                                   (job_id, name or job_id, now()))
+                created = {"ts": now(), "event": "created", "name": name or job_id}
+                connection.execute("INSERT INTO events(job_id, seq, event_json) VALUES (?, 1, ?)",
+                                   (job_id, _json(created)))
+            matches = _admit_records(connection, job_id, records)
+        _refresh_projection(connection, root, job_id)
     return matches
+
+
+def _write_changed(connection: sqlite3.Connection, job_id: str,
+                   records: Sequence[dict]) -> None:
+    """Write only what differs, one work state per work, so a stale duplicate cannot undo a change."""
+    known = {row["idx"]: (row["work_id"], row["record_json"], row["state_json"])
+             for row in connection.execute(
+                 "SELECT m.idx, m.work_id, m.record_json, w.state_json FROM memberships m "
+                 "JOIN work_items w ON w.work_id = m.work_id WHERE m.job_id = ?", (job_id,))}
+    locals_written: dict[int, str] = {}
+    work_written: dict[str, str] = {}
+    fresh: list[dict] = []
+    for record in records:
+        idx = record["idx"]
+        local = _json(_local_state(record))
+        work = _json(_work_state(record))
+        if idx not in known:
+            fresh.append(record)
+            continue
+        work_id, stored_local, stored_work = known[idx]
+        if local != stored_local:
+            locals_written[idx] = local
+        if work != stored_work and _keeps_artifact(stored_work, work):
+            work_written[work_id] = work      # the last record that changed the work wins
+    if fresh:
+        _admit_records(connection, job_id, fresh)
+    connection.executemany("UPDATE memberships SET record_json = ? WHERE job_id = ? AND idx = ?",
+                           ((local, job_id, idx) for idx, local in locals_written.items()))
+    connection.executemany("UPDATE work_items SET state_json = ? WHERE work_id = ?",
+                           ((work, work_id) for work_id, work in work_written.items()))
 
 
 def write_records(root: Path, job_id: str, records: Sequence[dict]) -> None:
     """Update membership facts and shared work state without deleting omitted memberships."""
     root = Path(root)
-    with writer_lock(root):
-        _import_legacy_once(root)
-        _ensure_job_locked(root, job_id)
-        connection = _initialize(root)
-        try:
-            with _transaction(connection):
-                catalog = _work_catalog(connection)
-                for record in records:
-                    idx = record["idx"]
-                    row = connection.execute(
-                        "SELECT work_id FROM memberships WHERE job_id = ? AND idx = ?",
-                        (job_id, idx),
-                    ).fetchone()
-                    if row is None:
-                        _admit_records(connection, job_id, [record], catalog)
-                        continue
-                    work_id = row["work_id"]
-                    connection.execute(
-                        "UPDATE memberships SET record_json = ? WHERE job_id = ? AND idx = ?",
-                        (_json(_local_state(record)), job_id, idx),
-                    )
-                    connection.execute("UPDATE work_items SET state_json = ? WHERE work_id = ?",
-                                       (_json(_work_state(record)), work_id))
-        finally:
-            connection.close()
-        _refresh_projection(root, job_id)
+    with writer_lock(root), closing(_initialize(root)) as connection:
+        _import_legacy_once(connection, root)
+        _ensure_job_locked(connection, root, job_id)
+        with _transaction(connection):
+            _write_changed(connection, job_id, records)
+        _refresh_projection(connection, root, job_id, events=False)
 
 
 def append_event(root: Path, job_id: str, event: dict) -> None:
     root = Path(root)
-    with writer_lock(root):
-        _import_legacy_once(root)
-        _ensure_job_locked(root, job_id)
-        connection = _initialize(root)
-        try:
-            with _transaction(connection):
-                seq = connection.execute(
-                    "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE job_id = ?", (job_id,)
-                ).fetchone()[0]
-                connection.execute("INSERT INTO events(job_id, seq, event_json) VALUES (?, ?, ?)",
-                                   (job_id, seq, _json(event)))
-        finally:
-            connection.close()
-        _refresh_projection(root, job_id)
+    with writer_lock(root), closing(_initialize(root)) as connection:
+        _import_legacy_once(connection, root)
+        _ensure_job_locked(connection, root, job_id)
+        with _transaction(connection):
+            seq = connection.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE job_id = ?", (job_id,)
+            ).fetchone()[0]
+            connection.execute("INSERT INTO events(job_id, seq, event_json) VALUES (?, ?, ?)",
+                               (job_id, seq, _json(event)))
+        _refresh_projection(connection, root, job_id, tracks=False)
 
 
-def job_records(root: Path, job_id: str) -> list[dict]:
+def job_records(root: Path, job_id: str) -> list[Record] | None:
+    """The job's records, or None when the database does not hold the job."""
     connection = _connect(Path(root))
     if connection is None:
-        return []
+        return None
     try:
-        return _job_records(connection, job_id)
+        return _job_records(connection, job_id) if _has_job(connection, job_id) else None
     finally:
         connection.close()
 
 
-def job_events(root: Path, job_id: str) -> list[dict]:
+def job_events(root: Path, job_id: str) -> list[dict] | None:
+    """The job's events, or None when the database does not hold the job."""
     connection = _connect(Path(root))
     if connection is None:
-        return []
+        return None
     try:
-        return _job_events(connection, job_id)
+        return _job_events(connection, job_id) if _has_job(connection, job_id) else None
     finally:
         connection.close()
 
@@ -697,19 +712,34 @@ def delivery_status(root: Path, work_id: str, target: str, destination: str) -> 
     return None if row is None else row[0]
 
 
+def delivery_statuses(root: Path, job_id: str) -> dict[tuple[str, str, str], str]:
+    connection = _connect(Path(root))
+    if connection is None:
+        return {}
+    with closing(connection):
+        rows = connection.execute(
+            "SELECT work_id, target, destination, status FROM deliveries "
+            "WHERE work_id IN (SELECT work_id FROM memberships WHERE job_id = ?)", (job_id,))
+        return {(row["work_id"], row["target"], row["destination"]): row["status"] for row in rows}
+
+
 def set_delivery(root: Path, work_id: str, target: str, destination: str,
                  status: str, error: str = "") -> None:
-    if status not in DELIVERY_STATUSES:
-        raise ValueError(f"unsupported delivery status: {status}")
-    with writer_lock(root):
-        connection = _initialize(Path(root))
-        try:
-            with _transaction(connection):
-                connection.execute(
-                    "INSERT INTO deliveries(work_id, target, destination, status, error, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(work_id, target, destination) DO UPDATE SET "
-                    "status = excluded.status, error = excluded.error, updated_at = excluded.updated_at",
-                    (work_id, target, destination, status, error, _now()),
-                )
-        finally:
-            connection.close()
+    set_deliveries(root, [(work_id, target, destination, status, error)])
+
+
+def set_deliveries(root: Path, entries: Sequence[tuple[str, str, str, str, str]]) -> None:
+    if not entries:
+        return
+    for _, _, _, status, _ in entries:
+        if status not in DELIVERY_STATUSES:
+            raise ValueError(f"unsupported delivery status: {status}")
+    with writer_lock(root), closing(_initialize(Path(root))) as connection:
+        updated_at = now()
+        with _transaction(connection):
+            connection.executemany(
+                "INSERT INTO deliveries(work_id, target, destination, status, error, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(work_id, target, destination) DO UPDATE SET "
+                "status = excluded.status, error = excluded.error, updated_at = excluded.updated_at",
+                ((*entry, updated_at) for entry in entries),
+            )

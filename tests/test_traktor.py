@@ -91,3 +91,32 @@ def test_verify_rejects_incomplete_or_nonboolean_owner_evidence(tmp_path, monkey
 
     with pytest.raises(traktor.Failed):
         traktor.verify(CONFIG, [requested])
+
+
+def test_a_staged_backup_keeps_the_name_and_a_finder_marker(tmp_path):
+    old = tmp_path / "held.mp3"
+    old.write_bytes(b"held")
+    new = tmp_path / "upgrade.aiff"
+    new.write_bytes(b"upgrade")
+
+    with traktor.stage_replacements({old: new}):
+        (directory,) = tmp_path.glob(".music-agent-replaces-*")
+        assert (directory / "held.mp3").read_bytes() == b"held"
+        assert str(old) in (directory / traktor.MARKER).read_text(encoding="utf-8")
+        assert not old.exists()
+
+    assert not old.exists()
+    assert not list(tmp_path.glob(".music-agent-replaces-*"))
+
+
+def test_a_failed_apply_restores_the_staged_predecessor(tmp_path):
+    old = tmp_path / "held.mp3"
+    old.write_bytes(b"held")
+
+    with pytest.raises(RuntimeError):
+        with traktor.stage_replacements({old: tmp_path / "upgrade.aiff"}):
+            raise RuntimeError("apply failed")
+
+    assert old.read_bytes() == b"held"
+    assert not list(tmp_path.glob(".music-agent-replaces-*"))
+

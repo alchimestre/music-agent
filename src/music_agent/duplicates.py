@@ -28,6 +28,7 @@ from sqlalchemy import text
 
 from . import importing, parsing, rules
 from .config import Config
+from .importing import NotClosed
 from .lanes import path_key
 
 # The tables whose rows are *moved* onto the survivor rather than deleted with the row that goes.
@@ -43,10 +44,6 @@ ROWS = text("""
       left join djmdArtist a on a.ID = c.ArtistID
      where c.rb_local_deleted = 0
 """)
-
-
-class NotClosed(RuntimeError):
-    """Rekordbox is running, and pyrekordbox will not commit while it is."""
 
 
 @dataclass(frozen=True)
@@ -163,7 +160,7 @@ def agrees(one: Copy, other: Copy) -> bool:
     never been enough to call two rows the same track)."""
     if one.seconds is None or other.seconds is None:
         return True
-    return abs(one.seconds - other.seconds) <= 1
+    return abs(one.seconds - other.seconds) <= rules.DURATION_WINDOW
 
 
 def age(copy: Copy) -> float:
@@ -207,9 +204,12 @@ def find(listed: list[Copy]) -> list[Merge]:
     return merges
 
 
-def plan(config: Config, *, db) -> Summary:
-    """What a pass would merge, writing nothing."""
-    return Summary(merges=find(copies(db)))
+def plan(config: Config, *, db, rows: list[Copy] | None = None) -> Summary:
+    """What a pass would merge in the configured lanes, writing nothing."""
+    lanes = (config.lossless.resolve(), config.lossy.resolve())
+    listed = copies(db) if rows is None else rows
+    return Summary(merges=find([one for one in listed
+                                if any(one.path.resolve().is_relative_to(lane) for lane in lanes)]))
 
 
 def followers(db) -> list[str]:
@@ -259,9 +259,13 @@ def merge(config: Config, summary: Summary, *, db, remove_files: bool = True, lo
 
     session = db.session
     rest = followers(db)
+    lanes = (config.lossless.resolve(), config.lossy.resolve())
     doomed: list[tuple[Path, Path]] = []
     for merge in summary.merges:
         keep = merge.keep.content_id
+        # Decided before the rows go: when the keeper's file is gone, the drop's is the last copy of the track.
+        rescue = None if merge.keep.path.is_file() else next(
+            (drop.path for drop in merge.drops if drop.path.is_file()), None)
         for drop in merge.drops:
             _move(db, keep, drop.content_id, "djmdSongPlaylist", "PlaylistID")
             _move(db, keep, drop.content_id, "djmdSongMyTag", "MyTagID")
@@ -273,8 +277,17 @@ def merge(config: Config, summary: Summary, *, db, remove_files: bool = True, lo
                 session.execute(text(f"delete from {table} where ContentID = :i"), {"i": drop.content_id})
             session.execute(text("delete from djmdContent where ID = :i"), {"i": drop.content_id})
             log(f"merged {drop.path.name} into {merge.keep.path.name}")
-            if remove_files and path_key(drop.path) != path_key(merge.keep.path):
+            if remove_files and rescue is None and path_key(drop.path) != path_key(merge.keep.path):
                 doomed.append((drop.path, merge.keep.path))
+        if rescue is not None:
+            # The rescued file need not have the keeper's format, so every file-derived column follows it:
+            # a row that keeps AIFF's bitrate while naming an mp3 is worse than a missing one.
+            columns = {"FolderPath": str(rescue), **importing.file_columns(rescue)}
+            session.execute(text("update djmdContent set "
+                                 + ", ".join(f"{name} = :{name}" for name in columns)
+                                 + " where ID = :k"), {**columns, "k": keep})
+            summary.kept_missing.append(merge.keep.path)
+            log(f"      {rescue.name} left in the lanes: {merge.keep.path.name} is not on disk")
     db.session.commit()
     # The file goes only after the commit: a failed commit must not leave the collection pointing at a
     # path this removed, the way `importing.run` orders it.
@@ -286,6 +299,9 @@ def merge(config: Config, summary: Summary, *, db, remove_files: bool = True, lo
             if keeper not in summary.kept_missing:
                 summary.kept_missing.append(keeper)
                 log(f"      {path.name} left in the lanes: {keeper.name} is not on disk")
+            continue
+        if not any(path.resolve().is_relative_to(lane) for lane in lanes):
+            log(f"      {path.name} is outside the lanes: not removed")
             continue
         path.unlink()
         summary.files.append(path)

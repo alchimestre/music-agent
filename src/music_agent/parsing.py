@@ -58,7 +58,7 @@ _CREDITS = frozenset({"feat", "ft", "featuring", "with"})
 
 
 def extract_mix(name: str) -> str:
-    """The trailing parenthesised mix — 'Original Mix', a remixer's name, or ''.
+    """The last parenthesised group — 'Original Mix', a remixer's name, or '' — wherever it sits in the name.
 
     Read from the whole string, never from a filename stem: a title holds dots of its own, and taking
     `E.T. (Tiesto Remix)` for a file name lost the version, so the request asked for the original.
@@ -188,7 +188,7 @@ def song_title(name: str) -> str:
     `Stairway to Heaven - Remaster`, `Paranoid - 2012 - Remaster`, `Danger Zone - From "Top Gun" Original
     Soundtrack`. MusicBrainz carries these as bare titles, so a title kept whole resolves no reference at
     all: the recording `Dreams - 2004 Remaster` does not exist, the query returns nothing, and with no
-    reference length to settle it the track stays review-only for good. Measured over three Spotify
+    reference length to settle it the track is taken unchecked. Measured over three Spotify
     editorial playlists — 450 titles — 105 carry such a tail in 52 distinct forms, every one of them a
     master, a version or a source rather than the song's name; and over ten of them the verbatim title
     matched **0** MusicBrainz recordings against **208** for the same ten once the tail was off.
@@ -272,8 +272,9 @@ def track_title(name: str) -> str:
 _ORIGINAL_MIXES = frozenset({"", "original", "original mix", "original version"})
 
 # What makes a version somebody else's version rather than one of its own edits. Compared against folded
-# text, so the entries are written folded — `re-edit` folds to `re edit`. A word list rather than a rule
-# about who is named, because both spellings count: `(Made by Pete Remix)` and `(suray_remix)`.
+# text as whole words, so the entries are written folded — `re-edit` folds to `re edit`, and `flipside` is
+# not a flip. A word list rather than a rule about who is named, because both spellings count: `(Made by
+# Pete Remix)` and `(suray_remix)`.
 _REMIX_MARKERS = ("remix", "rmx", "bootleg", "refix", "rework", "re edit", "reedit", "flip", "mashup")
 
 
@@ -284,8 +285,8 @@ def is_original(mix: str) -> bool:
 
 def is_remix(mix: str) -> bool:
     """Whether this names somebody else's version of the track."""
-    text = fold(mix)
-    return any(marker in text for marker in _REMIX_MARKERS)
+    padded = f" {fold(mix)} "
+    return any(f" {marker} " in padded for marker in _REMIX_MARKERS)
 
 
 # What a version calls itself when nobody else is credited: `Extended Mix`, `Radio Edit`, `Acoustic

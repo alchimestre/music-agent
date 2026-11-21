@@ -31,6 +31,7 @@ def rekordbox_is_not_running(monkeypatch):
     import pyrekordbox.db6.database
 
     monkeypatch.setattr(importing, "is_running", lambda: False)
+    monkeypatch.setattr(importing.processes, "stop_named", lambda *args, **kwargs: None)
     monkeypatch.setattr(pyrekordbox.db6.database, "get_rekordbox_pid", lambda: None)
 
 
@@ -185,6 +186,20 @@ def test_one_commit_covers_every_addition_in_a_run(tmp_path):
     assert len(summary.imported) == 3
     assert database.committed == 1
 
+
+
+def test_duplicate_memberships_import_one_row(tmp_path):
+    config = make_config(tmp_path)
+    first = tagged(tmp_path)
+    second = state.Record.from_json({**first.to_json(), "idx": 2})
+    job = job_with(config, [first, second])
+    database = FakeDatabase()
+
+    summary = importing.run(config, job, db=database, backup_first=False, log=quiet)
+
+    assert summary.imported == [1]
+    assert summary.already == []
+    assert [record.status for record in job.records()] == [state.IMPORTED, state.IMPORTED]
 
 def test_an_upgrade_and_an_addition_do_not_share_a_commit(tmp_path):
     """2026-10-13: they cannot. pyrekordbox mints a new row's ID as an int while every ID read back from the
@@ -402,17 +417,20 @@ def test_a_record_that_replaces_a_row_repoints_it_rather_than_adding(tmp_path):
     config = make_config(tmp_path)
     old = a_lossy_file(tmp_path)
     record = tagged(tmp_path)
-    record.replaces = str(old)
+    record.replaces = str(old.parent / ".." / old.parent.name / old.name)
     job = job_with(config, [record])
     database = FakeDatabase()
-    database.content = [ContentRow(str(old))]
+    deleted = ContentRow(str(old), identifier=41)
+    deleted.rb_local_deleted = 1
+    database.content = [deleted, ContentRow(str(old))]
 
     summary = importing.run(config, job, db=database, backup_first=False, log=quiet)
 
     assert summary.repointed == [1], summary.report()
     assert database.added == [], "nothing was added: the row was already there"
-    assert database.content[0].FolderPath == record.local_path
-    assert database.content[0].ID == 42, "the row keeps its identity, and its analysis with it"
+    assert deleted.FolderPath == str(old)
+    assert database.content[1].FolderPath == record.local_path
+    assert database.content[1].ID == 42
     assert database.committed == 1
     assert not old.is_file(), "by decision: the file being replaced goes"
     assert job.records()[0].status == state.IMPORTED
@@ -444,9 +462,7 @@ def test_a_repoint_rewrites_the_columns_that_describe_the_file(tmp_path):
     assert row.FileSize == Path(record.local_path).stat().st_size
 
 
-def test_a_repoint_that_finds_no_row_adds_instead_and_keeps_the_file(tmp_path):
-    """If the row is gone, the track is simply new — and nothing deletes a file the collection may
-    still be using."""
+def test_a_repoint_that_finds_no_row_adds_and_then_removes_its_predecessor(tmp_path):
     config = make_config(tmp_path)
     old = a_lossy_file(tmp_path)
     record = tagged(tmp_path)
@@ -458,7 +474,7 @@ def test_a_repoint_that_finds_no_row_adds_instead_and_keeps_the_file(tmp_path):
 
     assert summary.imported == [1]
     assert summary.repointed == []
-    assert old.is_file()
+    assert not old.exists()
 
 
 def test_nothing_is_deleted_when_the_import_itself_fails(tmp_path):

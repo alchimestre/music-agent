@@ -16,8 +16,8 @@ something the track has already become.
 
 ## Decision
 
-What a person has decided about a *track*. Independent of any candidate label, and the only axis that records
-something already done.
+What has been decided about a *track* in one job. Independent of any candidate label, and the only axis that
+records something already done.
 
 | state | glyph | what it means |
 |---|---|---|
@@ -26,8 +26,10 @@ something already done.
 | skipped | `–` | passed over for now |
 | not found | `✗` | no usable copy exists |
 
-`music-agent review` is the only writer of this axis. Every pass reads it, and a track that has been decided is
-not searched again.
+The decision belongs to the job's membership of the track, not to the track's shared work: another job holding
+the same track keeps its own, and still searches it. It has two writers. `music-agent review` records what a
+person decides. The pass records *not found* itself when every offer was refused and nothing is left to try.
+Every pass reads it, and a track that has been decided is not searched again in that job.
 
 ## Review queue
 
@@ -41,13 +43,14 @@ are kept apart, because they are three facts about three different things:
 |---|---|
 | not searched | no pass has reached the track, so nothing is known about it |
 | the network offered nothing | a search answered and held no files |
-| nothing usable | files were offered and every one was ruled out |
+| nothing usable | files were offered and the rules ruled every one out |
 
-A track whose every offer was refused is closed by the pass that refused them — *settled by hand* in the queue's
-own words, with a note saying so — because there is nothing left to try.
+*Every offer refused* is a different fact from *nothing usable*: the rules would take a file, the peers would
+not give it. A track whose every takeable offer was refused is closed by the pass that refused them — *settled
+by hand* in the queue's own words, with a note saying so — because there is nothing left to try.
 
 The length decides between offers, never whether to take one. Where it cannot check anything, one offer is taken
-on its name and several go to the ladder (lossless, then bitrate, then queue depth). That is a real trade: an
+on its name and several go to the ladder (lossless, then bitrate, then peer speed). That is a real trade: an
 arbitrary tie can take the wrong file, and the pass logs which it took.
 
 Nothing about an upgrade is ever put to a person: an upgrade is optional, so a lossy or uncheckable offer buys
@@ -72,12 +75,18 @@ version; a request that names none, or the original, takes any version that is n
 the ±1 s window as the check. So `(Extended Mix)` is taken for a bare request when its length matches, and
 `(Victor Ruiz Remix)` is not taken however well the length matches.
 
+## Job
+
+One submitted tracklist, stored once under `paths.state/<job_id>/`: its records, its events and the
+projections written from them. *Run* and *submission* are informal names for a job. The work behind a track
+(its status, its file, the candidates tried) is shared by every job that holds the track; its decision is the
+job's own.
+
 ## Pass
 
-One run of a stage over every track it still owes. A first pass searches with no peer filters at all, because a
-filter can remove the only peer holding a rare track. A later pass — what `--retry` starts — may restrict
-itself to peers with free slots, and asks candidates it has not asked before. A track that fails across two
-passes is not retried again.
+One execution of a stage over every track of a job that it still owes. A first pass searches with no peer
+filters at all, because a filter can remove the only peer holding a rare track. A later pass — what `--retry`
+starts — may restrict itself to peers with free slots, and asks candidates it has not asked before.
 
 A pass stops early only when the child it searches through fails: searches that never answer, or a child that
 says it has no session. A search that comes back empty never stops it — once the findable tracks are taken,
@@ -126,11 +135,11 @@ decides which lane it belongs to, and the import reads the file rather than the 
 
 ## Leftover
 
-A file or a row that nothing points at. Three kinds, reported by `music-agent status --files` and never
-repaired automatically: a file in staging no record claims (a placement the lane refused, a cancelled
-transfer's `.part`), a file in a lane no row and no record claims (a re-download left beside the copy the
-collection kept), and a row whose file has gone. Which copy of a stem a row means to keep is not something the
-pipeline can tell.
+A file or a row that nothing points at. Three kinds, reported by `music-agent status --files`: a file in
+staging no record claims (a placement the lane refused, a cancelled transfer's `.part`), a file in a lane no
+row and no record claims (a re-download left beside the copy the collection kept), and a row whose file has
+gone. `run` clears staging `.part` files itself; nothing else is repaired automatically. Which copy of a stem
+a row means to keep is not something the pipeline can tell.
 
 ## Peer offence and the ignore list
 

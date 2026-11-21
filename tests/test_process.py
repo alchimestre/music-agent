@@ -104,7 +104,8 @@ class FakeRunner:
         if Path(argv[0]).stem == "ffprobe":
             if self.unreadable:
                 return subprocess.CompletedProcess(argv, 1, "", "Invalid data found")
-            return subprocess.CompletedProcess(argv, 0, "flac\n", "")
+            streams = {"streams": [{"codec_name": "pcm_s16be", "sample_rate": "44100"}]}
+            return subprocess.CompletedProcess(argv, 0, json.dumps(streams), "")
         if any("fake-normalize" in part for part in argv):
             if self.fails_normalize:
                 return subprocess.CompletedProcess(argv, 1, "", "ffmpeg not found")
@@ -271,6 +272,23 @@ def test_lossless_conversion_preserves_audio_properties_tags_and_artwork(tmp_pat
     )
 
 
+@pytest.mark.parametrize(("codec", "rate"), [("pcm_s24be", 44100), ("pcm_s16be", 96000)])
+def test_noncanonical_aiff_is_converted(tmp_path, codec, rate):
+    ffmpeg, ffprobe = media_binaries()
+    config = replace(make_config(tmp_path), ffmpeg=ffmpeg, ffprobe=ffprobe)
+    source = config.staging / "Blurred.aiff"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run([ffmpeg, "-v", "error", "-f", "lavfi", "-i", "sine=duration=0.1",
+                    "-c:a", codec, "-ar", str(rate), str(source)], check=True)
+    record = state.Record(1, "Kiasmos", "Blurred", local_path=str(source))
+
+    landed = process.place(config, record, run=process.execute, log=lambda *_: None)
+
+    audio = probe_media(landed, ffprobe)["streams"][0]
+    assert (audio["codec_name"], audio["sample_rate"]) == ("pcm_s16be", "44100")
+    assert not source.exists()
+
+
 def test_conversion_refuses_to_replace_an_existing_aiff(tmp_path):
     ffmpeg, ffprobe = media_binaries()
     config = replace(make_config(tmp_path), ffmpeg=ffmpeg, ffprobe=ffprobe)
@@ -300,7 +318,8 @@ def test_real_ffmpeg_failure_keeps_the_source_and_no_partial_output(tmp_path):
     assert not source.with_suffix(".aiff").exists()
 
 
-def test_a_name_the_lane_already_holds_deletes_the_download_instead_of_dangling_in_staging(tmp_path):
+@pytest.mark.parametrize("same_path", [False, True])
+def test_a_name_the_lane_already_holds_is_not_overwritten(tmp_path, monkeypatch, same_path):
     """The dedupe should have caught it, and `held` will not skip a track whose length was never resolved, so
     a duplicate can arrive. The file already there is never overwritten, and the download is not left sitting
     in staging either: nothing keeps a second copy of anything."""
@@ -308,17 +327,18 @@ def test_a_name_the_lane_already_holds_deletes_the_download_instead_of_dangling_
     config.lossless.mkdir(parents=True)
     existing = config.lossless / "Kiasmos - Blurred.aiff"
     existing.write_bytes(b"the one already there")
-    source = Path(staged(tmp_path, "Kiasmos - Blurred.aiff"))
+    source = existing if same_path else Path(staged(tmp_path, "Kiasmos - Blurred.aiff"))
     record = state.Record(idx=1, artist="Kiasmos", title="Blurred", local_path=str(source),
                           status=state.DOWNLOADED, format="aiff")
     job = job_with(config, [record])
+    monkeypatch.setattr(process, "identify_one", lambda *_: pytest.fail("a duplicate must not be identified"))
 
     summary = process.run(config, job, tools=process.Tools(runner=FakeRunner()), log=lambda *_: None)
 
     assert summary.already == [1]
     assert summary.failed == []
     assert existing.read_bytes() == b"the one already there", "nothing was overwritten"
-    assert not source.exists(), "the duplicate is deleted rather than left dangling in staging"
+    assert source.exists() == same_path, "only a distinct download may be deleted"
     assert job.records()[0].status == state.FOUND_IN_LIBRARY
     assert job.records()[0].local_path == ""
     assert "already there" in job.records()[0].notes
@@ -376,7 +396,7 @@ def test_a_source_removal_failure_cleans_the_promoted_output(tmp_path, monkeypat
     assert not source.with_suffix(".aiff").exists()
 
 
-def test_a_corrupt_download_is_removed_and_the_record_released(tmp_path):
+def test_a_corrupt_download_is_removed_and_the_record_released(tmp_path, monkeypatch):
     """A peer can deliver bytes that are not audio of the advertised size. The converter would reject it, but
     a failed conversion keeps its download — so the file stayed in staging with a path on the record and no
     stage that would ever look at it again."""
@@ -385,6 +405,16 @@ def test_a_corrupt_download_is_removed_and_the_record_released(tmp_path):
     record = state.Record(idx=1, artist="Kiasmos", title="Blurred", local_path=str(source),
                           status=state.DOWNLOADED, format="flac")
     job = job_with(config, [record])
+    monkeypatch.setattr(process, "identify_one", lambda *_: pytest.fail("unreadable audio must not be identified"))
+    append_event = state.Job.append_event
+
+    def saved_before_event(self, event, **fields):
+        if event == "placement_failed":
+            saved = self.records()[0]
+            assert saved.local_path == "" and saved.status == state.RETRY_LATER
+        append_event(self, event, **fields)
+
+    monkeypatch.setattr(state.Job, "append_event", saved_before_event)
 
     summary = process.run(config, job, tools=process.Tools(
         runner=FakeRunner(unreadable=True)), log=lambda *_: None)
@@ -589,7 +619,7 @@ def test_a_track_is_identified_genred_and_tagged_on_its_way_through(tmp_path):
     assert written.album == "Blurred"
     assert written.genre == "Techno"
     assert (written.label, written.catalog_number, written.year) == ("Erased Tapes", "ERATP001", "2017")
-    assert written.release_id == "rel-1", "the ids are the cache a re-run reads"
+    assert written.release_id == "rel-1"
 
 
 def test_a_genre_nothing_maps_is_left_for_the_skill_and_said_so(tmp_path):
@@ -704,6 +734,7 @@ def test_a_service_that_fails_leaves_the_name_doing_the_work(tmp_path):
                           local_path=str(aiff(tmp_path / "staging" / "Blurred.aiff")),
                           status=state.DOWNLOADED, format="aiff")
     job = job_with(config, [record])
+    tag.write(Path(record.local_path), tag.Tags(genre="Unmapped"))
     tools = with_identification(FakeRunner(), broken=True)
 
     summary = process.run(config, job, tools=tools, log=lambda *_: None)
@@ -713,6 +744,7 @@ def test_a_service_that_fails_leaves_the_name_doing_the_work(tmp_path):
     written = tag.read(config.lossless / "Kiasmos - Blurred.aiff")
     assert (written.title, written.artist) == ("Blurred", "Kiasmos"), "the request's own name"
     assert written.album == "", "and nothing invented beyond it"
+    assert written.genre == job.records()[0].genre == "Unmapped"
 
 
 # ── re-tagging what a changed table left behind ──────────────────────────────
@@ -862,8 +894,7 @@ def test_a_re_tag_that_could_not_ask_leaves_the_name_alone(tmp_path):
 
 
 def test_a_re_tag_with_no_taxonomy_leaves_the_genre_on_the_file(tmp_path):
-    """An unset taxonomy builds an empty vocabulary, so every track resolves to nothing; writing that blank
-    took the genre off the whole imported collection and reported it as cleared."""
+    """The collection can have genres even when no taxonomy was loaded."""
     config = make_config(tmp_path)
     config.lossless.mkdir(parents=True, exist_ok=True)
     path = aiff(config.lossless / "Kiasmos - Blurred.aiff")
@@ -872,7 +903,8 @@ def test_a_re_tag_with_no_taxonomy_leaves_the_genre_on_the_file(tmp_path):
                           status=state.TAGGED, genre="Techno")
     job = job_with(config, [record])
     hearing, matches, brainz, discogs = identification(genres=("techno",))
-    tools = process.Tools(hearing=hearing, matches=matches, brainz=brainz, discogs=discogs)
+    tools = process.Tools(hearing=hearing, matches=matches, brainz=brainz, discogs=discogs,
+                          vocabulary=["Techno"])
     said: list[str] = []
 
     summary = process.retag(job, tools=tools, log=said.append)
@@ -911,18 +943,23 @@ def test_a_binary_that_is_not_installed_is_a_process_error():
 
 def test_the_normalizer_runs_under_a_python_interpreter(monkeypatch, tmp_path):
     config = replace(config_module.DEFAULTS, normalize_tool=tmp_path / "normalize.py")
-    monkeypatch.setattr(process.sys, "executable", "/usr/bin/python3.13")
+    monkeypatch.setattr(process.sys, "executable", "/usr/bin/interpreter")
 
     command = process.normalizer_command(config, tmp_path, tmp_path / "report.txt")
 
-    assert command[:2] == ["/usr/bin/python3.13", str(tmp_path / "normalize.py")]
+    assert command[:2] == ["/usr/bin/interpreter", str(tmp_path / "normalize.py")]
 
 
-def test_a_frozen_executable_runs_the_normalizer_in_its_own_process(monkeypatch, tmp_path):
+@pytest.mark.parametrize("marker", ["frozen", "__compiled__"])
+def test_a_frozen_executable_runs_the_normalizer_in_its_own_process(monkeypatch, tmp_path, marker):
     """A standalone build ships no interpreter, so the executable has to expose the normalizer itself,
     and it is told where to write the report a windowed binary cannot print."""
     config = replace(config_module.DEFAULTS, normalize_tool=tmp_path / "normalize.py")
     monkeypatch.setattr(process.sys, "executable", r"C:\app\music-agent.exe")
+    if marker == "frozen":
+        monkeypatch.setattr(process.sys, marker, True, raising=False)
+    else:
+        monkeypatch.setattr(process, marker, object(), raising=False)
 
     command = process.normalizer_command(config, tmp_path, tmp_path / "report.txt")
 
@@ -951,6 +988,25 @@ def test_resume_processes_saved_audio_checkpoint_without_replacing_file(tmp_path
     assert bool(runner.normalizations()) == (checkpoint != state.NORMALIZED)
 
 
+@pytest.mark.parametrize("checkpoint", [state.DOWNLOADED, state.CONVERTED, state.NORMALIZED])
+def test_identified_files_reuse_their_tags(tmp_path, monkeypatch, checkpoint):
+    config = make_config(tmp_path)
+    folder = config.staging if checkpoint == state.DOWNLOADED else config.lossless
+    folder.mkdir(exist_ok=True)
+    audio = aiff(folder / "Kiasmos - Blurred.aiff")
+    stored = tag.Tags(title="From MusicBrainz", artist="Artist", genre="Techno", release_id="rel-1")
+    tag.write(audio, stored)
+    job = job_with(config, [state.Record(1, "Kiasmos", "Blurred", status=checkpoint, local_path=str(audio))])
+    monkeypatch.setattr(process, "identify_one", lambda *_: pytest.fail("the release ID is cached"))
+
+    summary = process.run(config, job, tools=with_identification(FakeRunner()), log=lambda *_: None)
+
+    assert summary.tagged == [1]
+    record = job.records()[0]
+    assert tag.read(Path(record.local_path)) == stored
+    assert record.genre == "Techno"
+
+
 def test_a_genre_the_taxonomy_could_not_rule_on_stays_on_the_file(tmp_path):
     """An empty taxonomy is not a verdict: the file keeps the genre it arrived with."""
     config = make_config(tmp_path)
@@ -962,7 +1018,7 @@ def test_a_genre_the_taxonomy_could_not_rule_on_stays_on_the_file(tmp_path):
                                          format="aiff", genre="Techno")])
     hearing, matches, brainz, discogs = identification(genres=("techno",))
     tools = process.Tools(runner=FakeRunner(), hearing=hearing, matches=matches,
-                          brainz=brainz, discogs=discogs)     # no vocabulary, no mappings
+                          brainz=brainz, discogs=discogs, vocabulary=["Techno"])
 
     summary = process.run(config, job, tools=tools, log=lambda *_: None)
 

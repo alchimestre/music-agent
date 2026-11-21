@@ -118,6 +118,30 @@ def test_runtime_authenticates_tcp_and_leaves_an_external_daemon_running(control
     assert not any(method == "daemon.stop" for method, _params in server.direct.calls)
 
 
+def test_start_retries_a_busy_daemon_before_spawning(control, tmp_path, monkeypatch):
+    from music_agent import runtime, slsk
+
+    server, state = control
+    manager = runtime.SoulseekRuntime(tcp_config(tmp_path, server.address, state))
+    open_daemon = manager.daemon._open
+    attempts = []
+
+    def flaky_open():
+        attempts.append(True)
+        return len(attempts) > 1 and open_daemon()
+
+    monkeypatch.setattr(slsk, "CONNECT_GRACE", 0)
+    monkeypatch.setattr(manager, "_can_spawn", lambda: True)
+    monkeypatch.setattr(manager.daemon, "_open", flaky_open)
+    monkeypatch.setattr(manager.daemon, "start", lambda: pytest.fail("started a second daemon"))
+
+    try:
+        assert manager.start().state == runtime.CONNECTED
+        assert len(attempts) == 2
+    finally:
+        manager.stop()
+
+
 def test_runtime_returns_daemon_transfer_snapshot_and_drains_events(control, tmp_path):
     from music_agent import runtime
 
@@ -334,12 +358,12 @@ def test_empty_credentials_offline_do_not_spawn(tmp_path, monkeypatch):
 
 
 def test_a_lane_that_does_not_exist_yet_is_created_and_shared(tmp_path):
-    from music_agent import runtime
+    from music_agent import slsk
 
     config = replace(make_config(tmp_path), lossless=tmp_path / "absent" / "lossless",
                      lossy=tmp_path / "absent" / "lossy")
 
-    shared = runtime._share_paths(config)
+    shared = slsk.share_paths(config)
 
     assert shared == (config.lossless.resolve(), config.lossy.resolve())
     assert config.lossless.is_dir() and config.lossy.is_dir()

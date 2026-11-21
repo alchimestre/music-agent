@@ -231,7 +231,7 @@ def test_the_queue_separates_the_four_reasons_a_track_is_still_open(tmp_path):
     waiting = state.queue(job)
 
     assert [r.idx for r in waiting.needs_you] == [2]
-    assert [r.idx for r in waiting.refused] == [3]
+    assert [r.idx for r in waiting.nothing_usable] == [3]
     assert [r.idx for r in waiting.nothing_offered] == [4]
     assert waiting.not_searched == []
     assert [r.idx for r in waiting.decided] == [5]
@@ -278,8 +278,8 @@ def test_the_summary_says_why_nothing_was_usable(tmp_path):
     assert summary["settled"] == 1
     assert summary["not_searched"] == 1
     assert summary["nothing_offered"] == 0
-    assert summary["refused"] == 1
-    assert summary["nothing_usable"] == 2
+    assert summary["without_offer"] == 2
+    assert summary["nothing_usable"] == 1
     assert summary["decided"] == 0
 
 
@@ -292,7 +292,7 @@ def test_the_status_file_carries_the_split(tmp_path):
     text = job.status_path.read_text(encoding="utf-8")
     assert "Not searched: 1" in text
     assert "The network offered nothing: 0" in text
-    assert "Every offer refused: 0" in text
+    assert "Every offer ruled out: 0" in text
 
 
 def test_legacy_import_retries_without_duplicate_history(tmp_path):

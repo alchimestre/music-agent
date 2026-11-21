@@ -11,12 +11,16 @@ here, and report what it said. Nothing about Traktor is decided in this repo.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import state
 from .config import Config
 
 
@@ -131,6 +135,8 @@ def _run(argv: list[str], verb: str, timeout: float = 900.0) -> tuple[bool, str]
 # it found, so every numbered count it does print is read, and the plan is nothing to do only when they are
 # all zero.
 _COUNTED = re.compile(r"(\d+) to ([a-z][a-z ]*)")
+# Left beside a staged backup so a kill mid-apply leaves the original location recoverable.
+MARKER = ".music-agent-replaces"
 
 
 def nothing_to_do(plan: str) -> bool:
@@ -152,5 +158,81 @@ def sync(config: Config, *, log=print) -> str | None:
 
     said = apply(config)
     log("traktor: " + said.replace("\n", "\n         "))
-    log("traktor: open Traktor and run Check Consistency → Analyze for the tracks it added")
+    log("traktor: open Traktor and run Check Consistency → Analyze for the tracks whose audio was replaced")
     return planned.changes
+
+
+def replacements(config: Config, records: list[state.Record]) -> dict[Path, Path]:
+    """Name the old audio that must leave the lane for Traktor to plan a repoint."""
+    originals = {}
+    for record in records:
+        if not record.replaces:
+            continue
+        old = Path(record.replaces)
+        if not old.is_file():
+            continue
+        new = Path(record.local_path).resolve()
+        if (old.is_symlink() or not old.resolve().is_relative_to(config.lossy.resolve())
+                or not new.is_file() or not new.is_relative_to(config.lossless.resolve())
+                or old.samefile(new)):
+            raise Failed(f"unsafe Traktor replacement: {old} → {new}")
+        originals[old.resolve()] = new
+    return originals
+
+
+def sync_replacements(config: Config, originals: dict[Path, Path], paths: list[str], *,
+                      collection: str | None = None, log=print) -> tuple[str, dict]:
+    with stage_replacements(originals):
+        planned = plan(config)
+        if planned is None:
+            raise Missing("traktor-nml is not installed on this machine")
+        log("traktor: " + planned.changes.replace("\n", "\n         "))
+        said = apply(config)
+        log("traktor: " + said.replace("\n", "\n         "))
+        verified = verify(config, paths)
+        if collection is not None and verified["collection"] != collection:
+            raise Failed("Traktor collection identity changed after the approved plan")
+        if any(not verified["paths"][str(new)] for new in originals.values()):
+            raise Failed("Traktor did not verify every replacement file")
+    log("traktor: open Traktor and run Check Consistency → Analyze for the tracks whose audio was replaced")
+    return planned.changes, verified
+
+
+@contextmanager
+def stage_replacements(originals: dict[Path, Path]):
+    """Hide predecessors from Traktor until apply and verification finish."""
+    staged: dict[Path, Path] = {}
+    try:
+        for old in originals:
+            directory = Path(tempfile.mkdtemp(prefix=".music-agent-replaces-", dir=old.parent))
+            backup = directory / old.name
+            try:
+                (directory / MARKER).write_text(str(old), encoding="utf-8")
+                old.rename(backup)
+            except OSError:
+                shutil.rmtree(directory, ignore_errors=True)
+                raise
+            staged[old] = backup
+        yield
+    except BaseException as error:
+        failures = []
+        for old, backup in staged.items():
+            try:
+                os.link(backup, old)
+                _discard_staged(backup)
+            except OSError as restore:
+                failures.append(f"{old} (backup {backup}): {restore}")
+        if failures:
+            raise Failed("could not restore replaced audio: " + "; ".join(failures)) from error
+        raise
+    for backup in staged.values():
+        try:
+            _discard_staged(backup)
+        except OSError as error:
+            raise Failed(f"could not remove staged audio {backup}: {error}") from error
+
+
+def _discard_staged(backup: Path) -> None:
+    (backup.parent / MARKER).unlink(missing_ok=True)
+    backup.unlink()
+    backup.parent.rmdir()

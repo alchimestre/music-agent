@@ -3,15 +3,14 @@
 A reader is a module that answers three things, and needs nothing else:
 
 - `names_a_playlist(source)` — whether an argument is its own, decided from the argument alone. It has to
-  be pure: `cli._start` asks every reader before anything is fetched, and a reader that went to the network
-  to answer would spend a request on every path it was handed.
+  be pure: `application.preview_source` chooses a reader before anything is fetched.
 - `playlist(source, timeout)` — a `Playlist`, or `PlaylistError` with a sentence a person can act on.
-- that error, raised rather than a traceback, because `cli._start` catches exactly this one.
+- `PlaylistError` for a source that could not be fetched or read.
 
 Every reader — `spotify`, `deezer`, `youtube` — turns its own service into this one shape: a name, and one
 `Artist - Title` line per entry in playlist order. What comes out is the text `tracklist` reads, so a
 playlist and a file reach a run the same way and are read once, by `tracklist`. A new service is a module
-and a line in `cli._PLAYLIST_SOURCES`, not a branch in either reader. A reader may reach its service
+and an entry in `application.preview_source`. A reader may reach its service
 however that service is reachable — Deezer over its public API, YouTube through `yt-dlp`, which is the
 only interface to a playlist that is not assembled by YouTube's own scripts.
 """

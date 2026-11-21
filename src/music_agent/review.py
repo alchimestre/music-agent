@@ -1,8 +1,7 @@
 """Where a person settles a track the rule would not.
 
-This is the only writer of the decision axis (GLOSSARY.md): a candidate carries a *label*, a track carries a
-*decision*. Accepting fetches the one candidate named and hands the record to `process`; skipping and
-not-found write the decision alone. `acquire` reads the same axis, so a decided track is left alone.
+Candidates carry labels; memberships carry decisions. Accepting fetches the chosen candidate for `process`.
+Skipping and declining leave shared work unchanged.
 """
 
 from __future__ import annotations
@@ -139,21 +138,21 @@ def accept(
             # The record is left exactly as it was: nothing was decided, and the candidate is marked tried
             # so the next pass moves on rather than offering the same peer again.
             record.tried.append(acquire.identifier(candidate))
-            job.write_records(records)
+            job.write_records([record])
             raise NotAccepted(
                 f"track {record.idx}: {candidate.user} did not hand the file over ({decision.value})"
             )
 
-    return _take(job, records, record, candidate, path, from_disk=from_disk is not None)
+    return _take(job, record, candidate, path, from_disk=from_disk is not None)
 
 
-def _take(job, records, record, candidate, path: str, *, from_disk: bool) -> Settled:
+def _take(job, record, candidate, path: str, *, from_disk: bool) -> Settled:
     """Write one track's acceptance: the decision, the event, and the record pointing at the file."""
     record.tried.append(acquire.identifier(candidate))
     acquire.record_taken(job, record, candidate, path, accepted=True)
     job.append_event("accepted", idx=record.idx, candidate=acquire.identifier(candidate), path=path,
                      from_="the file already in staging" if from_disk else candidate.user)
-    job.write_records(records)
+    job.write_records([record])
     return Settled(idx=record.idx, label=record.label, decision=state.ACCEPTED, candidate=candidate,
                    path=path, from_disk=from_disk)
 
@@ -193,7 +192,7 @@ def accept_many(
         here = _settled_from_disk(record, staging)
         if here is not None:
             log(f"[{record.idx}] {record.label}: the file is already in staging — not fetching it again")
-            settled.append(_take(job, records, record, candidate, here, from_disk=True))
+            settled.append(_take(job, record, candidate, here, from_disk=True))
         else:
             fetching.append((record, candidate))
 
@@ -214,14 +213,13 @@ def accept_many(
     def fetch(daemon, record: state.Record, candidate: Candidate) -> Settled | str:
         decision, path, _report = acquire.await_transfer(daemon, candidate, log=say, sleep=sleep,
                                                          clock=clock)
-        if decision is not acquire.Move.DONE:
-            # The record is left as it was, and the candidate is marked tried so a later pass moves on.
-            with write_lock:
-                record.tried.append(acquire.identifier(candidate))
-                job.write_records(records)
-            return f"[{record.idx}] {record.label}: {candidate.user} did not hand the file over ({decision.value})"
         with write_lock:
-            return _take(job, records, record, candidate, path, from_disk=False)
+            record = _record(job.records(), record.idx)
+            if decision is not acquire.Move.DONE:
+                record.tried.append(acquire.identifier(candidate))
+                job.write_records([record])
+                return f"[{record.idx}] {record.label}: {candidate.user} did not hand the file over ({decision.value})"
+            return _take(job, record, candidate, path, from_disk=False)
 
     with daemon_factory() as daemon:
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
@@ -242,7 +240,7 @@ def skip(job: state.Job, idx: int) -> Settled:
     record = _record(records, idx)
     record.decision = state.SKIPPED
     job.append_event("skipped", idx=idx)
-    job.write_records(records)
+    job.write_records([record])
     return Settled(idx=idx, label=record.label, decision=state.SKIPPED)
 
 
@@ -251,8 +249,7 @@ def not_found(job: state.Job, idx: int) -> Settled:
     records = job.records()
     record = _record(records, idx)
     record.decision = state.DECLINED
-    record.status = state.NOT_FOUND
     record.notes = "no usable copy exists"
     job.append_event("declined", idx=idx)
-    job.write_records(records)
+    job.write_records([record])
     return Settled(idx=idx, label=record.label, decision=state.DECLINED)

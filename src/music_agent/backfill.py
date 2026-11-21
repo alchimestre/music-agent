@@ -20,18 +20,18 @@ unreadable keeps them rather than having new ones guessed.
 
 from __future__ import annotations
 
+from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from mutagen import File as MutagenFile
 
 from . import importing, parsing, tag
 from .config import Config
 from .duplicates import Copy, agrees, copies
-from .lanes import path_key, read_directories, seconds_of
-
-
-class NotClosed(RuntimeError):
-    """Rekordbox is running, and pyrekordbox will not commit while it is."""
-
+from .importing import NotClosed
+from .lanes import lane_files, path_key, sound_from
 
 @dataclass
 class Candidate:
@@ -80,22 +80,27 @@ class Summary:
 
 def identity_of(path: Path) -> tuple[str, str, int | None]:
     """What a file says it is: its tags, then its name, and the length off its header."""
-    written = tag.read(path)
+    audio = MutagenFile(path)
+    if audio is None:
+        raise ValueError("not readable audio")
+    written = tag.read_tags(audio.tags)
     parsed = parsing.parse_filename(path.name)
     title = written.title or parsed.title or path.stem
-    return (written.artist or parsed.artist, title, seconds_of(path))
+    return written.artist or parsed.artist, title, sound_from(audio.info).seconds
 
 
-def candidates(config: Config, rows: list[Copy]) -> list[Candidate]:
+def candidates(config: Config, rows: list[Copy], *, files: Iterable[Path] | None = None) -> list[Candidate]:
     """Every file in a lane the collection has no live row for, with what the file says it is.
 
     A file whose *track* the collection already holds under another file is not a gap to fill but a duplicate
     to merge, and it says so rather than being minted twice.
     """
     held = {path_key(row.path) for row in rows}
+    by_key = defaultdict(list)
+    for row in rows:
+        by_key[row.key].append(row)
     out: list[Candidate] = []
-    for entry in read_directories(config):
-        path = Path(entry.path)
+    for path in lane_files(config) if files is None else files:
         if path_key(path) in held:
             continue
         try:
@@ -107,8 +112,7 @@ def candidates(config: Config, rows: list[Copy]) -> list[Candidate]:
 
         mine = Copy(content_id=0, path=path, artist=artist, title=parsing.bare_title(title),
                     mix=parsing.extract_mix(title), seconds=seconds)
-        clash = next((row for row in rows
-                      if row.key == mine.key and agrees(row, mine)
+        clash = next((row for row in by_key.get(mine.key, ()) if agrees(row, mine)
                       and parsing.same_credit(row.artist, mine.artist)), None)
         if clash is not None:
             candidate.held_by = clash.path
@@ -117,9 +121,10 @@ def candidates(config: Config, rows: list[Copy]) -> list[Candidate]:
     return out
 
 
-def plan(config: Config, *, db) -> Summary:
+def plan(config: Config, *, db, rows: list[Copy] | None = None,
+         files: Iterable[Path] | None = None) -> Summary:
     """What a pass would add, writing nothing."""
-    return Summary(candidates=candidates(config, copies(db)))
+    return Summary(candidates=candidates(config, copies(db) if rows is None else rows, files=files))
 
 
 def mint(config: Config, summary: Summary, *, db, log=print) -> Summary:
@@ -138,11 +143,13 @@ def mint(config: Config, summary: Summary, *, db, log=print) -> Summary:
 
     from . import state
 
+    names = importing.collection_names(db)
+
     for index, candidate in enumerate(addable):
         record = state.Record(idx=index, artist=candidate.artist, title=candidate.title,
                               local_path=str(candidate.path))
         try:
-            importing.add(db, record)
+            importing.add(db, record, names=names)
         except importing.ImportFailed as error:
             candidate.why = str(error)
             log(f"      {candidate.path.name}: {error}")

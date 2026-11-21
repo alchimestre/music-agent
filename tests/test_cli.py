@@ -15,6 +15,7 @@ from music_agent import acquire
 from music_agent import cli as cli_module
 from music_agent import config as config_module
 from music_agent import deezer, exporting, lanes, library, playlists, slsk, spotify, state, sweep, youtube
+from music_agent import passes as pipeline_passes
 from music_agent.cli import main
 from fake_server import Direct
 from music_agent.rules import Candidate
@@ -76,17 +77,18 @@ def test_tidy_ends_with_whether_a_person_has_anything_to_do(tmp_path, capsys, mo
             pass
 
     monkeypatch.setattr(pyrekordbox, "Rekordbox6Database", Database)
-    monkeypatch.setattr(duplicates, "run", lambda config, db, apply, remove_files: Rows())
-    monkeypatch.setattr(backfill, "run", lambda config, db, apply: Gaps())
-    monkeypatch.setattr(sweep, "find", lambda config: sweep.Leftovers((), ()))
-    monkeypatch.setattr(library, "unpointed", lambda config, claimed: library.Unpointed())
+    monkeypatch.setattr(duplicates, "copies", lambda db: [])
+    monkeypatch.setattr(duplicates, "plan", lambda *args, **kwargs: Rows())
+    monkeypatch.setattr(backfill, "plan", lambda *args, **kwargs: Gaps())
+    monkeypatch.setattr(library, "unpointed", lambda config, **kwargs: library.Unpointed())
     config_path = make_config(tmp_path)
     seed(config_path, [])
 
     assert main(["--config", str(config_path), "tidy"]) == 0
     assert "nothing to do" in capsys.readouterr().out
 
-    monkeypatch.setattr(sweep, "find", lambda config: sweep.Leftovers((), (tmp_path / "x.flac",)))
+    monkeypatch.setattr(library, "unpointed",
+                        lambda config, **kwargs: library.Unpointed(staged=[tmp_path / "x.flac"]))
 
     assert main(["--config", str(config_path), "tidy"]) == 1
     out = capsys.readouterr().out
@@ -134,7 +136,7 @@ def test_status_reports_the_counts(tmp_path, capsys):
     assert "3 tracks" in out
     assert "1 in review" in out
     assert "1 settled" in out
-    assert "1 with nothing usable" in out
+    assert "1 without an offer" in out
 
 
 def test_the_queue_lists_what_needs_a_decision(tmp_path, capsys):
@@ -148,7 +150,7 @@ def test_the_queue_lists_what_needs_a_decision(tmp_path, capsys):
     assert "Kiasmos" not in out                     # settled, so not the human's problem
     assert "1. aiff" in out, "a candidate line starts with the number review --accept takes"
     assert "Ntogn - .aiff" in out, "and names the file that number would fetch"
-    assert "every one was refused" in out           # and the unusable one is named, and why
+    assert "every one was ruled out" in out
 
 
 def test_the_counts_say_why_nothing_was_usable(tmp_path, capsys):
@@ -160,10 +162,10 @@ def test_the_counts_say_why_nothing_was_usable(tmp_path, capsys):
     assert main(["--config", str(config_path), "status"]) == 0
 
     out = capsys.readouterr().out
-    assert "1 with nothing usable" in out
+    assert "1 without an offer" in out
     assert "of those: 0 not searched" in out
     assert "0 the network offered nothing" in out
-    assert "1 every offer refused" in out
+    assert "1 every offer ruled out" in out
 
 
 def test_a_track_no_pass_reached_is_not_called_unusable(tmp_path, capsys):
@@ -309,19 +311,19 @@ def test_the_taxonomy_line_says_which_kind_of_absent(tmp_path, capsys, monkeypat
     """Two different problems, and the line is what tells them apart: nothing configured at all, and a path
     configured with no file behind it. An unconfigured one used to print `.`, which is what `Path("")`
     renders as and reads as a directory that was looked in and found empty."""
-    monkeypatch.setattr(library, "open", lambda config: library.Library([], []))
+    monkeypatch.setattr(library, "genres", lambda config: [])
     for name in ("ACOUSTID_API_KEY", "MUSICBRAINZ_CONTACT", "DISCOGS_TOKEN"):
         monkeypatch.setenv(name, "test")
 
     plain = tmp_path / "plain.toml"
     plain.write_text('[paths]\nstate = "state"\n', encoding="utf-8")
-    cli_module._tools(config_module.load(plain))
+    pipeline_passes.tools(config_module.load(plain))
     assert "no genre taxonomy at (unset)" in capsys.readouterr().err
 
     missing = tmp_path / "nowhere.json"
     configured = tmp_path / "configured.toml"
     configured.write_text(f'[paths]\nstate = "state"\n\n[genres]\ntaxonomy = "{missing}"\n', encoding="utf-8")
-    cli_module._tools(config_module.load(configured))
+    pipeline_passes.tools(config_module.load(configured))
     assert f"no genre taxonomy at {missing}" in capsys.readouterr().err
 
 
@@ -348,7 +350,7 @@ def test_review_calls_a_track_not_found(tmp_path, capsys):
 
     record = job.records()[1]
     assert record.decision == state.DECLINED
-    assert record.status == state.NOT_FOUND
+    assert record.status == state.PENDING
 
 
 def test_a_track_settled_by_hand_leaves_the_queue(tmp_path, capsys):
@@ -537,14 +539,14 @@ def test_run_does_every_stage_in_order_and_asks_nothing(tmp_path, capsys, monkey
             return 0
         return run
 
-    monkeypatch.setattr(cli_module, "_one_pass", pass_off)
+    monkeypatch.setattr(pipeline_passes, "one_pass", pass_off)
     monkeypatch.setattr(cli_module, "_process", stage("process"))
     monkeypatch.setattr(cli_module, "_import", stage("import"))
     # The closing line names what is installed here, and the tool is not on every machine's PATH.
     monkeypatch.setattr(exporting.REGISTRY["rekordbox"], "available", lambda config: True)
     monkeypatch.setattr(exporting.REGISTRY["traktor"], "available", lambda config: True)
     # Lists, not tuples: the run passes on a slice of what `find` returned, and it must not care.
-    monkeypatch.setattr(cli_module.sweep, "find", lambda config: sweep.Leftovers([], []))
+    monkeypatch.setattr(cli_module.sweep, "find", lambda config, **kwargs: sweep.Leftovers([], []))
 
     # Called the way `main` calls it without `--config`: the namespace it gets has no `config` attribute at
     # all, and every stage below takes the config as an argument of its own.
@@ -568,7 +570,7 @@ def test_run_stops_at_the_stage_that_failed(tmp_path, capsys, monkeypatch):
     tracklist = tmp_path / "list.txt"
     tracklist.write_text("Kiasmos - Blurred\n", encoding="utf-8")
 
-    monkeypatch.setattr(cli_module, "_one_pass",
+    monkeypatch.setattr(pipeline_passes, "one_pass",
                         lambda config, job, *, retry, attempt=1: acquire.Summary())
     monkeypatch.setattr(cli_module, "_process", lambda config, args: 1)
     monkeypatch.setattr(cli_module, "_import",
@@ -598,10 +600,10 @@ def test_run_places_what_arrived_when_a_pass_dies(tmp_path, capsys, monkeypatch)
             return 0
         return run
 
-    monkeypatch.setattr(cli_module, "_one_pass", dying_pass)
+    monkeypatch.setattr(pipeline_passes, "one_pass", dying_pass)
     monkeypatch.setattr(cli_module, "_process", stage("process"))
     monkeypatch.setattr(cli_module, "_import", stage("import"))
-    monkeypatch.setattr(cli_module.sweep, "find", lambda config: sweep.Leftovers([], []))
+    monkeypatch.setattr(cli_module.sweep, "find", lambda config, **kwargs: sweep.Leftovers([], []))
 
     args = Namespace(job=None, tracks=str(tracklist), name=None, target=None, without=None, passes=6)
 
@@ -715,10 +717,10 @@ def test_a_run_is_one_pass_unless_more_are_asked_for(tmp_path, monkeypatch, caps
         passes.append(retry)
         return acquire.Summary()
 
-    monkeypatch.setattr(cli_module, "_one_pass", one_pass)
+    monkeypatch.setattr(pipeline_passes, "one_pass", one_pass)
     monkeypatch.setattr(cli_module, "_process", lambda config, args: 0)
     monkeypatch.setattr(cli_module, "_import", lambda config, args: 0)
-    monkeypatch.setattr(cli_module.sweep, "find", lambda config: sweep.Leftovers([], []))
+    monkeypatch.setattr(cli_module.sweep, "find", lambda config, **kwargs: sweep.Leftovers([], []))
     monkeypatch.setattr(cli_module.sweep, "clear", lambda leftovers, log=print: 0)
     monkeypatch.setattr(cli_module, "_tidy", lambda config, args: None)
     monkeypatch.setattr(cli_module, "_queue", lambda job: None)
@@ -735,7 +737,7 @@ def test_a_tracklist_on_the_command_line_runs_the_pass_on_the_run_it_started(tmp
     tracklist = tmp_path / "Kiasmos - Blurred.txt"
     tracklist.write_text("Kiasmos - Blurred\n", encoding="utf-8")
 
-    monkeypatch.setattr(cli_module.reference, "lookup", lambda config, limit=25: NoReference())
+    monkeypatch.setattr(pipeline_passes.reference, "lookup", lambda config, limit=25: NoReference())
     monkeypatch.setattr(cli_module.slsk, "Daemon", lambda config: Direct(results=[]))
 
     assert main(["--config", str(config_path), "acquire", "--tracks", str(tracklist)]) == 0
@@ -755,7 +757,7 @@ def test_a_corrupt_peer_ledger_stops_the_pass_with_a_sentence(tmp_path, capsys, 
     tracklist.write_text("Kiasmos - Blurred\n", encoding="utf-8")
     (tmp_path / "peers.json").write_text("{not json", encoding="utf-8")
 
-    monkeypatch.setattr(cli_module.reference, "lookup", lambda config, limit=25: NoReference())
+    monkeypatch.setattr(pipeline_passes.reference, "lookup", lambda config, limit=25: NoReference())
     monkeypatch.setattr(cli_module.slsk, "Daemon", lambda config: Direct(results=[]))
     monkeypatch.setattr(library, "open", lambda config: None)
 
@@ -812,7 +814,7 @@ def test_a_pass_points_the_daemon_at_staging_and_shares_both_lanes(
     """The daemon owns the files and the shares, so the pass sets both before it asks anything: staging where
     this run's downloads land, and the two lanes peers can browse. A daemon with no shared files reads as a
     leecher, and peers queue or ban it."""
-    config = config_module.load(make_config(tmp_path))
+    config = config_module.load(make_paths_config(tmp_path))
     job = state.create(config, "run")
     daemon = Direct(results=[], shared_files=0)
 
@@ -821,7 +823,7 @@ def test_a_pass_points_the_daemon_at_staging_and_shares_both_lanes(
     monkeypatch.setattr(acquire, "run", lambda *a, **k: acquire.Summary())
 
     stream = StringIO() if redirect_output else None
-    cli_module._one_pass(config, job, retry=False, stream=stream)
+    pipeline_passes.one_pass(config, job, retry=False, stream=stream)
 
     assert daemon.directory == str(config.staging)
     assert daemon.shares == [str(config.lossless), str(config.lossy)]

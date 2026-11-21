@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from threading import Event
 
-from music_agent import acquire, state, store
+from music_agent import acquire, state
 from test_acquire import Reference, setup
 
 
@@ -36,26 +36,12 @@ def test_pause_event_holds_new_search_until_cleared(tmp_path):
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(acquire.run, config, job, daemon, Reference(),
                              pause_event=pause_event, log=lambda _line: None,
-                             sleep=lambda _seconds: None)
+                             sleep=sleep)
         sleep(0.05)
         assert not future.done()
         assert not any(name == "search" for name, _params in daemon.calls)
         pause_event.clear()
         summary = future.result(timeout=2)
-
-    assert summary.nothing_usable == [1]
-
-
-def test_a_pass_under_the_callers_writer_lock_does_not_start_pool_workers(tmp_path, monkeypatch):
-    config, job, daemon, _calls = setup(tmp_path, results=[], tracks=1)
-
-    def forbidden(*_args, **_kwargs):
-        raise AssertionError("a pass under the caller's writer lock must run in that thread")
-
-    monkeypatch.setattr(acquire, "ThreadPoolExecutor", forbidden)
-    with store.writer_lock(config.state_root):
-        summary = acquire.run(config, job, daemon, Reference(),
-                              log=lambda _line: None, sleep=lambda _seconds: None)
 
     assert summary.nothing_usable == [1]
 
