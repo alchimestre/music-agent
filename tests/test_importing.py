@@ -289,6 +289,27 @@ def test_a_track_already_in_the_collection_is_reported_not_retried(tmp_path):
     assert "already exists" in job.records()[0].notes
 
 
+def test_a_delivered_record_is_not_offered_to_the_collection_again(tmp_path):
+    """A delivery plan names every finished record; only the tagged one is this run's to add."""
+    config = make_config(tmp_path)
+    delivered = tagged(tmp_path, 1, "One.aiff", title="One")
+    delivered.status = state.IMPORTED
+    fresh = tagged(tmp_path, 2, "Two.aiff", title="Two")
+    job = job_with(config, [delivered, fresh])
+    database = FakeDatabase()
+    database.added.append({"path": delivered.local_path})
+
+    summary = importing.run(config, job, db=database, backup_first=False, record_indices={1, 2}, log=quiet)
+
+    assert summary.imported == [2]
+    assert summary.already == [1]
+    assert [entry["path"] for entry in database.added] == [delivered.local_path, fresh.local_path]
+    first = job.records()[0]
+    assert first.status == state.IMPORTED, "a finished record keeps the status the run that delivered it gave"
+    assert first.notes == ""
+    assert [event["event"] for event in job.events() if event.get("idx") == 1] == []
+
+
 def test_a_file_that_is_gone_is_a_failure_to_retry(tmp_path):
     config = make_config(tmp_path)
     record = tagged(tmp_path)
