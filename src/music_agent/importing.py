@@ -341,10 +341,17 @@ def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=pr
         records = delivery_records(job)
     selected = set(record_indices) if record_indices is not None else None
     tagged = [record for record in records
-              if (record.status == state.TAGGED if selected is None else record.idx in selected)]
+              if record.status == state.TAGGED and (selected is None or record.idx in selected)]
     summary = Summary()
+    if selected is not None:
+        # A record an earlier run already delivered is finished, not to be added again: `add` raises the
+        # same "already in the collection" ValueError for it and the status is rewritten from that path.
+        summary.already.extend(record.idx for record in records
+                               if record.idx in selected and record.status in {state.IMPORTED,
+                                                                             state.FOUND_IN_LIBRARY})
     if not tagged:
-        log("nothing to import: no track in this run has been tagged yet")
+        log("nothing to import: no track in this run has been tagged yet"
+            if not summary.already else "nothing to import: every selected track is already in the collection")
         return summary
 
     if backup_first:
