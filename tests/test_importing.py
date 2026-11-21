@@ -298,6 +298,7 @@ def test_a_delivered_record_is_not_offered_to_the_collection_again(tmp_path):
     job = job_with(config, [delivered, fresh])
     database = FakeDatabase()
     database.added.append({"path": delivered.local_path})
+    database.content.append(ContentRow(delivered.local_path))     # the row an earlier delivery made
 
     summary = importing.run(config, job, db=database, backup_first=False, record_indices={1, 2}, log=quiet)
 
@@ -308,6 +309,21 @@ def test_a_delivered_record_is_not_offered_to_the_collection_again(tmp_path):
     assert first.status == state.IMPORTED, "a finished record keeps the status the run that delivered it gave"
     assert first.notes == ""
     assert [event["event"] for event in job.events() if event.get("idx") == 1] == []
+
+
+def test_a_delivered_record_whose_row_was_deleted_is_added_again(tmp_path):
+    """The record says imported; the collection says the row is gone. The collection decides."""
+    config = make_config(tmp_path)
+    delivered = tagged(tmp_path, 1, "One.aiff", title="One")
+    delivered.status = state.IMPORTED
+    job = job_with(config, [delivered])
+    database = FakeDatabase()
+
+    summary = importing.run(config, job, db=database, backup_first=False, record_indices={1}, log=quiet)
+
+    assert summary.imported == [1]
+    assert [entry["path"] for entry in database.added] == [delivered.local_path]
+    assert job.records()[0].status == state.IMPORTED
 
 
 def test_a_file_that_is_gone_is_a_failure_to_retry(tmp_path):
