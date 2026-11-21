@@ -340,15 +340,19 @@ def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=pr
     if records is None:
         records = delivery_records(job)
     selected = set(record_indices) if record_indices is not None else None
-    tagged = [record for record in records
-              if record.status == state.TAGGED and (selected is None or record.idx in selected)]
+    candidates = [record for record in records if selected is None or record.idx in selected]
+    # Whether an earlier delivery's row still exists decides what this run owes the collection: a row the
+    # user deleted leaves the record IMPORTED while the collection no longer holds its file.
+    known = _content_paths(db) if selected is not None else {}
     summary = Summary()
-    if selected is not None:
-        # A record an earlier run already delivered is finished, not to be added again: `add` raises the
-        # same "already in the collection" ValueError for it and the status is rewritten from that path.
-        summary.already.extend(record.idx for record in records
-                               if record.idx in selected and record.status in {state.IMPORTED,
-                                                                             state.FOUND_IN_LIBRARY})
+    tagged: list[state.Record] = []
+    for record in candidates:
+        if record.status == state.TAGGED:
+            tagged.append(record)
+        elif selected is not None and record.local_path and _path_key(Path(record.local_path)) in known:
+            summary.already.append(record.idx)
+        elif selected is not None:
+            tagged.append(record)
     if not tagged:
         log("nothing to import: no track in this run has been tagged yet"
             if not summary.already else "nothing to import: every selected track is already in the collection")
@@ -361,7 +365,7 @@ def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=pr
 
     replaced: list[Path] = []
     pending: list[state.Record] = []
-    paths = _content_paths(db) if any(record.replaces for record in tagged) else {}
+    paths = (known or _content_paths(db)) if any(record.replaces for record in tagged) else known
 
     def failed(record: state.Record, error: Exception) -> None:
         record.notes = str(error)
@@ -414,8 +418,10 @@ def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=pr
             continue
         except ValueError as error:
             # pyrekordbox raises this for a path already in the collection: a duplicate, not a failure.
-            record.status = state.FOUND_IN_LIBRARY
-            record.notes = str(error)
+            # A record this run is re-adding was finished before, and keeps the status that delivered it.
+            if record.status not in {state.IMPORTED, state.FOUND_IN_LIBRARY}:
+                record.status = state.FOUND_IN_LIBRARY
+                record.notes = str(error)
             summary.already.append(record.idx)
             job.append_event("already_imported", idx=record.idx, path=record.local_path)
             log(f"[{record.idx}] {record.label}: already in the collection")
