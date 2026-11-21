@@ -8,7 +8,6 @@ replayed tomorrow is judged by the rule as it stands then.
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
@@ -46,6 +45,9 @@ DECIDED = frozenset({ACCEPTED, SKIPPED, DECLINED})
 # other status means a stage has the track in hand, so a queue never asks about it.
 LIVE = frozenset({PENDING, RETRY_LATER})
 
+# The statuses where a track's file is done: tagged or past it. What delivery and a receipt both mean by "has a file".
+FINISHED = frozenset({TAGGED, IMPORTED, FOUND_IN_LIBRARY})
+
 SEARCHED_EVENT = "searched"
 
 FINISHED_EVENT = "finished"
@@ -66,16 +68,6 @@ def ungenred_names(jobs: Iterable[Job]) -> dict[str, int]:
                 if name:
                     counted[name] = counted.get(name, 0) + 1
     return counted
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _jsonl(path: Path) -> list[dict]:
-    if not path.is_file():
-        return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 # The three facts a run reads off the two files it owns. Each takes the snapshot it is given rather than
@@ -191,9 +183,10 @@ class Job:
     def records(self) -> list[Record]:
         from . import store
 
-        if store.job_exists(self.root.parent, self.id):
-            return [Record.from_json(data) for data in store.job_records(self.root.parent, self.id)]
-        return [Record.from_json(data) for data in _jsonl(self.tracks_path)]
+        found = store.job_records(self.root.parent, self.id)
+        if found is not None:
+            return found
+        return [Record.from_json(data) for data in store.read_jsonl(self.tracks_path)]
 
     def write_records(self, records: list[Record]) -> None:
         from . import store
@@ -203,16 +196,15 @@ class Job:
     def append_event(self, event: str, **fields) -> None:
         from . import store
 
-        entry = {"ts": _now(), "event": event}
+        entry = {"ts": store.now(), "event": event}
         entry.update(fields)
         store.append_event(self.root.parent, self.id, entry)
 
     def events(self) -> list[dict]:
         from . import store
 
-        if store.job_exists(self.root.parent, self.id):
-            return store.job_events(self.root.parent, self.id)
-        return _jsonl(self.events_path)
+        found = store.job_events(self.root.parent, self.id)
+        return store.read_jsonl(self.events_path) if found is None else found
 
     def work_id(self, idx: int) -> str:
         """The immutable canonical work this membership points at."""
@@ -267,10 +259,10 @@ class Job:
             f"In review: {summary['in_review']}",
             f"Decided by hand: {summary['decided']}",
             f"Settled: {summary['settled']}",
-            f"Nothing usable: {summary['nothing_usable']}",
+            f"Without an offer: {summary['without_offer']}",
             f"Not searched: {summary['not_searched']}",
             f"The network offered nothing: {summary['nothing_offered']}",
-            f"Every offer refused: {summary['refused']}",
+            f"Every offer ruled out: {summary['nothing_usable']}",
             "",
             "## By pipeline status",
             "",
@@ -297,35 +289,39 @@ class ExecutionJob:
     def __getattr__(self, name: str):
         return getattr(self.base, name)
 
-    def records(self) -> list[Record]:
+    def records(self, *, records: list[Record] | None = None,
+                work_ids: dict[int, str] | None = None) -> list[Record]:
         from . import store
 
-        mapping = store.work_ids(self.base.root.parent, self.base.id)
+        if work_ids is None:
+            work_ids = store.work_ids(self.base.root.parent, self.base.id)
+        if records is None:
+            records = self.base.records()
         chosen: dict[object, Record] = {}
-        for record in self.base.records():
-            work_id = mapping.get(record.idx, record.idx)
+        for record in records:
+            work_id = work_ids.get(record.idx, record.idx)
             current = chosen.get(work_id)
             if current is None or _pass_order(record) < _pass_order(current):
                 chosen[work_id] = record
         return sorted(chosen.values(), key=lambda record: record.idx)
 
     def write_records(self, records: list[Record]) -> None:
-        """Write the pass's representatives, then settle still-open duplicates of the same work."""
+        """Write the pass's representatives and settle still-open duplicates of the same work."""
         from . import store
 
-        self.base.write_records(records)
+        decided = [record for record in records if record.decided()]
+        if not decided:
+            self.base.write_records(records)
+            return
+
         mapping = store.work_ids(self.base.root.parent, self.base.id)
-        decisions = {mapping.get(record.idx, record.idx): record.decision
-                     for record in records if record.decided()}
-        if not decisions:
-            return
-        siblings = [record for record in self.base.records()
-                    if not record.decided() and mapping.get(record.idx, record.idx) in decisions]
-        if not siblings:
-            return
+        decisions = {mapping.get(record.idx, record.idx): record.decision for record in decided}
+        written = {record.idx for record in records}
+        siblings = [record for record in self.base.records() if record.idx not in written
+                    and not record.decided() and mapping.get(record.idx, record.idx) in decisions]
         for record in siblings:
             record.decision = decisions[mapping.get(record.idx, record.idx)]
-        self.base.write_records(siblings)
+        self.base.write_records(records + siblings)
 
 
 @dataclass
@@ -333,20 +329,20 @@ class Queue:
     """The tracks a run is not done with, split by why (GLOSSARY.md: the review queue).
 
     `needs_you` is the review queue proper. The other three are tracks it cannot offer a candidate for, and
-    they are kept apart because they are three different facts: the pass never asked, the network answered
-    with nothing, or every offer was ruled out.
+    they are kept apart because the pass never asked, the network offered nothing, or every offer
+    was ruled out.
     """
 
     needs_you: list[Record] = field(default_factory=list)
     decided: list[Record] = field(default_factory=list)
     not_searched: list[Record] = field(default_factory=list)
     nothing_offered: list[Record] = field(default_factory=list)
-    refused: list[Record] = field(default_factory=list)
+    nothing_usable: list[Record] = field(default_factory=list)
 
     @property
     def undecided(self) -> list[Record]:
         """Everything in the queue a person has not settled."""
-        return self.needs_you + self.not_searched + self.nothing_offered + self.refused
+        return self.needs_you + self.not_searched + self.nothing_offered + self.nothing_usable
 
 
 def _queue_of(records: list[Record], searched: set[int]) -> Queue:
@@ -363,7 +359,7 @@ def _queue_of(records: list[Record], searched: set[int]) -> Queue:
         if in_review(track):
             waiting.needs_you.append(record)
         elif record.candidates:
-            waiting.refused.append(record)  # files were offered, and every one was ruled out
+            waiting.nothing_usable.append(record)
         elif record.idx in searched:
             waiting.nothing_offered.append(record)   # a search answered and held no files
         else:
@@ -381,15 +377,21 @@ def _summary_of(records: list[Record], searched: set[int]) -> dict[str, int]:
         "decided": len(waiting.decided),
         "not_searched": len(waiting.not_searched),
         "nothing_offered": len(waiting.nothing_offered),
-        "refused": len(waiting.refused),
-        "nothing_usable": (len(waiting.not_searched) + len(waiting.nothing_offered)
-                           + len(waiting.refused)),
+        "nothing_usable": len(waiting.nothing_usable),
+        "without_offer": len(waiting.not_searched) + len(waiting.nothing_offered) + len(waiting.nothing_usable),
     }
 
 
-def queue(job: Job) -> Queue:
+def queue(job: Job, *, records: list[Record] | None = None,
+          events: list[dict] | None = None) -> Queue:
     """Where each of a run's live tracks belongs."""
-    return _queue_of(job.records(), job.searched())
+    searched = job.searched() if events is None else _searched_indices(events)
+    return _queue_of(job.records() if records is None else records, searched)
+
+
+def review_count(records: list[Record], searched: set[int]) -> int:
+    """How many tracks wait on a person: the count `queue` gives, for a caller that already holds the records."""
+    return len(_queue_of(records, searched).needs_you)
 
 
 def create(config: Config, name: str, records: list[Record] | None = None) -> Job:
@@ -458,7 +460,11 @@ def newest(config: Config) -> Job | None:
 
 
 def find(config: Config, job_id: str) -> Job | None:
-    for job in all_jobs(config):
-        if job.id == job_id:
-            return job
+    from . import store
+
+    if not job_id or Path(job_id).name != job_id or job_id in {".", ".."}:
+        return None
+    root = config.state_root / job_id
+    if root.is_dir() or store.job_exists(config.state_root, job_id):
+        return Job(root)
     return None

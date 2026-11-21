@@ -10,7 +10,7 @@ from . import deliveries, spotify_source, state, store
 from .config import Config
 
 
-def build(config: Config, job: state.Job, plans=None) -> dict:
+def build(config: Config, job: state.Job, *, plans: list[deliveries.DeliveryPlan] | None = None) -> dict:
     """Build a machine-readable report from job state and current target receipts."""
     records = job.records()
     events = job.events()
@@ -20,7 +20,8 @@ def build(config: Config, job: state.Job, plans=None) -> dict:
     source, memberships = _source(job)
     acquired = _acquired_memberships(config, job, records, events)
     already_held = _event_indices(events, "already_held")
-    review = _review(job)
+    queue = state.queue(job, records=records, events=events)
+    review = _review(queue)
     ungenred = [record.idx for record in records if _request_fulfilled(record) and not record.genre.strip()]
     report_records = [_record_report(record, statuses.get(record.idx, {}), memberships) for record in records]
     delivery_pending = {target: [record.idx for record in records
@@ -33,16 +34,19 @@ def build(config: Config, job: state.Job, plans=None) -> dict:
                                          for target in target_names)}
     complete = bool(records) and not outstanding and len(delivered) == len(records) and bool(target_names)
     counts = Counter(record.status for record in records)
+    # `review` in the counts is the queue proper (a person must decide); the list below also carries the
+    # three open buckets, whose total is `attention`.
     counts.update(requested=len(records), acquired=len(acquired), already_held=len(already_held),
-                  review=len(review), ungenred=len(ungenred), delivered=len(delivered))
+                  review=len(queue.needs_you),
+                  attention=len(review), ungenred=len(ungenred), delivered=len(delivered))
     return {"job_id": job.id, "source": source, "counts": dict(counts), "records": report_records,
             "acquired": acquired, "already_held": already_held, "review": review,
             "ungenred": ungenred, "outstanding": outstanding,
             "delivery_pending": delivery_pending, "complete": complete}
 
 
-def build_status(config: Config, job: state.Job) -> dict:
-    report = build(config, job)
+def build_status(config: Config, job: state.Job, *, plans: list[deliveries.DeliveryPlan] | None = None) -> dict:
+    report = build(config, job, plans=plans)
     outcome = _last_operation(job)
     if outcome is None:
         return report
@@ -99,7 +103,7 @@ def _current_deliveries_succeeded(report: dict) -> bool:
         return True
     retained = [record for record in report.get("records", [])
                 if record.get("local_path")
-                and record.get("status") in {state.TAGGED, state.IMPORTED, state.FOUND_IN_LIBRARY}]
+                and record.get("status") in state.FINISHED]
     return bool(retained) and all(
         record.get("deliveries") and all(outcome.get("status") == "success"
                                         for outcome in record["deliveries"].values())
@@ -107,7 +111,7 @@ def _current_deliveries_succeeded(report: dict) -> bool:
 
 
 def _request_fulfilled(record: state.Record) -> bool:
-    return record.status in {state.TAGGED, state.IMPORTED, state.FOUND_IN_LIBRARY} and bool(
+    return record.status in state.FINISHED and bool(
         record.local_path and Path(record.local_path).is_file())
 
 
@@ -127,10 +131,9 @@ def _event_indices(events: list[dict], event: str) -> list[int]:
                    if entry.get("event") == event and isinstance(entry.get("idx"), int)})
 
 
-def _review(job: state.Job) -> list[dict]:
-    queue = state.queue(job)
+def _review(queue: state.Queue) -> list[dict]:
     reasons = (("needs_you", queue.needs_you), ("not_searched", queue.not_searched),
-               ("nothing_offered", queue.nothing_offered), ("refused", queue.refused))
+               ("nothing_offered", queue.nothing_offered), ("nothing_usable", queue.nothing_usable))
     return [{"idx": record.idx, "label": record.label, "reason": reason, "notes": record.notes}
             for reason, entries in reasons for record in entries]
 
@@ -159,9 +162,9 @@ def _record_report(record: state.Record, deliveries_by_target: dict[str, dict],
 
 
 def write(config: Config, job: state.Job, *, stage: str = "complete", blocker: str = "",
-          stop_reason: str = "") -> dict:
+          stop_reason: str = "", plans: list[deliveries.DeliveryPlan] | None = None) -> dict:
     """Atomically persist a receipt and return the saved report."""
-    report = build(config, job)
+    report = build(config, job, plans=plans)
     if stage == "complete" and not report["complete"]:
         stage = "pending"
     report.update(stage=stage, blocker=blocker,

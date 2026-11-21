@@ -14,6 +14,7 @@ from music_agent.parsing import (
     credits,
     extract_mix,
     fold,
+    is_remix,
     mix_matches,
     names_the_master,
     parse_filename,
@@ -217,10 +218,11 @@ def test_a_version_the_title_already_says_is_not_written_twice():
     assert track_title("(Something Remix)") == "(Something Remix)"
 
 
-def test_the_mix_is_the_trailing_parenthesised_part():
+def test_the_mix_is_the_last_parenthesised_part():
     assert extract_mix("Kiasmos - Blurred (Extended Mix).flac") == "Extended Mix"
     assert extract_mix("Kiasmos - Blurred.flac") == ""
     assert extract_mix("A - B (One) (Two).flac") == "Two"
+    assert extract_mix("A - B (Remix) extra.flac") == "Remix"
 
 
 def test_a_credit_is_not_a_version():
@@ -347,6 +349,12 @@ def test_a_dotted_title_keeps_its_mix():
     assert track_title("Mr. Brightside (Jacques Lu Cont Remix)") == (
         "Mr. Brightside (Jacques Lu Cont Remix)"
     )
+
+
+@pytest.mark.parametrize(("mix", "remix"), [("Score Edit", False), ("Flipside", False),
+                                          ("Re-Edit", True), ("Flip", True)])
+def test_a_remix_marker_must_match_whole_words(mix, remix):
+    assert is_remix(mix) is remix
 
 
 def test_a_remix_is_not_read_as_a_master_naming():

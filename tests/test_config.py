@@ -142,15 +142,15 @@ def test_the_example_config_points_at_the_daemon():
     assert config.soulseek_command == ("soulseek-rs", "daemon")
 
 
-def test_the_listening_ports_come_from_the_environment_rather_than_the_config_file(monkeypatch):
-    """A port is a fact about the machine's network, so it sits with the credentials in `.env` — and the
-    shipped default must be the port this machine forwards, not the client's own default."""
+def test_the_listening_port_in_the_environment_overrides_the_config_file(tmp_path, monkeypatch):
+    path = write(tmp_path, "[soulseek]\nlisten_port = 31000\n")
+
     monkeypatch.setenv("SLSK_LISTEN_PORT", "41000")
+    assert load(path).soulseek_listen_port == 41000
 
-    config = load(config_module.EXAMPLE_CONFIG_PATH)
-
-    assert config.soulseek_listen_port == 41000
-    assert DEFAULTS.soulseek_listen_port == 20000, "the port this machine forwards"
+    monkeypatch.delenv("SLSK_LISTEN_PORT")
+    assert load(tmp_path / "missing.toml").soulseek_listen_port == 20000
+    assert load(path).soulseek_listen_port == 31000
 
 
 def test_a_command_written_as_one_string_becomes_argv(tmp_path):

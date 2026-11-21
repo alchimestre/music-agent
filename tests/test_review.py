@@ -145,12 +145,17 @@ def test_skipping_writes_the_decision_and_nothing_else(tmp_path):
 
 def test_not_found_settles_the_track_for_good(tmp_path):
     config, job, _ = setup(tmp_path)
+    other = state.create(config, "another run", [job.records()[0]])
 
     review.not_found(job, 2)
 
     record = job.records()[0]
     assert record.decision == state.DECLINED
-    assert record.status == state.NOT_FOUND
+    assert record.status == state.PENDING
+    assert state.queue(job).undecided == []
+    shared = other.records()[0]
+    assert shared.decision == state.UNDECIDED, "a verdict on one membership is not a verdict on the work"
+    assert shared.status == state.PENDING
     assert "no usable copy exists" in record.notes
 
 

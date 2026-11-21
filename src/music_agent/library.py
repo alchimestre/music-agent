@@ -11,8 +11,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import lanes, sweep
 from .config import Config
-from .lanes import Held, path_key, read_directories
+from .lanes import Held, lane_files, path_key, read_directories
 from .parsing import bare_title, extract_mix, fold, mix_matches, same_credit
 from .rules import DURATION_WINDOW
 
@@ -93,14 +94,16 @@ class Library:
 
 
 def read_database() -> tuple[list[Held], list[str]]:
-    """Every row the collection holds, and its genre vocabulary.
+    """Every row the collection holds, and its genre vocabulary."""
+    from . import importing
 
-    pyrekordbox is imported here rather than at the top, so the matching rules in this module can be
-    read and tested without a database anywhere near them.
-    """
-    from pyrekordbox import Rekordbox6Database
+    with importing.database() as database:
+        rows = _rekordbox_rows(database)
+        genres = [genre.Name for genre in database.get_genre() if genre.Name]
+    return rows, genres
 
-    database = Rekordbox6Database()
+
+def _rekordbox_rows(database) -> list[Held]:
     rows: list[Held] = []
     for row in database.get_content():
         # rekordbox never deletes a row: taking a track out of the collection sets `rb_local_deleted`, and the
@@ -122,11 +125,10 @@ def read_database() -> tuple[list[Held], list[str]]:
             genre=(getattr(row.Genre, "Name", "") or "") if row.Genre else "",
             content_id=int(identifier) if identifier.isdigit() else None,
         ))
-    genres = [genre.Name for genre in database.get_genre() if genre.Name]
-    return rows, genres
+    return rows
 
 
-def _target_rows(config: Config) -> tuple[list[Held], list[str], bool]:
+def _target_rows(config: Config, *, skip_rekordbox: bool = False) -> tuple[list[Held], list[str], bool]:
     """Every configured target that can read a collection, asked in order, and whether any answered.
 
     A target that cannot be read is not a reason to stop the pipeline: the directories are still a library,
@@ -140,6 +142,8 @@ def _target_rows(config: Config) -> tuple[list[Held], list[str], bool]:
     genres: list[str] = []
     read = False
     for target in exporting.configured(config):
+        if skip_rekordbox and target.name == "rekordbox":
+            continue
         if not target.reads or not target.available(config):
             continue
         found, vocabulary = target.rows(config)
@@ -153,6 +157,12 @@ def open(config: Config) -> Library:
     """The collection as it stands: the targets' rows, and the files beside them."""
     rows, genres, _read = _target_rows(config)
     return Library(rows + read_directories(config), genres)
+
+
+def genres(config: Config) -> list[str]:
+    """The configured targets' genre vocabulary, without opening audio files."""
+    _rows, vocabulary, _read = _target_rows(config)
+    return vocabulary
 
 
 @dataclass(frozen=True)
@@ -171,28 +181,25 @@ class Unpointed:
         return not (self.staged or self.lane or self.gone)
 
 
-def unpointed(config: Config, *, claimed: Iterable[str] = ()) -> Unpointed:
+def unpointed(config: Config, *, claimed: Iterable[str] = (),
+              rekordbox_paths: Iterable[str] | None = None, files: Iterable[Path] | None = None) -> Unpointed:
     """What nothing points at, and what points at nothing.
 
-    `claimed` is the path keys of the run's own records: a staged file a record still owns is not a
-    leftover, however long the run has held it.
+    A file a record of any run still owns is not a leftover, however long the run has held it: `claimed`
+    adds paths the caller knows are owned to the ones the runs' records name.
     """
-    owned = {path_key(path) for path in claimed}
-    rows, _genres, read = _target_rows(config)
-    row_paths = {path_key(row.path) for row in rows if row.path}
+    owned = lanes.claimed(config, claimed)
+    rows, _genres, read = _target_rows(config, skip_rekordbox=rekordbox_paths is not None)
+    paths = [row.path for row in rows if row.path]
+    if rekordbox_paths is not None:
+        paths.extend(rekordbox_paths)
+    row_paths = {path_key(path) for path in paths}
 
     leftovers = Unpointed()
-    if read:
-        # Without a collection to compare against, a lane file is not evidence of anything.
-        for held in sorted(read_directories(config), key=lambda entry: entry.path):
-            key = path_key(held.path)
-            if key not in row_paths and key not in owned:
-                leftovers.lane.append(Path(held.path))
-    if config.staging.is_dir():
-        for path in sorted(config.staging.iterdir()):
-            # A cancelled transfer leaves the client's own `.part` file here, which is as much a leftover as
-            # a whole track is, so nothing is filtered by extension.
-            if path.is_file() and not path.name.startswith(".") and path_key(path) not in owned:
-                leftovers.staged.append(path)
-    leftovers.gone.extend(row.path for row in rows if row.path and not Path(row.path).is_file())
+    if read or rekordbox_paths is not None:
+        for path in lane_files(config) if files is None else files:
+            if path_key(path) not in row_paths and path.resolve() not in owned:
+                leftovers.lane.append(path)
+    leftovers.staged.extend(sorted(sweep.find(config, owned=owned).all))
+    leftovers.gone.extend(path for path in paths if not Path(path).is_file())
     return leftovers

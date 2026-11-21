@@ -33,6 +33,7 @@ class FakeTarget:
 
 class FakeJob:
     def __init__(self) -> None:
+        self.id = "fake-job"
         self.finished = False
         self.written = 0
 
@@ -128,16 +129,20 @@ def test_an_import_that_received_nothing_leaves_the_run_open(tmp_path, monkeypat
     assert not job.finished()
 
 
-def test_a_traktor_plan_that_changes_nothing_did_not_run(monkeypatch):
+def test_a_traktor_plan_that_changes_nothing_did_not_run(monkeypatch, tmp_path):
     """The tool prints its plan whether or not it has anything to do, so a plan of zeros is not a target
     that received the run."""
     from music_agent import traktor
 
+    config = replace(DEFAULTS, state_root=tmp_path)
     monkeypatch.setattr(traktor, "sync", lambda config, log=print: "0 to repoint · 0 to add")
-    assert exporting.Traktor().import_run(DEFAULTS, FakeJob()).ran is False
+    assert exporting.Traktor().import_run(config, FakeJob()).ran is False
+
+    monkeypatch.setattr(traktor, "sync", lambda config, log=print: "0 to repoint")
+    assert exporting.Traktor().import_run(config, FakeJob()).ran is False
 
     monkeypatch.setattr(traktor, "sync", lambda config, log=print: "2 to repoint · 0 to add")
-    assert exporting.Traktor().import_run(DEFAULTS, FakeJob()).ran is True
+    assert exporting.Traktor().import_run(config, FakeJob()).ran is True
 
 
 def test_library_rows_come_from_reading_targets_only(registry):

@@ -78,14 +78,11 @@ class ImportPlan:
         return " · ".join(parts) or "no tagged files"
 
 
-def delivery_records(job: state.Job) -> list[state.Record]:
+def delivery_records(job: state.Job, *, records: list[state.Record] | None = None,
+                     work_ids: dict[int, str] | None = None) -> list[state.Record]:
     """One record per work: a work downloaded once is delivered once, however many memberships asked."""
-    eligible = {state.TAGGED, state.IMPORTED, state.FOUND_IN_LIBRARY}
-    try:
-        records = job.execution().records()
-    except AttributeError:
-        records = job.records()
-    return [record for record in records if record.status in eligible]
+    return [record for record in job.execution().records(records=records, work_ids=work_ids)
+            if record.status in state.FINISHED]
 
 
 def is_running() -> bool:
@@ -96,7 +93,7 @@ def is_running() -> bool:
 
 
 @contextmanager
-def database(_config: Config):
+def database(_config: Config | None = None):
     """The rekordbox database, open for the length of the block.
 
     Every verb that touches the collection goes through here, so the open, the close and the error a failed
@@ -126,7 +123,7 @@ def database_path(db) -> Path | None:
     return Path(found) if found else None
 
 
-def plan(config: Config, job: state.Job) -> ImportPlan:
+def plan(config: Config, job: state.Job, *, records: list[state.Record] | None = None) -> ImportPlan:
     """Read the collection and describe this job's actionable files without committing."""
     if is_running():
         raise NotClosed("rekordbox is running — close it before reviewing or importing tracks")
@@ -136,8 +133,8 @@ def plan(config: Config, job: state.Job) -> ImportPlan:
         if source is None:
             raise ImportFailed("pyrekordbox did not report the master database path")
         planned = ImportPlan(str(source), _collection_fingerprint(source))
-        known_paths = _known_paths(db.get_content())
-        for record in delivery_records(job):
+        known_paths = _content_paths(db)
+        for record in delivery_records(job) if records is None else records:
             path = Path(record.local_path)
             if not path.is_file():
                 planned.failed[record.idx] = f"the file is gone: {path}"
@@ -165,12 +162,12 @@ def _path_key(path: Path) -> str:
     return os.path.normcase(os.path.abspath(path))
 
 
-def _known_paths(rows) -> set[str]:
-    return {
-        _path_key(Path(row.FolderPath))
-        for row in rows
-        if getattr(row, "FolderPath", None)
-    }
+def _content_paths(db) -> dict[str, object]:
+    paths = {}
+    for row in db.get_content():
+        if getattr(row, "FolderPath", None) and not getattr(row, "rb_local_deleted", 0):
+            paths.setdefault(_path_key(Path(row.FolderPath)), row)
+    return paths
 
 
 def _collection_fingerprint(source: Path) -> tuple[tuple[str, int | None, int | None], ...]:
@@ -207,7 +204,7 @@ def backup(db) -> Path | None:
     return target
 
 
-def file_columns(path: Path) -> dict:
+def file_columns(path: Path, *, sound: lanes.Sound | None = None) -> dict:
     """A row's file-derived columns, in rekordbox's own units: `BitRate` is kbps and `FileSize` bytes.
 
     Measured against the library rather than guessed. The suffix maps onto pyrekordbox's `FileType` member
@@ -215,7 +212,8 @@ def file_columns(path: Path) -> dict:
     """
     from pyrekordbox.db6.tables import FileType
 
-    sound = lanes.sound_of(path)
+    if sound is None:
+        sound = lanes.sound_of(path)
     columns: dict = {"FileNameL": path.name, "FileSize": path.stat().st_size}
     member = getattr(FileType, path.suffix.lstrip(".").upper(), None)
     if member is not None:
@@ -231,21 +229,26 @@ def file_columns(path: Path) -> dict:
     return columns
 
 
-def find_or_create(rows, create, name: str):
-    """The row for a name, minted only when the collection does not already have it.
-
-    pyrekordbox's `add_*` helpers refuse a name that already exists, so every relation is looked up before it
-    is minted — otherwise the first House track would fail on the collection's own House row.
-    """
-    wanted = name.strip().casefold()
-    if wanted:
+def collection_names(db) -> dict[str, dict]:
+    names = {}
+    for kind, rows in (("artist", db.get_artist()), ("album", db.get_album()),
+                       ("label", db.get_label()), ("genre", db.get_genre())):
+        entries = {}
         for row in rows:
-            if row.Name and row.Name.strip().casefold() == wanted:
-                return row
-    return create(name.strip())
+            if row.Name:
+                entries.setdefault(row.Name.strip().casefold(), row)
+        names[kind] = entries
+    return names
 
 
-def add(db, record: state.Record) -> object:
+def _find_or_create(rows: dict, create, name: str):
+    wanted = name.strip().casefold()
+    if wanted not in rows:
+        rows[wanted] = create(name.strip())
+    return rows[wanted]
+
+
+def add(db, record: state.Record, *, names: dict[str, dict] | None = None) -> object:
     """One tagged track into the collection, and the row it became.
 
     The row is built from the file's **own tags** rather than the record, and carries title, artist, album,
@@ -259,23 +262,17 @@ def add(db, record: state.Record) -> object:
         raise ImportFailed(f"the collection cannot point at {path.suffix.lower() or 'an extensionless file'}"
                            f" — {path}")
 
-    written = tag.read(path)
-    columns = file_columns(path)
-    title = written.title or record.title or path.stem
-    artist = written.artist or record.artist
-    genre = written.genre or record.genre
-    year = written.year.strip()
+    from mutagen import File as MutagenFile
 
-    # A relation takes a row or an id, never a name: a bare name string dies inside SQLAlchemy.
-    relations = {}
-    if artist:
-        relations["ArtistID"] = find_or_create(db.get_artist(), db.add_artist, artist).ID
-    if written.album:
-        relations["AlbumID"] = find_or_create(db.get_album(), db.add_album, written.album).ID
-    if written.label:
-        relations["LabelID"] = find_or_create(db.get_label(), db.add_label, written.label).ID
-    if genre:
-        relations["GenreID"] = find_or_create(db.get_genre(), db.add_genre, genre).ID
+    audio = MutagenFile(path)
+    written = tag.read_tags(getattr(audio, "tags", None))
+    sound = lanes.sound_from(getattr(audio, "info", None))
+    columns = file_columns(path, sound=sound)
+    title = written.title or record.title or path.stem
+    year = written.year.strip()
+    if names is None:
+        names = collection_names(db)
+    relations = _relations(db, names, record, written)
 
     row_fields = {name: columns[name] for name in ("Length", "SampleRate", "BitRate", "BitDepth")
                   if name in columns}
@@ -288,7 +285,16 @@ def add(db, record: state.Record) -> object:
     )
 
 
-def repoint(db, record: state.Record, log) -> bool:
+def _relations(db, names: dict[str, dict], record: state.Record, written: tag.Tags) -> dict:
+    values = (("artist", written.artist or record.artist, db.add_artist, "ArtistID"),
+              ("album", written.album, db.add_album, "AlbumID"),
+              ("label", written.label, db.add_label, "LabelID"),
+              ("genre", written.genre or record.genre, db.add_genre, "GenreID"))
+    return {column: _find_or_create(names[kind], create, value).ID
+            for kind, value, create, column in values if value}
+
+
+def repoint(db, record: state.Record, log, *, paths: dict[str, object] | None = None) -> bool:
     """Point the row that already holds this track at the new file.
 
     A plain write of the path, deliberately **not** `update_content_path`: that helper also moves the track's
@@ -297,7 +303,10 @@ def repoint(db, record: state.Record, log) -> bool:
     stay with the track. The file-derived columns are rewritten too, because rekordbox reads *those* for the
     bitrate and the size it displays.
     """
-    row = next((one for one in db.get_content() if one.FolderPath == record.replaces), None)
+    if paths is None:
+        paths = _content_paths(db)
+    old_key = _path_key(Path(record.replaces))
+    row = paths.get(old_key)
     if row is None:
         return False
     path = Path(record.local_path)
@@ -308,13 +317,15 @@ def repoint(db, record: state.Record, log) -> bool:
     row.FolderPath = str(path)
     for column, value in file_columns(path).items():
         setattr(row, column, value)
+    del paths[old_key]
+    paths[_path_key(path)] = row
     log(f"      it replaces {Path(record.replaces).name}")
     return True
 
 
 def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=print,
         record_indices: set[int] | list[int] | tuple[int, ...] | None = None,
-        stop_mcp: bool = True) -> Summary:
+        stop_mcp: bool = True, records: list[state.Record] | None = None) -> Summary:
     """Every tagged track into the collection, behind one backup and two commits — see the comment on the
     first commit for why the upgrades and the additions cannot share one."""
     # A `rekordbox-mcp` another harness left running is a second writer on this file. It is that harness's
@@ -326,13 +337,11 @@ def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=pr
         raise NotClosed("rekordbox is running, and pyrekordbox will not commit while it is — close it, "
                         "then run this again")
 
-    records = job.records()
-    if record_indices is None:
-        tagged = [record for record in records if record.status == state.TAGGED]
-    else:
-        selected = set(record_indices)
-        eligible = {state.TAGGED, state.IMPORTED, state.FOUND_IN_LIBRARY}
-        tagged = [record for record in records if record.idx in selected and record.status in eligible]
+    if records is None:
+        records = delivery_records(job)
+    selected = set(record_indices) if record_indices is not None else None
+    tagged = [record for record in records
+              if (record.status == state.TAGGED if selected is None else record.idx in selected)]
     summary = Summary()
     if not tagged:
         log("nothing to import: no track in this run has been tagged yet")
@@ -345,6 +354,7 @@ def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=pr
 
     replaced: list[Path] = []
     pending: list[state.Record] = []
+    paths = _content_paths(db) if any(record.replaces for record in tagged) else {}
 
     def failed(record: state.Record, error: Exception) -> None:
         record.notes = str(error)
@@ -353,7 +363,7 @@ def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=pr
         log(f"[{record.idx}] {record.label}: {error}")
 
     for record in tagged:
-        if record.replaces and Path(record.replaces) == Path(record.local_path):
+        if record.replaces and _path_key(Path(record.replaces)) == _path_key(Path(record.local_path)):
             # Nothing should produce a row that already points at the file this run made: repoint would
             # write the path back and the delete below would then remove the file, leaving the row pointing
             # at nothing. Refused rather than trusted.
@@ -366,7 +376,7 @@ def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=pr
             pending.append(record)
             continue
         try:
-            repointed = repoint(db, record, log)
+            repointed = repoint(db, record, log, paths=paths)
         except ImportFailed as error:
             failed(record, error)
             continue
@@ -388,9 +398,10 @@ def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=pr
     if replaced:
         db.commit(autoinc=True)
 
+    names = collection_names(db) if pending else None
     for record in pending:
         try:
-            add(db, record)
+            add(db, record, names=names)
         except ImportFailed as error:
             failed(record, error)
             continue
@@ -401,16 +412,20 @@ def run(config: Config, job: state.Job, *, db, backup_first: bool = True, log=pr
             summary.already.append(record.idx)
             job.append_event("already_imported", idx=record.idx, path=record.local_path)
             log(f"[{record.idx}] {record.label}: already in the collection")
+            if record.replaces and Path(record.local_path).is_file():
+                replaced.append(Path(record.replaces))
             continue
         record.status = state.IMPORTED
         record.notes = ""
         summary.imported.append(record.idx)
         job.append_event("imported", idx=record.idx, path=record.local_path)
         log(f"[{record.idx}] {record.label}: imported")
+        if record.replaces:
+            replaced.append(Path(record.replaces))
 
     if pending:
         db.commit(autoinc=True)             # the additions, likewise
-    job.write_records(records)              # after the commits, so a crash cannot lose it
+    job.write_records(tagged)
 
     for old in replaced:
         # The replaced file goes only after the commit, so nothing is deleted while the collection still

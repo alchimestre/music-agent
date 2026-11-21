@@ -21,35 +21,36 @@ class AgentAPI:
         self._plans: dict[str, list] = {}
         self._active: set[str] = set()
         self._guard = threading.Lock()
-        self._launch_guard = threading.Lock()
         self._closed = False
 
     def run_playlist(self, source: str) -> dict:
         source = self._validate_source(source)
-        with self._launch_guard, self._guard:
+        with self._guard:
             if self._closed:
                 raise RuntimeError("AgentAPI is closed.")
             if self._active:
-                raise RuntimeError("A playlist pass is already active.")
-            job = state.create(self.config, "Spotify playlist", records=[])
+                raise RuntimeError("A playlist job is already active.")
+            with operations.lock(self.config.state_root):
+                job = spotify_source.admit(self.config, source)
             self._active.add(job.id)
-        thread = threading.Thread(target=self._run_pass, args=(job, source), daemon=True)
-        try:
-            thread.start()
-        except BaseException:
-            with self._guard:
+            thread = threading.Thread(target=self._run_pass, args=(job,), daemon=True)
+            try:
+                thread.start()
+            except BaseException:
                 self._active.discard(job.id)
-            raise
-        return {"job_id": job.id, "status": "started"}
+                raise
+            return {"job_id": job.id, "status": "started"}
 
     def pass_status(self, job_id: str) -> dict:
-        job = spotify_workflow.submission(self.config, job_id)
+        job = operations.find_job(self.config, job_id)
         report = receipts.build_status(self.config, job)
         progress = self._progress(job)
         stage = report.get("stage") or progress.get("stage") or "pending"
         fulfilled = bool(report.get("complete"))
-        terminal = self._terminal(job, fulfilled)
-        status = "running" if progress else "pending"
+        with self._guard:
+            active = job.id in self._active
+        terminal = not active and self._terminal(job, fulfilled)
+        status = "running" if active or progress else "pending"
         if terminal:
             status = "fulfilled" if fulfilled else "failed" if report.get("blocker") else "finished"
         counts = report.get("counts", {})
@@ -80,34 +81,23 @@ class AgentAPI:
         }
 
     def deliver_pass(self, job_id: str, apply: bool = False) -> dict:
-        job = spotify_workflow.submission(self.config, job_id)
+        job = operations.find_job(self.config, job_id)
         if not apply:
             plans = deliveries.delivery_plans(self.config, job)
             self._plans[job.id] = plans
             return {"job_id": job.id, "preview": True, "targets": self._plan_reports(plans)}
-        approved = self._plans.get(job.id)
-        if approved is None:
-            raise ValueError("Preview destination changes before delivering.")
         with operations.lock(self.config.state_root), store.writer_lock(self.config.state_root):
-            current = deliveries.delivery_plans(self.config, job)
-            if current != approved:
-                self._plans.pop(job.id, None)
-                raise ValueError("Delivery preview is stale; request a new preview.")
-            outcomes = deliveries.deliver(self.config, job, approved, emit=lambda stage, message: None)
-            self._plans.pop(job.id, None)
-            result = {"job_id": job.id, "preview": False,
-                      "outcomes": [self._outcome_report(outcome) for outcome in outcomes]}
-            self._write_operation_outcome(job, result)
-            previous = receipts.build_status(self.config, job)
-            receipts.write(self.config, job, stage=previous.get("stage", "pending"),
-                           blocker=previous.get("blocker", ""),
-                           stop_reason=previous.get("stop_reason", ""))
-            return result
+            approved = self._plans.pop(job.id, None)
+            if approved is None:
+                raise ValueError("Preview destination changes before delivering.")
+            outcomes = deliveries.deliver(self.config, job, approved, raise_stale=True)
+            reports = operations.record_delivery(self.config, job, outcomes, plans=approved)
+            return {"job_id": job.id, "preview": False, "outcomes": reports}
 
     def cleanup_playlist(self, job_id: str, scope: str = "acquired", apply: bool = False) -> dict:
         if scope not in {"acquired", "delivered"}:
             raise ValueError("Cleanup scope must be 'acquired' or 'delivered'.")
-        job = spotify_workflow.submission(self.config, job_id)
+        job = operations.find_job(self.config, job_id)
         report = spotify_reconcile.reconcile(self.config, job, scope=scope, apply=apply)
         result = {"job_id": job.id, "scope": scope, "apply": apply,
                   "removed": report.get("removed", 0) if apply else 0,
@@ -124,27 +114,22 @@ class AgentAPI:
         with self._guard:
             self._closed = True
 
-    def _run_pass(self, job: state.Job, source: str) -> None:
+    def _run_pass(self, job: state.Job) -> None:
         try:
-            (job.root / "progress.json").write_text(json.dumps(
-                {"job_id": job.id, "stage": "resolve", "message": "Resolving Spotify playlist."}) + "\n",
-                encoding="utf-8")
-            with operations.lock(self.config.state_root):
-                job = spotify_source.admit(self.config, source, job_id=job.id)
-                spotify_workflow.run(self.config, job, emit=lambda event: None)
+            spotify_workflow.run(self.config, job)
         except Exception as error:
             message = str(error) or type(error).__name__
             try:
                 job.append_event("operation_finished", complete=False, stage="failed",
                                  blocker=message, stop_reason="failed")
-                (job.root / "progress.json").write_text(json.dumps(
-                    {"job_id": job.id, "stage": "failed", "message": message[:512]}) + "\n",
-                    encoding="utf-8")
+                operations.write_json(job.root / "progress.json",
+                                      {"job_id": job.id, "stage": "failed", "message": message[:512]})
             except Exception:
-                logging.exception("Could not persist failed pass status for job %s", job.id)
+                logging.exception("Could not persist failure for job %s", job.id)
         finally:
             with self._guard:
                 self._active.discard(job.id)
+
     @staticmethod
     def _validate_source(source: str) -> str:
         if not isinstance(source, str) or not source.strip():
@@ -201,13 +186,3 @@ class AgentAPI:
         return [{"target": plan.target, "destination": plan.destination, "changes": plan.changes,
                  "requires_confirmation": plan.requires_confirmation, "error": plan.error}
                 for plan in plans]
-
-    @staticmethod
-    def _outcome_report(outcome) -> dict:
-        return {"target": outcome.target, "success": outcome.success, "message": outcome.message,
-                "artifacts": [{"idx": item.idx, "status": item.status, "message": item.message}
-                              for item in outcome.artifacts]}
-
-    @staticmethod
-    def _write_operation_outcome(job: state.Job, result: dict) -> None:
-        job.append_event("delivery_finished", outcomes=result["outcomes"])

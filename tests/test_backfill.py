@@ -123,7 +123,7 @@ def test_a_file_a_row_already_points_at_is_not_a_candidate(tmp_path):
 # --- against a copy of the real collection ----------------------------------------------------------------
 
 
-def test_a_row_is_minted_in_a_copy_of_the_real_collection(tmp_path):
+def test_a_row_is_minted_in_a_copy_of_the_real_collection(tmp_path, request):
     """The mint path against the real schema, which is the only way to know it works rather than looks right:
     the file's own metadata becomes a row, and a second pass finds nothing left to do."""
     from pyrekordbox import Rekordbox6Database
@@ -135,19 +135,21 @@ def test_a_row_is_minted_in_a_copy_of_the_real_collection(tmp_path):
     work = tmp_path / "master.db"
     shutil.copy2(live, work)
     database = Rekordbox6Database(work)
+    request.addfinalizer(database.close)
 
     config = lanes(tmp_path)
     path = aiff(config.lossless / "Backfill Test - Nothing Like It.aiff")
     tag.write(path, tag.Tags(title="Nothing Like It", artist="Backfill Test", album="A Test"))
 
     summary = backfill.plan(config, db=database)
-    assert [one.path for one in summary.addable()] == [path]
+    [seeded] = summary.addable()
+    assert seeded.path == path
 
     def quiet(*args, **kwargs):
         return None
 
-    backfill.mint(config, summary, db=database, log=quiet)
-    assert [one.path for one in summary.minted] == [path]
+    minted = backfill.mint(config, backfill.Summary(candidates=[seeded]), db=database, log=quiet)
+    assert [one.path for one in minted.minted] == [path]
 
     row = database.session.execute(text(
         "select Title, FolderPath, FileNameL, Length from djmdContent where FolderPath = :p"),

@@ -13,19 +13,16 @@ import time
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from . import acquire
 from . import config as config_module
 from . import deliveries
 from . import receipts
 from . import exporting
-from . import genre
+from . import passes
 from . import importing
 from . import library
 from . import parsing
-from . import peers
 from . import playlists
 from . import process
-from . import reference
 from . import review
 from .rules import hms
 from . import slsk
@@ -47,7 +44,7 @@ def _run(config: config_module.Config, args: argparse.Namespace) -> int:
     """
     from types import SimpleNamespace
 
-    _stage("run", "one tracklist, all the way to the configured collections")
+    passes.stage("run", "one tracklist, all the way to the configured collections")
 
     job = _start(config, args) if args.tracks is not None else _job(config, args)
     if job is None:
@@ -65,8 +62,8 @@ def _run(config: config_module.Config, args: argparse.Namespace) -> int:
     failed = 0
     for number in range(1, max(1, args.passes) + 1):
         try:
-            summary = _one_pass(config, job, retry=number > 1, attempt=number)
-        except ACQUIRE_ERRORS as error:
+            summary = passes.one_pass(config, job, retry=number > 1, attempt=number)
+        except passes.ACQUIRE_ERRORS as error:
             # The passes are abandoned, not the run. Every file they brought in is already written to the run
             # as it went, so what did arrive is still worth placing — ending here is how one stage's bad
             # minute left eighteen downloaded files in staging with nothing pointing at them.
@@ -83,9 +80,8 @@ def _run(config: config_module.Config, args: argparse.Namespace) -> int:
             print(f"stopped at {stage}", file=sys.stderr)
             return code
 
-    _stage("sweep", "staging")
-    leftovers = sweep.find(config)
-    removed = sweep.clear(sweep.Leftovers(leftovers.partial, ()), log=print)
+    passes.stage("sweep", "staging")
+    removed = passes.clear_partial_transfers(config)
     print(f"{removed} interrupted transfer(s) cleared" if removed else "nothing to clear")
 
     # The code is dropped on purpose: work left for a person is not a failed run, and the pass ends normally
@@ -107,7 +103,8 @@ def _build_parser() -> argparse.ArgumentParser:
     # shared arguments are suppress-default and read with getattr.
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--config", type=Path, default=argparse.SUPPRESS, metavar="PATH",
-                        help="the config file to read (default: config.toml at the repo root)")
+                        help="the config file to read (default: config.toml at the repo root, else "
+                             "~/.config/music-agent/config.toml)")
     common.add_argument("--job", default=argparse.SUPPRESS, metavar="ID",
                         help="a run by id; by default the newest unfinished one, else the newest")
 
@@ -235,8 +232,9 @@ def _build_parser() -> argparse.ArgumentParser:
     spotify_reconcile = spotify_commands.add_parser(
         "reconcile", parents=[common], help="preview source removal from verified completion receipts")
     spotify_reconcile.add_argument("--apply", action="store_true", help="apply the verified removal")
-    spotify_reconcile.add_argument("--scope", choices=("acquired", "delivered"), default="delivered",
-                                    help="limit removal to newly acquired tracks or all delivered tracks")
+    spotify_reconcile.add_argument("--scope", choices=("acquired", "delivered"), default="acquired",
+                                    help="limit removal to newly acquired tracks, or include delivered tracks "
+                                         "the run only found already held")
 
     return parser
 
@@ -257,10 +255,11 @@ def _import(config: config_module.Config, args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 1
 
-    _stage("import", f"{' → '.join(target.name for target in targets)} · run {job.id}")
+    passes.stage("import", f"{' → '.join(target.name for target in targets)} · run {job.id}")
     try:
         results = exporting.run(config, job, targets=targets, backup_first=not args.no_backup)
-        verification_failures = _refresh_import_receipts(config, job, targets)
+        ran = [target for target, result in zip(targets, results) if result.ran]
+        verification_failures = _refresh_import_receipts(config, job, ran)
     except importing.NotClosed as error:
         print(error, file=sys.stderr)
         return 1
@@ -284,13 +283,9 @@ def _import(config: config_module.Config, args: argparse.Namespace) -> int:
 
 
 def _refresh_import_receipts(config, job, targets) -> int:
-    outcomes = deliveries.refresh_receipts(config, job, [target.name for target in targets])
-    job.append_event("delivery_finished", outcomes=[
-        {"target": outcome.target, "success": outcome.success} for outcome in outcomes
-    ])
-    receipt = receipts.build_status(config, job)
-    receipts.write(config, job, stage=receipt.get("stage", "pending"),
-                   blocker=receipt.get("blocker", ""), stop_reason=receipt.get("stop_reason", ""))
+    plans = deliveries.delivery_plans(config, job)
+    outcomes = deliveries.refresh_receipts(config, job, [target.name for target in targets], plans=plans)
+    operations.record_delivery(config, job, outcomes, plans=plans)
     failures = [outcome for outcome in outcomes if not outcome.success]
     for outcome in failures:
         print(f"{outcome.target}: delivery verification failed: {outcome.message}", file=sys.stderr)
@@ -333,7 +328,7 @@ def _dedupe(config: config_module.Config, args: argparse.Namespace) -> int:
     except library.Unreadable as error:
         print(error, file=sys.stderr)
         return 1
-    except duplicates.NotClosed as error:
+    except importing.NotClosed as error:
         print(error, file=sys.stderr)
         return 1
 
@@ -369,7 +364,7 @@ def _backfill(config: config_module.Config, args: argparse.Namespace) -> int:
     except library.Unreadable as error:
         print(error, file=sys.stderr)
         return 1
-    except backfill.NotClosed as error:
+    except importing.NotClosed as error:
         print(error, file=sys.stderr)
         return 1
 
@@ -408,36 +403,6 @@ def _target(config: config_module.Config, args: argparse.Namespace, action: str)
     return job
 
 
-def _tools(config: config_module.Config) -> process.Tools:
-    """The stage tools, over the collection's own genre vocabulary.
-
-    The vocabulary is the collection's own names plus the families music-tagger defines, and the mapping onto
-    them is that project's taxonomy — read here rather than kept a second time, so the two cannot drift.
-    """
-    shelf = library.open(config)
-    families = genre.families(config.taxonomy)
-    if not families:
-        print(f"no genre taxonomy at {config.taxonomy or '(unset)'} — genres stay blank; point "
-              f"[genres] taxonomy in config.toml at music-tagger's taxonomy.json", file=sys.stderr)
-    return process.Tools.live(config, vocabulary=genre.vocabulary(shelf.genres(), families),
-                              mappings=genre.table(config.taxonomy))
-
-
-# Everything a pass can fail on that is worth one line and a stop: credentials, a port someone else holds,
-# a daemon that will not answer, a daemon that stopped answering, an unreadable collection or peer ledger.
-ACQUIRE_ERRORS = (slsk.MissingCredential, slsk.PortBusy, slsk.DaemonError, acquire.ServerStuck,
-                  library.Unreadable, peers.Unreadable, exporting.UnknownTarget)
-
-
-def _stage(name: str, detail: str = "", *, stream=None) -> None:
-    """One line saying which stage is running, and on what.
-
-    A run is several stages long and each one used to start silently, so a long run read as if the previous
-    stage were still going. This is the line that says where it is.
-    """
-    print(f"\n── {name}" + (f" · {detail}" if detail else ""), file=stream)
-
-
 def _report(summary, job: state.Job, failures: int = 0) -> None:
     """The two lines a stage ends with: what it came to, and where to look when something needs a retry."""
     print()
@@ -452,12 +417,12 @@ def _process(config: config_module.Config, args: argparse.Namespace) -> int:
         return 1
 
     try:
-        tools = _tools(config)
+        tools = passes.tools(config)
     except (slsk.MissingCredential, library.Unreadable, exporting.UnknownTarget) as error:
         print(error, file=sys.stderr)
         return 1
 
-    _stage("process", f"run {job.id} · convert, place, normalize, tag")
+    passes.stage("process", f"run {job.id} · convert, place, normalize, tag")
     summary = process.run(config, job.execution(), tools=tools)
     _report(summary, job, len(summary.failed))
     if summary.ungenred:
@@ -473,12 +438,12 @@ def _retag(config: config_module.Config, args: argparse.Namespace) -> int:
         return 1
 
     try:
-        tools = _tools(config)
+        tools = passes.tools(config)
     except (slsk.MissingCredential, library.Unreadable, exporting.UnknownTarget) as error:
         print(error, file=sys.stderr)
         return 1
 
-    _stage("retag", f"run {job.id} · the genre, re-derived from the files")
+    passes.stage("retag", f"run {job.id} · the genre, re-derived from the files")
     summary = process.retag(job, tools=tools)
     _report(summary, job, len(summary.failed))
     return 0
@@ -514,46 +479,11 @@ def _start(config: config_module.Config, args: argparse.Namespace) -> state.Job 
     except (playlists.PlaylistError, ValueError) as error:
         print(error, file=sys.stderr)
         return None
-    job = state.create(config, args.name or preview.name)
-    job.write_records(preview.records)
-    job.append_event("submission", source=preview.source)
+    with store.writer_lock(config.state_root):
+        job = state.create(config, args.name or preview.name, records=preview.records)
+        job.append_event("submission", source=preview.source)
     print(f"run {job.id} · {len(preview.records)} tracks · staging {config.staging}")
     return job
-
-
-def _one_pass(config: config_module.Config, job: state.Job, *, retry: bool,
-              attempt: int = 1, log=print, stream=None, progress=None) -> acquire.Summary:
-    """One pass, everything it needs and nothing else: the daemon, the shares, the records.
-
-    A pass that stops is the pass falling short, not a reason to start another: what it brought in is already
-    written to the run, the stages after it still place those files, and the failing records are marked for a
-    later run. Asking the same peers again is `--passes`, and a person asks for it.
-    """
-    daemon = slsk.Daemon(config)
-    # The shelf is read before the socket is opened: the database takes seconds, and while the client is not
-    # reading the daemon fills the socket with upload events and drops the connection on its own write.
-    shelf = library.open(config)
-    # The daemon is started only when nothing answers on the socket, and the port sweep is part of starting
-    # it: a client left on the port by an earlier run answers the same account, and every search then comes
-    # back empty — the pass would spend its whole tracklist learning nothing.
-    daemon.ensure()
-    _ready(daemon, config)
-    _stage("acquire", f"{len(job.records())} tracks · pass {attempt}"
-                      f"{' · retry' if retry else ''}", stream=stream)
-    return acquire.run(config, job.execution(), daemon, reference.lookup(config),
-                       library=shelf, retry=retry, log=log, stream=stream, progress=progress)
-
-
-def _ready(daemon: slsk.Daemon, config: config_module.Config) -> None:
-    """Point the daemon at this pass: staging, the two shared lanes, and a session to search with."""
-    config.staging.mkdir(parents=True, exist_ok=True)
-    daemon.set_dir(config.staging)
-    shared = daemon.share(slsk.share_paths(config))
-    if int(shared.get("files") or 0) == 0:
-        # Without shared files peers read the account as a leecher and queue or ban it. The two lanes are
-        # handed over above; this says when the daemon did not take them.
-        print("the daemon reports no shared files — peers read that as a leecher and may queue or ban",
-              file=sys.stderr)
 
 
 def _acquire(config: config_module.Config, args: argparse.Namespace) -> int:
@@ -567,8 +497,8 @@ def _acquire(config: config_module.Config, args: argparse.Namespace) -> int:
             return 1
 
     try:
-        summary = _one_pass(config, job, retry=args.retry)
-    except ACQUIRE_ERRORS as error:
+        summary = passes.one_pass(config, job, retry=args.retry)
+    except passes.ACQUIRE_ERRORS as error:
         print(error, file=sys.stderr)
         return 1
 
@@ -610,7 +540,7 @@ def _queue(job: state.Job) -> state.Queue:
     for heading, tracks in (
         ("not searched — no pass has reached them", waiting.not_searched),
         ("the network offered nothing — a search answered and held no files", waiting.nothing_offered),
-        ("with nothing usable — files were offered and every one was refused", waiting.refused),
+        ("with nothing usable — files were offered and every one was ruled out", waiting.nothing_usable),
     ):
         if not tracks:
             continue
@@ -756,9 +686,8 @@ def _review(config: config_module.Config, args: argparse.Namespace) -> int:
 def _genres(config: config_module.Config, job: state.Job) -> None:
     """Tracks the taxonomy had nothing for. Reported and counted, never asked about: the vocabulary is
     music-tagger's, and a name it does not know is a line missing there, not a question for a person."""
-    # A run ends at `imported`: a set of only the half-way statuses reports nothing on a finished one.
     ungenred = [record for record in job.records()
-                if record.status in {state.NORMALIZED, state.TAGGED, state.IMPORTED} and not record.genre]
+                if record.status in state.FINISHED and not record.genre]
     if not ungenred:
         return
     print()
@@ -782,8 +711,6 @@ def _status(config: config_module.Config, args: argparse.Namespace) -> int:
         print(f"no runs yet under {config.state_root}")
         return 0
     if getattr(args, "json", False):
-        from . import receipts
-
         print(json.dumps(receipts.build_status(config, job), ensure_ascii=False))
         return 0
 
@@ -794,11 +721,11 @@ def _status(config: config_module.Config, args: argparse.Namespace) -> int:
     tracks = summary["tracks"]
     print(f"run {job.id}")
     print(f"  {tracks} track{'s' if tracks != 1 else ''} · {summary['in_review']} in review · "
-          f"{summary['settled']} settled · {summary['nothing_usable']} with nothing usable")
-    if summary["nothing_usable"]:
+          f"{summary['settled']} settled · {summary['without_offer']} without an offer")
+    if summary["without_offer"]:
         print(f"    of those: {summary['not_searched']} not searched · "
               f"{summary['nothing_offered']} the network offered nothing · "
-              f"{summary['refused']} every offer refused")
+              f"{summary['nothing_usable']} every offer ruled out")
     if summary["decided"]:
         print(f"  {summary['decided']} settled by hand")
     print(f"  finished: {'yes' if job.finished() else 'no'}")
@@ -952,7 +879,7 @@ def _spotify_operation(config: config_module.Config, args: argparse.Namespace) -
 
     try:
         if args.spotify_command == "reconcile":
-            job = spotify_workflow.submission(config, getattr(args, "job", None))
+            job = operations.find_job(config, getattr(args, "job", None))
             result = spotify_reconcile.reconcile(config, job, apply=args.apply, scope=args.scope)
             print(json.dumps(result, ensure_ascii=False))
             return int(bool(result.get("blocker")))

@@ -59,8 +59,8 @@ def query_for(request: Request) -> str:
 def resolve(request: Request, lookup: Lookup) -> int | None:
     """The reference length in whole seconds, or None when nothing can be pinned down.
 
-    None is a real answer, not a failure: it means review-only, which is always better than a reference
-    that may be the wrong edit.
+    None is a real answer, not a failure: the track is taken Unchecked, which is always better than a
+    reference that may be the wrong edit.
     """
     title = bare_title(request.title)
     if not request.artist.strip() or not title:

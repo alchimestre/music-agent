@@ -9,7 +9,7 @@ LIMITATION = (
 )
 
 
-def reconcile(config, job: state.Job, *, apply: bool = False, scope: str = "delivered") -> dict:
+def reconcile(config, job: state.Job, *, apply: bool = False, scope: str = "acquired") -> dict:
     if scope not in ("acquired", "delivered"):
         raise ValueError("scope must be 'acquired' or 'delivered'")
     with operations.lock(config.state_root):
@@ -26,7 +26,12 @@ def reconcile(config, job: state.Job, *, apply: bool = False, scope: str = "deli
                 report["blocker"] = reason
                 return report
             receipt = receipts.build(config, job)
-            acquired, reason = _acquired_indices(receipt, entries) if scope == "acquired" else (set(), None)
+            by_index, reason = _records_by_index(receipt)
+            if reason:
+                report["blocker"] = reason
+                return report
+            acquired, reason = (_acquired_indices(receipt, entries, by_index)
+                                if scope == "acquired" else (set(), None))
             if reason:
                 report["blocker"] = reason
                 return report
@@ -56,7 +61,7 @@ def reconcile(config, job: state.Job, *, apply: bool = False, scope: str = "deli
                 return report
             removed = _completed_uris(events)
             entries = [entry for entry in entries if entry["uri"] not in removed]
-            eligible, occurrences, reason = _eligible(entries, receipt, current, config, scope, acquired)
+            eligible, occurrences, reason = _eligible(entries, by_index, current, config, scope, acquired)
             report["eligible_uris"] = eligible
             report["eligible_occurrences"] = occurrences
             report["skipped_held"] = sum(entry["idx"] not in acquired for entry in entries) if scope == "acquired" else 0
@@ -119,23 +124,14 @@ def _valid_entries(source: dict) -> tuple[list[dict], str | None]:
     return entries, None
 
 
-def _acquired_indices(receipt: dict, entries: list[dict]) -> tuple[set[int], str | None]:
-    acquired = receipt.get("acquired") if isinstance(receipt, dict) else None
-    records = receipt.get("records") if isinstance(receipt, dict) else None
-    if not isinstance(acquired, list) or not isinstance(records, list):
+def _acquired_indices(receipt: dict, entries: list[dict], by_index: dict[int, dict]) -> tuple[set[int], str | None]:
+    acquired = receipt.get("acquired")
+    if not isinstance(acquired, list):
         return set(), "The acquisition receipt is unavailable."
     entry_indices = {entry["idx"] for entry in entries}
     if (any(not isinstance(idx, int) or isinstance(idx, bool) for idx in acquired)
             or len(acquired) != len(set(acquired)) or not set(acquired) <= entry_indices):
         return set(), "The acquisition receipt does not match persisted source membership."
-    by_index = {}
-    for record in records:
-        if (not isinstance(record, dict) or not isinstance(record.get("idx"), int)
-                or isinstance(record.get("idx"), bool)):
-            continue
-        if record["idx"] in by_index:
-            return set(), "The completion receipt contains duplicate record identities."
-        by_index[record["idx"]] = record
     for entry in entries:
         record = by_index.get(entry["idx"])
         if (not record or record.get("uri") != entry["uri"]
@@ -144,23 +140,12 @@ def _acquired_indices(receipt: dict, entries: list[dict]) -> tuple[set[int], str
     return set(acquired), None
 
 
-def _eligible(entries: list[dict], receipt: dict, current: list[str], config, scope: str,
+def _eligible(entries: list[dict], by_index: dict[int, dict], current: list[str], config, scope: str,
               acquired: set[int]):
     source_counts = Counter(entry["uri"] for entry in entries)
     current_counts = Counter(uri for uri in current if isinstance(uri, str))
     if any(current_counts[uri] != count for uri, count in source_counts.items()):
         return [], [], "Spotify playlist occurrence counts changed since source admission."
-    records = receipt.get("records") if isinstance(receipt, dict) else None
-    if not isinstance(records, list):
-        return [], [], "A completion receipt is unavailable."
-    by_index = {}
-    for record in records:
-        if (not isinstance(record, dict) or not isinstance(record.get("idx"), int)
-                or isinstance(record.get("idx"), bool)):
-            continue
-        if record["idx"] in by_index:
-            return [], [], "The completion receipt contains duplicate record identities."
-        by_index[record["idx"]] = record
     occurrences = []
     unverified = set()
     for entry in entries:
@@ -174,6 +159,22 @@ def _eligible(entries: list[dict], receipt: dict, current: list[str], config, sc
     eligible = sorted(source_counts.keys() - unverified)
     return eligible, [entry for entry in occurrences if entry["uri"] not in unverified], None
 
+
+def _records_by_index(receipt: dict) -> tuple[dict[int, dict], str | None]:
+    records = receipt.get("records") if isinstance(receipt, dict) else None
+    if not isinstance(records, list):
+        return {}, "A completion receipt is unavailable."
+    by_index = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        idx = record.get("idx")
+        if not isinstance(idx, int) or isinstance(idx, bool):
+            continue
+        if idx in by_index:
+            return {}, "The completion receipt contains duplicate record identities."
+        by_index[idx] = record
+    return by_index, None
 
 
 def _delivered(record: dict, config) -> bool:

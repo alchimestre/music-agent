@@ -53,7 +53,7 @@ def from_line(line: str) -> Request | None:
         return None
     artist, separator, title = text.partition(" - ")
     if not separator:
-        # No artist: a white-label or an unnamed edit, which stays review-only rather than guessed at.
+        # No artist: a white-label or an unnamed edit, which no offer is taken for rather than guessed at.
         artist, title = "", text
     if not title.strip():
         return None

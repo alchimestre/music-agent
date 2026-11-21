@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import os
 import threading
 import time
 from pathlib import Path
 
-from . import acquire, deliveries, importing, operations, process, receipts, slsk
-from . import spotify_reconcile, spotify_source, state, store, sweep
+from . import acquire, deliveries, importing, operations, passes, process, receipts, slsk
+from . import spotify_reconcile, spotify_source, state, store
 from .config import Config
 from .parsing import render
 
@@ -23,17 +22,8 @@ def start(config: Config, source: str | None = None, *, job_id: str | None = Non
     if bool(source) == bool(job_id):
         raise ValueError('Give a playlist source or --job, not both.')
     with operations.lock(config.state_root):
-        job = spotify_source.admit(config, source) if source else submission(config, job_id)
+        job = spotify_source.admit(config, source) if source else operations.find_job(config, job_id)
         return _run(config, job, remove_delivered, emit)
-
-
-def submission(config: Config, job_id: str) -> state.Job:
-    if not job_id or Path(job_id).name != job_id or job_id in {'.', '..'}:
-        raise ValueError('Invalid submission identifier.')
-    job = next((item for item in state.all_jobs(config) if item.id == job_id), None)
-    if job is None:
-        raise ValueError(f'No submission named {job_id}.')
-    return job
 
 
 def run(config: Config, job: state.Job, *, remove_delivered: bool = False, emit=None) -> dict:
@@ -51,12 +41,12 @@ def _run(config: Config, job: state.Job, remove_delivered: bool, emit) -> dict:
         stop_reason, blocker = _stages(config, job, monitor)
         if remove_delivered:
             monitor.update('spotify', 'Reconciling verified deliveries with the source playlist.')
-            cleanup = spotify_reconcile.reconcile(config, job, apply=True)
+            cleanup = spotify_reconcile.reconcile(config, job, apply=True, scope='delivered')
             blocker = blocker or cleanup.get('blocker', '')
             if cleanup.get('blocker') and not stop_reason:
                 stop_reason = 'spotify_blocked'
     except KeyboardInterrupt:
-        blocker = 'interrupted; resume this submission with --job'
+        blocker = 'interrupted; resume this job with --job'
         stop_reason = 'user_stopped'
     except Exception as error:
         blocker = str(error) or type(error).__name__
@@ -66,7 +56,7 @@ def _run(config: Config, job: state.Job, remove_delivered: bool, emit) -> dict:
                             blocker=blocker, stop_reason=stop_reason)
     if cleanup is not None:
         report['spotify'] = cleanup
-        _write_json(job.root / 'receipt.json', report)
+        operations.write_json(job.root / 'receipt.json', report)
     if report['complete'] and not blocker and not job.finished():
         job.finish()
     job.append_event('operation_finished', complete=report['complete'], stage=report['stage'],
@@ -76,8 +66,6 @@ def _run(config: Config, job: state.Job, remove_delivered: bool, emit) -> dict:
 
 
 def _stages(config: Config, job: state.Job, monitor: _Monitor) -> tuple[str, str]:
-    from . import cli
-
     _process_audio(config, job, monitor)
     blocker = ''
     stop_reason = ''
@@ -90,9 +78,9 @@ def _stages(config: Config, job: state.Job, monitor: _Monitor) -> tuple[str, str
         monitor.update('acquire', 'Acquiring outstanding requests.')
         try:
             with open(os.devnull, 'w') as stream:
-                cli._one_pass(config, job, retry=bool(job.searched()), log=monitor.log,
-                              stream=stream, progress=monitor.transfer)
-        except cli.ACQUIRE_ERRORS as error:
+                passes.one_pass(config, job, retry=bool(job.searched()), log=monitor.log,
+                                stream=stream, progress=monitor.transfer)
+        except passes.ACQUIRE_ERRORS as error:
             blocker = str(error)
             if isinstance(error, acquire.ServerStuck) and error.lost_session:
                 stop_reason = 'displaced'
@@ -113,8 +101,7 @@ def _stages(config: Config, job: state.Job, monitor: _Monitor) -> tuple[str, str
     if not stop_reason and not importing.delivery_records(job):
         stop_reason = 'no_acquisitions'
     monitor.update('sweep', 'Clearing interrupted partial transfers.')
-    leftovers = sweep.find(config)
-    sweep.clear(sweep.Leftovers(leftovers.partial, ()), log=monitor.log)
+    passes.clear_partial_transfers(config, log=monitor.log)
     return stop_reason, blocker
 
 
@@ -135,8 +122,6 @@ class _SelectedExecution:
 
 def _process_audio(config: Config, job: state.Job, monitor: _Monitor,
                    *, indices: set[int] | None = None) -> None:
-    from . import cli
-
     execution = job.execution()
     if indices is not None:
         execution = _SelectedExecution(execution, indices)
@@ -145,7 +130,7 @@ def _process_audio(config: Config, job: state.Job, monitor: _Monitor,
                record.status == state.RETRY_LATER and record.local_path for record in records):
         return
     monitor.update('process', 'Processing retained audio checkpoints.')
-    tools = cli._tools(config)
+    tools = passes.tools(config)
     summary = process.run(config, execution, tools=tools, log=monitor.log)
     monitor.log(summary.report())
 
@@ -159,7 +144,7 @@ def _held_audio(config: Config, job: state.Job) -> None:
     for record in records:
         if record.status != state.FOUND_IN_LIBRARY or record.local_path:
             continue
-        event = held.get(work_ids[record.idx], {})
+        event = held.get(work_ids.get(record.idx), {})
         path = event.get('path') or event.get('held')
         if not path or not Path(path).is_file():
             continue
@@ -202,7 +187,7 @@ class _Monitor:
             self.last = now
             row = {'job_id': self.job.id, 'stage': stage, 'message': render(str(message))[:_MESSAGE_LIMIT],
                    'updated_at': time.time(), 'idx': idx, 'fraction': fraction}
-            _write_json(self.job.root / 'progress.json', row)
+            operations.write_json(self.job.root / 'progress.json', row)
             if self.emit is not None:
                 self.emit(row)
 
@@ -217,12 +202,3 @@ class _Monitor:
         if fraction is not None:
             self.update('acquire', f"Track {row.get('idx')}: {fraction:.0%}",
                         idx=row.get('idx'), fraction=fraction)
-
-
-def _write_json(path: Path, value: dict) -> None:
-    temporary = path.with_suffix('.tmp')
-    try:
-        temporary.write_text(json.dumps(value, ensure_ascii=False) + '\n', encoding='utf-8')
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)

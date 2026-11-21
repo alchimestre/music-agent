@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 
-from . import peers, progress as progress_bar, reference, rules, slsk, state, store
+from . import peers, progress as progress_bar, reference, rules, slsk, state
 from .config import Config
 from .lanes import Held
 from .library import Library
@@ -22,11 +22,6 @@ from .reference import Lookup
 from .rules import Candidate
 from .slsk import Daemon, DaemonError
 
-# The window a search is given: the query goes out, peers answer on their own connections, and the pass reads
-# once at the end. The pace is one search every 6.47s — the network's rate — so a longer window is time the
-# pass spends asleep with nothing to do. Five seconds fills the 60 offers it keeps from the hundreds a common
-# title returns; the daemon is told the same.
-SEARCH_TIMEOUT = 5.0
 # Offers kept from one search. The daemon answers with everything it collected, and a common title can put
 # thousands in one line; the server has already sorted them, and the ladder only ever asks six peers.
 MAX_RESULTS = 60
@@ -70,7 +65,7 @@ _OVER = frozenset({"failed", "cancelled", "timed_out"})
 
 
 class ServerStuck(RuntimeError):
-    """The network stopped answering — searches timed out in a row, or the daemon recorded a lost session.
+    """The daemon stopped answering requests in a row or reported a displaced session.
 
     `lost_session` tells the two kinds apart for the caller that decides whether to try again. A daemon that
     stopped answering is worth restarting; a session the server took away is the account's, and a second
@@ -151,18 +146,16 @@ def offence(decision: Move, report: Transfer) -> str | None:
     """What the peer did wrong, or None when the ending was not the peer's to answer for.
 
     This distinction is why a peer is ignored at all. A budget we chose to stop at, a queue within reason
-    that a peer declared, and a transfer we cancelled are endings about us, and a peer that has already sent
-    bytes has shown it can send them. What is left is a peer that advertised a file and then delivered
-    nothing — twice, three times, every pass.
+    that a peer declared, and a transfer we cancelled or the daemon forgot are not the peer's fault.
+    A peer that has already sent bytes has shown it can send them. An offence is a peer that advertised
+    a file without delivering any bytes.
     """
     if decision is Move.DONE:
         return None
-    if report.status in {"cancelled", "completed"}:
+    if report.received_bytes or report.status in {"cancelled", "completed", "missing"}:
         return None
     if decision is Move.FAILED:
         return report.status or "failed"
-    if report.received_bytes:
-        return None
     if report.queue and report.queue < ABSURD_QUEUE:
         return None
     return "nothing arrived"
@@ -186,19 +179,6 @@ def transfer_of(download: dict) -> Transfer:
     )
 
 
-def length_from_size(candidate: Candidate) -> int | None:
-    """A lossy file's length from the bytes it will send and the bitrate the peer reported.
-
-    Bytes are bitrate × seconds / 8, so a peer that reported a bitrate and a size has reported the length
-    even when it left the duration attribute empty — and a file the rule can judge is a file it does not have
-    to ask the user about. Only for lossy files: on a lossless one `bitrate` carries the server's quality
-    score, which is a different quantity and gives a length a few seconds out.
-    """
-    if candidate.lossless or not candidate.bitrate or not candidate.size_bytes:
-        return None
-    return round(candidate.size_bytes * 8 / (candidate.bitrate * 1000))
-
-
 def candidate_of(item: dict) -> Candidate | None:
     """One search result, or None when it names no file we could ask for.
 
@@ -210,7 +190,7 @@ def candidate_of(item: dict) -> Candidate | None:
     if not user or not path:
         return None
     duration = item.get("duration_sec")
-    candidate = Candidate(
+    return Candidate(
         user=user,
         path=path,
         duration=int(duration) if duration else None,
@@ -221,9 +201,6 @@ def candidate_of(item: dict) -> Candidate | None:
         size_bytes=item.get("filesize"),
         speed=item.get("avg_speed"),
     )
-    if candidate.duration is None:
-        candidate = replace(candidate, duration=length_from_size(candidate))
-    return candidate
 
 
 def identifier(candidate: Candidate) -> str:
@@ -257,7 +234,7 @@ class Summary:
     downloaded: list[int] = field(default_factory=list)
     already_downloaded: list[int] = field(default_factory=list)
     already_held: list[int] = field(default_factory=list)
-    decided: list[int] = field(default_factory=list)      # settled by hand
+    decided: list[int] = field(default_factory=list)
     in_review: list[int] = field(default_factory=list)
     nothing_usable: list[int] = field(default_factory=list)
     failed: list[int] = field(default_factory=list)
@@ -282,7 +259,7 @@ class Summary:
         if self.already_downloaded:
             parts.append(f"{len(self.already_downloaded)} already downloaded")
         if self.decided:
-            parts.append(f"{len(self.decided)} settled by hand")
+            parts.append(f"{len(self.decided)} already settled")
         if self.dropped:
             parts.append(f"{len(self.dropped)} dropped — every offer was refused")
         if self.ignored:
@@ -350,6 +327,9 @@ class Watch:
             self._lost = True
             self.dead.set()
             return
+        self.reset_timeouts()
+
+    def reset_timeouts(self) -> None:
         with self._lock:
             self._fails = 0
             self._reconnects = 0
@@ -366,7 +346,7 @@ class Watch:
         if self.daemon is not None:
             try:
                 reconnecting = self.daemon.disconnected()
-            except DaemonError:
+            except (DaemonError, slsk.PortBusy, slsk.MissingCredential):
                 reconnecting = False      # an unanswering daemon is not evidence either way
         with self._lock:
             if reconnecting:
@@ -418,7 +398,7 @@ def search(daemon: Daemon, record: state.Record, *, later_pass: bool) -> list[Ca
     only peer who has the track. When no peer has a free slot the rest are kept: an offer is worth a later
     pass, and dropping them would close the track instead.
     """
-    offered = daemon.search(search_query(record.artist, record.title), timeout=SEARCH_TIMEOUT)
+    offered = daemon.search(search_query(record.artist, record.title), timeout=slsk.SEARCH_TIMEOUT)
     found = [candidate for candidate in (candidate_of(item) for item in offered) if candidate is not None]
     found = found[:MAX_RESULTS]
     if later_pass:
@@ -477,7 +457,7 @@ def await_transfer(
     if stop_event is not None and stop_event.is_set():
         return Move.INTERRUPTED, local_path, report
 
-    last_bytes = 0
+    last_bytes = report.received_bytes
     last_change = clock()
     started = last_change
     while True:
@@ -487,6 +467,8 @@ def await_transfer(
         on_disk = bool(local_path) and Path(local_path).is_file()
         decision = move(report, on_disk=on_disk, stuck_for=stuck_for, elapsed=clock() - started)
         if decision is not Move.WAIT:
+            if report.received_bytes < last_bytes:
+                report = replace(report, received_bytes=last_bytes)
             return decision, local_path, report
 
         # The wait is what is left of the budget, never more than one poll: sleeping the interval regardless
@@ -497,7 +479,8 @@ def await_transfer(
         current = daemon.downloads().get(key)
         if current is None:
             # The daemon has forgotten the transfer and the file is not on disk: nothing is coming.
-            return Move.FAILED, local_path, Transfer(status="missing", local_path=local_path)
+            return Move.FAILED, local_path, Transfer(status="missing", received_bytes=last_bytes,
+                                                     local_path=local_path)
         report = transfer_of(current)
         local_path = report.local_path or local_path
         if on_progress is not None:
@@ -543,7 +526,7 @@ def record_taken(
 
     The one place a download is recorded, because `reconcile` rebuilds a record from its own `downloaded`
     event — a second way of recording one would be a second way of losing one. `accepted` is set only by
-    `review`, the only writer of the decision axis.
+    `review`.
     """
     record.local_path = local_path
     record.format = candidate.ext
@@ -558,29 +541,23 @@ def record_taken(
 
 
 def drop_exhausted(job: state.Job, log=print) -> list[int]:
-    """Close every track whose every candidate was refused.
-
-    Nothing is left to try, so the track is settled rather than left in the queue: a pass that ended with a
-    peer's queue full is worth another pass, and a track with one untried candidate is left alone. A track a
-    hand settled, or one no pass has reached, is never touched.
-    """
-    dropped: list[int] = []
-    records = job.records()
-    for record in records:
+    """Decline memberships whose every takeable offer was refused; leave shared work state alone."""
+    dropped: list[state.Record] = []
+    for record in job.records():
         if record.decided() or record.status != state.RETRY_LATER:
             continue
         refused = set(record.refused)
-        if not refused or any(identifier(candidate) not in refused for candidate in record.candidates):
+        takeable = rules.takeable(record.track)
+        if not takeable or any(identifier(verdict.candidate) not in refused for verdict in takeable):
             continue
         record.decision = state.DECLINED
-        record.status = state.NOT_FOUND
         record.notes = "every offer was refused"
         job.append_event("dropped", idx=record.idx, tried=len(record.tried))
-        dropped.append(record.idx)
+        dropped.append(record)
     if dropped:
-        job.write_records(records)
+        job.write_records(dropped)
         log(f"{len(dropped)} dropped — every offer was refused, nothing left to try")
-    return dropped
+    return [record.idx for record in dropped]
 
 
 def _prepare(
@@ -685,7 +662,7 @@ class Pass:
     def wait_unpaused(self) -> bool:
         """Hold a new request while the queue is paused; False when the caller stopped the pass."""
         while self.paused() and not self.stop_requested():
-            time.sleep(0.02)
+            self.sleep(0.05)
         return not self.stop_requested()
 
     def attempt(self, record: state.Record) -> Outcome:
@@ -698,9 +675,7 @@ class Pass:
         if not self.wait_unpaused():
             return Outcome.INTERRUPTED
         if record.decided():
-            # GLOSSARY.md: a settled track is not asked about again — that is the whole of what the decision
-            # axis means — so a pass leaves it alone rather than spending a search to re-open the question.
-            log(f"[{record.idx}] {record.label}: {record.decision} by hand — left alone")
+            log(f"[{record.idx}] {record.label}: {record.decision} — left alone")
             return Outcome.DECIDED
 
         if record.local_path and Path(record.local_path).is_file():
@@ -727,36 +702,26 @@ class Pass:
         found = search(daemon, record, later_pass=later_pass)
         # Before the peers are filtered: a search that came back at all is the daemon talking, whatever it held.
         watch.answered()
-        if ledger is not None:
-            # Dropped here rather than filtered later, so nothing downstream — the ladder, the queue, the counts —
-            # ever sees a peer this account has given up on.
-            kept = [candidate for candidate in found if not ledger.ignores(candidate.user)]
-            if len(kept) != len(found):
-                log(f"[{record.idx}] {record.label}: {len(found) - len(kept)} files from ignored peers")
-            found = kept
-        added = merge(record, found)
+        kept = [candidate for candidate in found if not ledger.ignores(candidate.user)]
+        if len(kept) != len(found):
+            log(f"[{record.idx}] {record.label}: {len(found) - len(kept)} files from ignored peers")
+        added = merge(record, kept)
         job.append_event("searched", idx=record.idx, added=added, offered=len(record.candidates))
 
         tried = set(record.tried)
-        # No decision is asked of anybody: what the rule would not take on its own is not taken at all, and
-        # the track is reported instead of queued for a person.
         takeable = rules.takeable(record.track)
         if not takeable:
             record.status = state.PENDING
-            log(f"[{record.idx}] {record.label}: nothing takeable offered")
+            if record.needs_you():
+                log(f"[{record.idx}] {record.label}: offered a file that needs a decision")
+                return Outcome.IN_REVIEW
+            log(f"[{record.idx}] {record.label}: nothing usable offered")
             return Outcome.NOTHING_USABLE
-        queue = sorted(
-            (verdict.candidate for verdict in takeable
-             if identifier(verdict.candidate) not in tried),
-            key=rules.rank,
-        )
-        silenced = 0
-        if ledger is not None:
-            # Asked again for the files already in hand: a peer banned a moment ago, by the first file of its
-            # own that it failed to deliver, must not be asked for the other five.
-            before = len(queue)
-            queue = [candidate for candidate in queue if not ledger.ignores(candidate.user)]
-            silenced = before - len(queue)
+        untried = (verdict for verdict in takeable if identifier(verdict.candidate) not in tried)
+        queue = [verdict.candidate for verdict in sorted(untried, key=rules.ladder)]
+        before = len(queue)
+        queue = [candidate for candidate in queue if not ledger.ignores(candidate.user)]
+        silenced = before - len(queue)
         if upgrade is not None:
             # A lossless copy is strictly better than the lossy one held; a lossy copy is not better than the
             # copy already held, so only the better lane is worth fetching.
@@ -768,18 +733,16 @@ class Pass:
                 return Outcome.ALREADY_HELD
 
         if not queue and silenced:
-            # Nothing is left to try that the account is still willing to ask, which is not the same thing as a
-            # pass that failed: the record stays open, and a person may still take one of those offers by hand.
-            record.status = state.PENDING
+            record.status = state.RETRY_LATER
             job.append_event("only_ignored_peers", idx=record.idx, ignored=silenced)
             log(f"[{record.idx}] {record.label}: every offer left is from an ignored peer")
-            return Outcome.IN_REVIEW if record.usable() else Outcome.NOTHING_USABLE
+            return Outcome.FAILED
 
         for candidate in queue[:MAX_CANDIDATES]:
             if not self.wait_unpaused():
                 job.append_event("interrupted", idx=record.idx)
                 return Outcome.INTERRUPTED
-            if ledger is not None and ledger.ignores(candidate.user):
+            if ledger.ignores(candidate.user):
                 # Banned by an earlier file of its own in this same pass: the rest of its offers are the same
                 # question, already answered.
                 silenced += 1
@@ -800,8 +763,7 @@ class Pass:
                 return Outcome.INTERRUPTED
 
             if decision is Move.DONE:
-                if ledger is not None:
-                    ledger.delivered(candidate.user)
+                ledger.delivered(candidate.user)
                 record_taken(job, record, candidate, local_path, upgrade=upgrade)
                 if upgrade is not None:
                     log(f"[{record.idx}] {record.label}: a lossless copy from {candidate.user} → {local_path}"
@@ -820,9 +782,8 @@ class Pass:
                 log(f"      {candidate.user} failed")
             job.append_event("candidate_lost", idx=record.idx, peer=candidate.user,
                              path=candidate.path, why=decision.value, reason=why or "")
-            if ledger is not None and why is not None and ledger.offence(candidate.user, why):
-                if ignored is not None:
-                    ignored.add(candidate.user)
+            if why is not None and ledger.offence(candidate.user, why):
+                ignored.add(candidate.user)
                 job.append_event("peer_ignored", idx=record.idx, peer=candidate.user, reason=why)
                 log(f"      {candidate.user} ignored — {ledger.maxretry} failures in "
                     f"{ledger.findtime.days} days (music-agent peers --unban {candidate.user})")
@@ -935,8 +896,12 @@ def run(
         except DaemonError as error:
             record.status = state.RETRY_LATER
             outcome = Outcome.FAILED
-            pass_.watch.timed_out()
-            say(f"[{record.idx}] {record.label}: the server refused — {error}")
+            if error.unanswered:
+                pass_.watch.timed_out()
+            else:
+                pass_.watch.reset_timeouts()
+            reason = "the daemon did not answer" if error.unanswered else "the server refused"
+            say(f"[{record.idx}] {record.label}: {reason} — {error}")
             job.append_event("refused", idx=record.idx, error=str(error))
         except Exception as error:          # noqa: BLE001 — one malformed reply must not end the pass
             record.status = state.RETRY_LATER
@@ -945,21 +910,16 @@ def run(
             job.append_event("failed", idx=record.idx, error=f"{type(error).__name__}: {error}")
         summary.add(record, outcome)
         bar.settle(record.idx, record.label, outcome.value)
-        job.write_records(records)          # a crash costs the tracks in flight and nothing else
+        job.write_records([record])
 
     if schedule:
+        workers = max(1, config.workers)
         if pass_.pacer is not None:
             say(f"one search every {config.search_interval:g}s"
                 " — the network's rate, not this loop's")
         try:
-            if store.writer_lock_held(config.state_root):
-                # A caller may hold the writer lock around the pass (desktop orchestration does). A pool
-                # worker would block on that lock while the caller waits for it, so run in the owning thread.
-                for record in schedule:
-                    work(record)
-            else:
-                with ThreadPoolExecutor(max_workers=max(1, config.workers)) as pool:
-                    _drain(pool, work, schedule, max(1, config.workers))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                _drain(pool, work, schedule, workers)
         except BaseException:
             # The pass is over either way, and a bar left drawn under the traceback outlives it.
             bar.close()
@@ -986,9 +946,9 @@ def run(
         else:
             job.append_event("server_stuck", consecutive=pass_.watch.hung,
                              unsearched=len(summary.unsearched))
-            reason = (f"{pass_.watch.hung} searches timed out in a row — {len(summary.unsearched)} tracks were "
-                      f"never searched. The daemon had stopped answering; the run is open, so a fresh pass "
-                      f"picks it up.")
+            reason = (f"{pass_.watch.hung} daemon requests went unanswered in a row — "
+                      f"{len(summary.unsearched)} tracks were never searched. The run is open, so a fresh "
+                      f"pass picks it up.")
         job.write_status(config)
         bar.close()
         raise ServerStuck(reason, lost_session=pass_.watch.session_lost)

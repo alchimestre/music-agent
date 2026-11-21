@@ -1,13 +1,14 @@
 """The lanes: what is on disk, and the name a record's file carries.
 
 The collection's rows are `library`'s business; this module answers the other side. The record-to-file
-mapping is one convention and one scan, so reconcile, the leftover report and the sweep all read the same
-answer.
+mapping is one convention and one walk of the lanes (`lane_files`), so reconcile, the directory read and the
+leftover report all see the same files, and `claimed` is the one answer to what a run still owns.
 """
 
 from __future__ import annotations
 
 import unicodedata
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -78,6 +79,11 @@ def sound_of(path: Path) -> Sound:
         info = getattr(audio, "info", None)
     except Exception:
         return Sound()
+    return sound_from(info)
+
+
+def sound_from(info) -> Sound:
+    """Read the header fields from a file already opened by mutagen."""
     if info is None:
         return Sound()
     seconds = getattr(info, "length", None)
@@ -95,18 +101,27 @@ def seconds_of(path: Path) -> int | None:
     return sound_of(path).seconds
 
 
-def read_directories(config: Config) -> list[Held]:
-    """The files themselves, for what the database has not got."""
-    found: list[Held] = []
+def lane_files(config: Config) -> list[Path]:
+    """Every audio file in either lane, lossless first, sorted. A hidden file — a Finder `.DS_Store`, an
+    AppleDouble `._x.aiff` — is not a track, and neither is artwork."""
+    found: list[Path] = []
     for folder in (config.lossless, config.lossy):
         if not folder.is_dir():
             continue
         for path in sorted(folder.rglob("*")):
-            if not path.is_file() or path.suffix.lower().lstrip(".") not in AUDIO_EXTENSIONS:
-                continue
-            parsed = parse_filename(path.name)
-            found.append(Held(artist=parsed.artist, title=parsed.title, mix=parsed.mix,
-                              seconds=seconds_of(path), path=str(path)))
+            if (path.is_file() and not path.name.startswith(".")
+                    and path.suffix.lower().lstrip(".") in AUDIO_EXTENSIONS):
+                found.append(path)
+    return found
+
+
+def read_directories(config: Config) -> list[Held]:
+    """The files themselves, for what the database has not got."""
+    found: list[Held] = []
+    for path in lane_files(config):
+        parsed = parse_filename(path.name)
+        found.append(Held(artist=parsed.artist, title=parsed.title, mix=parsed.mix,
+                          seconds=seconds_of(path), path=str(path)))
     return found
 
 
@@ -136,12 +151,8 @@ class Lanes:
     @classmethod
     def scan(cls, config: Config) -> Lanes:
         on_disk: dict[str, Path] = {}
-        for lane in (config.lossless, config.lossy):
-            if not lane.is_dir():
-                continue
-            for path in sorted(lane.rglob("*")):
-                if path.is_file() and not path.name.startswith("."):
-                    on_disk.setdefault(path.stem, path)
+        for path in lane_files(config):
+            on_disk.setdefault(path.stem, path)
         return cls(on_disk)
 
     def file_for(self, record: state.Record) -> Path | None:
@@ -149,9 +160,10 @@ class Lanes:
         return self.by_stem.get(filename_for(record, ""))
 
 
-def claimed(config: Config) -> set[Path]:
-    """Every path any run's records name, so a file a pass still owes is never mistaken for debris."""
-    named = set()
+def claimed(config: Config, extra: Iterable[str] = ()) -> set[Path]:
+    """Every path any run's records name, and any in `extra`, so a file a pass still owes is never mistaken
+    for debris."""
+    named = {Path(path).resolve() for path in extra if path}
     for job in state.all_jobs(config):
         for record in job.records():
             if record.local_path:

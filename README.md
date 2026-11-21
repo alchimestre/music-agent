@@ -1,8 +1,8 @@
 # music-agent
 
-A tracklist in, tracks in every collection you export to: files from Soulseek, lossless kept as AIFF at
-−14 LUFS / −1 dBTP, tags from MusicBrainz and AcoustID. Each step is recorded under `.state/jobs/<run>/`,
-so a run can be resumed or repeated.
+A tracklist in, tracks in every collection you export to: files from Soulseek, lossless converted to
+16-bit/44.1 kHz AIFF at −14 LUFS / −1 dBTP, tags from MusicBrainz and AcoustID. Each step is recorded under
+the state root, `paths.state/<job_id>/`, so a job can be resumed or repeated.
 
 ## Start
 
@@ -17,19 +17,31 @@ music-agent run --tracks <file|dir|URL>
 
 That is the whole pipeline. It prints one line per stage and asks nothing.
 
-`uv tool install --editable .` puts `music-agent` on PATH from this checkout. The converter and normalizer
-ship here; `[tools]` in `config.toml` can point at other copies.
+`uv tool install --editable .` puts `music-agent` on PATH from this checkout. The loudness normalizer ships
+here; conversion is `ffmpeg`. `[tools]` in `config.toml` can point at other copies.
 
 ## Windows desktop
 
 1. Extract the complete Windows bundle and open `music-agent.exe`.
 2. Open Settings. Enter the required credentials; each field has a button that opens its service setup page.
-3. Click Validate and save settings, then Start Soulseek.
+3. Click Validate and save settings.
 4. Open Add playlist. Choose a public playlist URL or tracklist file, click Preview playlist, then Add preview to queue.
-5. Leave the window open. The queue is worked through automatically: each row shows its stage, peer, and a
-   progress bar. Process submission runs the selected submission immediately instead of waiting its turn.
+5. Leave the window open. The queue is worked through automatically, one pass at a time: each row shows its
+   stage, peer, and a progress bar. Process submission runs the selected submission immediately instead of
+   waiting its turn.
 
-Nothing is queued for a decision: an offer the rule will not take on its own is reported as not found.
+The desktop has no review screen. A track whose only offers are files the rule will not take on their own
+stays in the queue, counted under Outstanding requests. Decide it with the CLI:
+`music-agent --config PATH review --list`, where `PATH` is the desktop's `config.toml`.
+
+The desktop and the CLI keep separate settings and jobs, so neither sees the other's runs unless the CLI is
+given the desktop's config:
+
+| | config | state |
+|---|---|---|
+| desktop | `config.toml` in the platform user config directory | `jobs/` in the platform user data directory |
+| CLI, MCP | `config.toml` beside this file, else `~/.config/music-agent/config.toml` | `paths.state`, `~/Music/music-agent/state` by default |
+
 Secrets are stored in the OS credential store when Remember secrets in the OS credential store is checked.
 Settings accept UTF-8 with or without a byte-order mark. A malformed settings file stops startup.
 Files remain available without a DJ collection export.
@@ -91,7 +103,7 @@ track is left for you.
 music-agent review --list                     # the queue, numbered, and why each was left
 music-agent review --accept 12 --candidate 2  # fetch that one, then process
 music-agent review --skip 12                  # passed over for now
-music-agent review --not-found 12             # no usable copy; nothing asks again
+music-agent review --not-found 12             # no usable copy; this run asks no more
 ```
 
 `--accept`, `--skip` and `--not-found` are the only answers a queued track takes.
@@ -173,10 +185,10 @@ Apply the verified removal:
 ```sh
 music-agent spotify reconcile --job ID --apply
 ```
-CLI cleanup includes verified already-held tracks by default. Add `--scope acquired` to remove only this pass’s acquisitions.
+Cleanup removes only this pass’s acquisitions by default. Add `--scope delivered` to include verified
+already-held tracks.
 
-
-`spotify run --remove-delivered` applies the same removal after delivery.
+`spotify run --remove-delivered` applies the removal after delivery, with scope `delivered`.
 Every duplicate occurrence must be verified before its URI is removed.
 Unknown write outcomes are checked against the remote playlist, never blindly retried.
 Unrelated additions are preserved. spogo has no snapshot/CAS control: a concurrent same-URI
@@ -196,15 +208,18 @@ Receipts separate newly acquired files, already-held tracks, review reasons, bla
 Closed collection apps are required only for writes, not acquisition.
 Changed or missing audio invalidates its success receipts.
 Delivery receipts also require current collection membership; historical success alone is insufficient.
+A finished job does not authorize Spotify cleanup; each playlist entry must still have verified delivery.
 Traktor requires `traktor-nml verify --json PATH...`; an older backend fails closed.
 Delivery approval ignores empty SQLite WAL files and shared-memory metadata; collection data changes require a new preview.
 
 
-Soulseek takes one client per account. A pass stops another client on this machine before it starts, then
-holds the session in a daemon that outlives it.
+Soulseek takes one client per account. A pass refuses to start while another client of this account is
+running on this machine, names it, and leaves it alone: stop it yourself. Once started, a pass holds the
+session in a daemon that outlives it.
 
-`SLSK_LISTEN_PORT` lives in `.env`, not `config.toml`: which port this machine can accept peers on is a fact
-about its network. Forward it on the router.
+`SLSK_LISTEN_PORT` in `.env` sets the port this machine accepts peers on, a fact about its network. Forward
+it on the router. An optional `[soulseek] listen_port` in `config.toml` is read only when the variable is
+unset.
 
 ## Agents
 

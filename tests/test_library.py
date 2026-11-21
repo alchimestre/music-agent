@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from music_agent import config as config_module
-from music_agent import lanes, library
+from music_agent import lanes, library, state, sweep
 
 
 def held(artist: str, title: str, seconds: int | None, path: str = "") -> lanes.Held:
@@ -144,8 +144,10 @@ def test_artwork_beside_the_tracks_is_not_a_track(tmp_path):
     write_wav(config.lossless / "Kiasmos - Blurred.wav", seconds=2.0)
     (config.lossless / "cover.jpg").write_bytes(b"jpeg")
     (config.lossless / "notes.txt").write_text("hello")
+    (config.lossless / "._Kiasmos - Blurred.wav").write_bytes(b"AppleDouble")
 
     assert len(library.read_directories(config)) == 1
+    assert set(lanes.Lanes.scan(config).by_stem) == {"Kiasmos - Blurred"}
 
 
 def test_a_missing_directory_is_not_an_error(tmp_path):
@@ -185,11 +187,15 @@ def test_unpointed_separates_the_three_ways_a_run_leaves_something_behind(tmp_pa
     write_wav(config.lossless / "Nobody - Nothing.wav", seconds=4.0)
     (config.staging / "01 - Left Behind.aiff.part").write_bytes(b"a cancelled transfer")
     (config.staging / "Kiasmos - Blurred.wav").write_bytes(b"the run's own staged file")
+    other_run = state.create(config, "another run")
+    other_run.write_records([state.Record(1, "Kiasmos", "Blurred",
+                                          local_path=str(config.staging / "Kiasmos - Blurred.wav"))])
     gone = held("Gone", "Missing", 200, path=str(config.lossless / "Gone - Missing.wav"))
     monkeypatch.setattr(library, "read_database",
                         lambda: ([held("Kiasmos", "Blurred", 3, path=str(config.lossless / "Kiasmos - Blurred.wav")), gone], []))
 
-    leftovers = library.unpointed(config, claimed=[str(config.staging / "Kiasmos - Blurred.wav")])
+    leftovers = library.unpointed(config)
+    assert leftovers.staged == list(sweep.find(config).all)
 
     assert [path.name for path in leftovers.staged] == ["01 - Left Behind.aiff.part"]
     assert [path.name for path in leftovers.lane] == ["Nobody - Nothing.wav"]
@@ -216,13 +222,15 @@ def test_a_stored_title_is_split_the_way_a_tracklist_splits_one(tmp_path, monkey
 
     row = SimpleNamespace(Title="Galbi (feat Leïla Koumiya)", Artist=SimpleNamespace(Name="KasbaH"),
                           Length=199, FolderPath="/Music/Losy Tracks/Galbi.m4a", Genre=None, ID=1)
-    monkeypatch.setattr("pyrekordbox.Rekordbox6Database",
-                        lambda *args, **kwargs: SimpleNamespace(get_content=lambda: [row], get_genre=lambda: []))
+    closed = []
+    monkeypatch.setattr("pyrekordbox.Rekordbox6Database", lambda: SimpleNamespace(
+        get_content=lambda: [row], get_genre=lambda: [], close=lambda: closed.append(True)))
     monkeypatch.setattr(library, "read_directories", lambda config: [])
 
     shelf = library.open(make_config(tmp_path))
 
     found = shelf.held("KasbaH", "Galbi", 199)
+    assert closed == [True]
     assert found is not None, "the row answers to the bare title a tracklist produces"
     assert (found.title, found.mix) == ("Galbi", ""), "a credit is neither the title nor a version"
 

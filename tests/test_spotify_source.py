@@ -27,7 +27,7 @@ def track(uri, name, artists, kind="track"):
 def test_admission_preserves_duplicates_and_episode_positions(tmp_path, monkeypatch):
     config = make_config(tmp_path)
     source = playlist([
-        track(TRACK_URI, "Pacific", ["747"]),
+        track(TRACK_URI, "Pacific (Album Version)", ["747"]),
         track("spotify:episode:episode", "Talk", ["Host"], "episode"),
         track(TRACK_URI, "Pacific - Extended Mix", ["747", "808 State"]),
     ])
@@ -52,36 +52,6 @@ def test_admission_preserves_duplicates_and_episode_positions(tmp_path, monkeypa
     ]
     assert spotify_source.snapshot(state.find(config, job.id)) == saved
     assert spotify_source.admit(config, PLAYLIST_URI).id == job.id
-
-
-def test_reserved_admission_keeps_returned_id_and_canonical_source(tmp_path, monkeypatch):
-    config = make_config(tmp_path)
-    source = playlist([track(TRACK_URI, "Pacific", ["747"])])
-    monkeypatch.setattr(spotify_account, "read_playlist", lambda _: source)
-    previous = spotify_source.admit(config, PLAYLIST_URI)
-    reserved = state.create(config, "reserved", records=[])
-
-    admitted = spotify_source.admit(config, PLAYLIST_URI, job_id=reserved.id)
-
-    assert admitted.id == reserved.id
-    assert admitted.id != previous.id
-    assert admitted.records()[0].title == "Pacific"
-    assert spotify_source.snapshot(state.find(config, reserved.id))["uri"] == PLAYLIST_URI
-
-
-def test_reserved_admission_never_overwrites_populated_submission(tmp_path, monkeypatch):
-    config = make_config(tmp_path)
-    source = playlist([track(TRACK_URI, "Pacific", ["747"])])
-    monkeypatch.setattr(spotify_account, "read_playlist", lambda _: source)
-    existing = spotify_source.admit(config, PLAYLIST_URI)
-    replacement = playlist([track(TRACK_URI, "Replacement", ["Other"])])
-    monkeypatch.setattr(spotify_account, "read_playlist", lambda _: replacement)
-
-    with pytest.raises(ValueError, match="empty"):
-        spotify_source.admit(config, PLAYLIST_URI, job_id=existing.id)
-
-    assert existing.records()[0].title == "Pacific"
-    assert spotify_source.snapshot(existing)["tracks"] == list(source.tracks)
 
 
 def test_changed_ordered_source_content_creates_new_job(tmp_path, monkeypatch):

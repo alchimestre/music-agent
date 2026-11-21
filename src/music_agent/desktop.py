@@ -40,12 +40,14 @@ from PySide6.QtWidgets import (
 )
 
 from . import settings, slsk, state
+from .config import DEFAULTS, listen_port
 from .resources import expose_payload_on_path
 
 FAILED_STATUSES = frozenset({state.FAILED, state.NOT_FOUND})
-FINISHED_STATUSES = frozenset({state.TAGGED, state.IMPORTED, state.FOUND_IN_LIBRARY})
 ACTIVE_STATUSES = frozenset({state.DOWNLOADED, state.CONVERTED, state.NORMALIZED})
-LIVE_STATUSES = state.LIVE
+STOPPED_DECISIONS = frozenset({state.SKIPPED, state.DECLINED})
+DEFAULT_SERVER_PORT = 2242
+QUEUE_PROGRESS_COLUMN = 5
 
 # Where each pipeline position sits on the bar. A transfer in flight fills the band between a search that
 # found a peer and a file that landed, so the bar moves during the download rather than after it.
@@ -127,7 +129,8 @@ class _ApplicationWorker(QObject):
         if action == "run":
             return self._run(payload)
         if action == "delivery_plans":
-            return self.application.delivery_plans(payload["job_id"])
+            job_id = payload["job_id"]
+            return job_id, self.application.delivery_plans(job_id)
         if action == "deliver":
             return self._deliver(payload)
         if action == "save":
@@ -155,19 +158,20 @@ class _ApplicationWorker(QObject):
         }
 
     def _run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        job_id = payload["job_id"]
         last_snapshot = [0.0]
 
         def emit_progress(event: object) -> None:
             self.progress.emit(event)
             if time.monotonic() - last_snapshot[0] >= 2.0:
                 last_snapshot[0] = time.monotonic()
-                self.queue_changed.emit(self.application.snapshot())
+                self.queue_changed.emit((job_id, self.application.snapshot(job_id)))
             if self._stop_requested.is_set():
                 self.application.stop_event.set()
 
-        result = self.application.run(payload["job_id"], emit=emit_progress)
+        result = self.application.run(job_id, emit=emit_progress)
         return {
-            "job_id": payload["job_id"],
+            "job_id": job_id,
             "result": result,
             "queue": self.application.snapshot(),
         }
@@ -217,8 +221,10 @@ class ProgressCell(QWidget):
         self.set_readout(percent, readout)
 
     def set_readout(self, percent: int, readout: str) -> None:
-        self.bar.setValue(percent)
-        self.readout.setText(readout)
+        if self.bar.value() != percent:
+            self.bar.setValue(percent)
+        if self.readout.text() != readout:
+            self.readout.setText(readout)
 
 
 class DesktopWindow(QMainWindow):
@@ -242,23 +248,36 @@ class DesktopWindow(QMainWindow):
         self._shutdown_requested = False
         self._last_output_dir: Path | None = None
         self._admission_summary = ""
-        self._rendered_queue: list[tuple[str, int, tuple[str, ...]]] = []
+        self._queue_by_key: dict[tuple[str, int], Any] = {}
+        self._rendered_keys: list[tuple[str, int]] = []
+        self._rendered_cells: dict[tuple[str, int], tuple[str, ...]] = {}
         self._transfer_fraction: dict[tuple[str, int], float] = {}
         self._queue_bars: dict[tuple[str, int], ProgressCell] = {}
         self._auto_delay = AUTO_FIRST_DELAY
         self._auto_next = 0.0
         self._auto_running = False
-        self._auto_before = 0
+        self._auto_before: dict[int, int] = {}
+        self._auto_last_job: str | None = None
+        self._plan_open = False
         self._auto_timer = QTimer(self)
         self._auto_timer.setInterval(2000)
         self._auto_timer.timeout.connect(self._auto_advance)
         self._pending_config: Any = None
+        self._build_window()
+        self._busy = True
+        self._active_action = "initialize"
+        self._set_busy_state()
+        self._set_status("Loading saved settings and offline queue…")
+        self._start_worker()
+        self._auto_timer.start()
+
+    def _start_worker(self) -> None:
         self._thread = QThread(self)
         self._worker = _ApplicationWorker()
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.initialize)
         self.command_requested.connect(self._worker.execute)
-        self._worker.queue_changed.connect(self._set_queue)
+        self._worker.queue_changed.connect(self._set_job_queue)
         self.pause_requested.connect(self._worker.set_paused, Qt.ConnectionType.DirectConnection)
         self.stop_requested.connect(self._worker.request_stop, Qt.ConnectionType.DirectConnection)
         self._worker.completed.connect(self._on_complete)
@@ -266,13 +285,7 @@ class DesktopWindow(QMainWindow):
         self._worker.progress.connect(self._on_progress)
         self._thread.finished.connect(self._on_thread_finished)
         self._thread.finished.connect(self._worker.deleteLater)
-        self._build_window()
         self._thread.start()
-        self._busy = True
-        self._active_action = "initialize"
-        self._set_busy_state()
-        self._set_status("Loading saved settings and offline queue…")
-        self._auto_timer.start()
 
     def _build_window(self) -> None:
         root = QWidget()
@@ -610,6 +623,7 @@ class DesktopWindow(QMainWindow):
         form.addRow("Server port", self.server_port)
         self.listen_port = QSpinBox()
         self.listen_port.setRange(1, 65535)
+        self.listen_port.setToolTip("SLSK_LISTEN_PORT overrides this setting when present.")
         form.addRow("Peer listening port", self.listen_port)
         self.control_endpoint = QLabel()
         self.control_endpoint.setWordWrap(True)
@@ -710,7 +724,7 @@ class DesktopWindow(QMainWindow):
                 f"{self.settings_status.text()}\nNative credential storage unavailable: {credential_error}. "
                 "Saving secrets requires an explicit session-only choice."
             )
-        self._set_status("Ready. Configure required credentials before processing; no network work starts automatically.")
+        self._set_status("Ready.")
         if not (self._config.soulseek_username and self._config.musicbrainz_contact):
             self.tabs.setCurrentWidget(self.tabs.widget(2))
             self._set_status(
@@ -725,7 +739,7 @@ class DesktopWindow(QMainWindow):
         self.enqueue_button.setEnabled(False)
         summary = self._admission_summary
         self.preview_summary.setText(
-            f"Submission {value['job_id']} was added. {summary} Start processing explicitly."
+            f"Submission {value['job_id']} was added. {summary}"
         )
         self.tabs.setCurrentWidget(self.tabs.widget(0))
         self._set_status(f"Added submission {value['job_id']} to the queue.")
@@ -742,8 +756,9 @@ class DesktopWindow(QMainWindow):
         self.progress_log.appendPlainText(line)
         fraction = getattr(progress, "fraction", None)
         if fraction is not None and job_id and idx is not None:
-            self._transfer_fraction[(job_id, idx)] = float(fraction)
-            self._refresh_progress_bars()
+            key = (job_id, idx)
+            self._transfer_fraction[key] = float(fraction)
+            self._refresh_progress_bar(key)
 
     def _toggle_activity(self, expanded: bool) -> None:
         self.progress_log.setVisible(expanded)
@@ -887,7 +902,7 @@ class DesktopWindow(QMainWindow):
         elif action == "snapshot":
             self._set_queue(value)
         elif action == "delivery_plans":
-            self._show_delivery_plans(value)
+            self._show_delivery_plans(*value)
         elif action in ("run", "deliver"):
             self._finish_processing(action, value)
         elif action == "save":
@@ -899,7 +914,18 @@ class DesktopWindow(QMainWindow):
 
     def _set_queue(self, rows: list[Any]) -> None:
         self._queue = rows
+        self._queue_by_key = {(row.job_id, row.idx): row for row in rows}
         self._populate_queue()
+
+    @Slot(object)
+    def _set_job_queue(self, snapshot: tuple[str, list[Any]]) -> None:
+        job_id, rows = snapshot
+        start = next((index for index, row in enumerate(self._queue) if row.job_id == job_id), len(self._queue))
+        stop = start
+        while stop < len(self._queue) and self._queue[stop].job_id == job_id:
+            stop += 1
+        self._queue[start:stop] = rows
+        self._set_queue(self._queue)
 
     def _finish_processing(self, action: str, value: dict[str, Any]) -> None:
         self._set_queue(value["queue"])
@@ -907,14 +933,15 @@ class DesktopWindow(QMainWindow):
 
     def _auto_advance(self) -> None:
         """Work the queue without being asked, for as long as the window is open."""
-        if self._config is None or self._busy or self._closing or self._paused:
+        if self._config is None or self._busy or self._closing or self._paused or self._plan_open:
             return
         if time.monotonic() < self._auto_next:
             return
         job_id = self._next_job()
         if job_id is None:
             return
-        self._auto_before = self._pending_rows()
+        self._auto_last_job = job_id
+        self._auto_before = self._job_progress(job_id)
         self._auto_running = True
         self._start_run(job_id)
 
@@ -923,23 +950,29 @@ class DesktopWindow(QMainWindow):
         self._submit("run", {"job_id": job_id})
 
     def _next_job(self) -> str | None:
+        jobs = dict.fromkeys((row.job_id for row in self._queue), False)
         for row in self._queue:
-            if str(row.decision) in state.DECIDED:
-                continue
-            if str(row.status) in LIVE_STATUSES or str(row.status) in ACTIVE_STATUSES:
-                return row.job_id
-        return None
+            status = str(row.status)
+            decision = str(row.decision)
+            if (status in state.LIVE and decision not in state.DECIDED
+                    or status in ACTIVE_STATUSES and decision not in STOPPED_DECISIONS):
+                jobs[row.job_id] = True
+        order = list(jobs)
+        start = order.index(self._auto_last_job) + 1 if self._auto_last_job in jobs else 0
+        return next((job_id for job_id in order[start:] + order[:start] if jobs[job_id]), None)
 
-    def _pending_rows(self) -> int:
-        return sum(1 for row in self._queue
-                   if str(row.decision) not in state.DECIDED and str(row.status) in LIVE_STATUSES)
+    def _job_progress(self, job_id: str | None) -> dict[int, int]:
+        return {row.idx: STAGE_PERCENT[state.FAILED] if row.decision in STOPPED_DECISIONS
+                else STAGE_PERCENT.get(row.status, 0) for row in self._queue if row.job_id == job_id}
 
     def _auto_after(self, failed: bool) -> None:
         """Space the next automatic pass: sooner after one that moved something, later after one that did not."""
         if not self._auto_running:
             return
         self._auto_running = False
-        if failed or self._pending_rows() >= self._auto_before:
+        progress = self._job_progress(self._auto_last_job)
+        advanced = any(value > self._auto_before.get(idx, 0) for idx, value in progress.items())
+        if failed or not advanced:
             self._auto_delay = min(self._auto_delay * 2, AUTO_MAX_DELAY)
         else:
             self._auto_delay = AUTO_FIRST_DELAY
@@ -970,8 +1003,9 @@ class DesktopWindow(QMainWindow):
         server = config.soulseek_server or ""
         host, separator, port = server.rpartition(":")
         self.server_host_edit.setText(host if separator else server)
-        self.server_port.setValue(int(port) if separator and port.isdecimal() else 2242)
-        self.listen_port.setValue(config.soulseek_listen_port)
+        self.server_port.setValue(int(port) if separator and port.isdecimal() else DEFAULT_SERVER_PORT)
+        port = config.soulseek_configured_listen_port
+        self.listen_port.setValue(port if port is not None else DEFAULTS.soulseek_listen_port)
         self.upload_slots.setValue(config.upload_slots)
         self.max_downloads.setValue(config.max_downloads)
         self.workers.setValue(config.workers)
@@ -988,14 +1022,6 @@ class DesktopWindow(QMainWindow):
                                       or "Managed locally on loopback")
 
     def _build_config(self) -> Any:
-        secrets = dict(self._config.secrets)
-        for name, edit in (
-            (self._config.slsk_password_env, self.password_edit),
-            (self._config.acoustid_key_env, self.acoustid_edit),
-            (self._config.discogs_token_env, self.discogs_edit),
-        ):
-            if edit.text():
-                secrets[name] = edit.text()
         host = self.server_host_edit.text().strip()
         server = f"{host}:{self.server_port.value()}" if host else ""
         taxonomy = Path(self.taxonomy_edit.text()).expanduser().resolve() if self.taxonomy_edit.text().strip() else None
@@ -1005,14 +1031,19 @@ class DesktopWindow(QMainWindow):
         )
         targets = settings.merged_targets(self._config.export_targets,
                                           self.rekordbox_export.isChecked())
+        port = self.listen_port.value()
+        configured_port = self._config.soulseek_configured_listen_port
+        if configured_port is not None or port != DEFAULTS.soulseek_listen_port:
+            configured_port = port
         return replace(
             self._config,
             staging=self._required_path(self.staging_edit, "Download / staging folder"),
             lossless=self._required_path(self.lossless_edit, "Finished lossless folder"),
             lossy=self._required_path(self.lossy_edit, "Finished lossy folder"),
-            shared_dirs=shares or None,
+            shared_dirs=shares if shares or self._config.shared_dirs == () else None,
             soulseek_server=server,
-            soulseek_listen_port=self.listen_port.value(),
+            soulseek_listen_port=listen_port(port),
+            soulseek_configured_listen_port=configured_port,
             upload_slots=self.upload_slots.value(),
             max_downloads=self.max_downloads.value(),
             workers=self.workers.value(),
@@ -1021,8 +1052,20 @@ class DesktopWindow(QMainWindow):
             musicbrainz_contact=self.musicbrainz_edit.text().strip(),
             taxonomy=taxonomy,
             export_targets=targets,
-            secrets=secrets,
+            secrets=self._entered_secrets(),
         )
+
+    def _entered_secrets(self) -> dict[str, str]:
+        secrets = dict(self._config.secrets)
+        for name, edit in (
+            (self._config.slsk_password_env, self.password_edit),
+            (self._config.acoustid_key_env, self.acoustid_edit),
+            (self._config.discogs_token_env, self.discogs_edit),
+        ):
+            value = edit.text()
+            if value:
+                secrets[name] = value
+        return secrets
 
     def _required_path(self, edit: QLineEdit, label: str) -> Path:
         value = edit.text().strip()
@@ -1039,8 +1082,7 @@ class DesktopWindow(QMainWindow):
             QMessageBox.warning(self, "Invalid settings", str(error))
             return
         self._pending_config = config
-        self._pending_remember = self.remember_secrets.isChecked()
-        self._submit("save", {"config": config, "remember": self._pending_remember})
+        self._submit("save", {"config": config, "remember": self.remember_secrets.isChecked()})
 
     def _offer_session_only_save(self) -> None:
         answer = QMessageBox.question(
@@ -1134,77 +1176,98 @@ class DesktopWindow(QMainWindow):
             self._submit("enqueue", {"preview": self._preview})
 
     def _populate_queue(self) -> None:
-        if not hasattr(self, "queue_table"):
-            return
-        # A fraction belongs to one attempt. Dropping it the moment its row leaves the live set keeps a
-        # retried track from showing where the previous attempt stopped, and keeps the map from growing.
-        live = {(row.job_id, row.idx) for row in self._queue if str(row.status) in LIVE_STATUSES}
-        self._transfer_fraction = {key: value for key, value in self._transfer_fraction.items()
-                                   if key in live}
+        self._forget_settled_transfers()
         selected_filter = self.queue_filter.currentText().lower()
         rows = [row for row in self._queue if self._queue_filter_matches(row, selected_filter)]
-        values = [
-            (
-                str(row.label), str(getattr(row, "source", "")), self._stage_text(row),
-                str(getattr(row, "peer", "")), self._peer_queue_value(row), "",
-            )
-            for row in rows
-        ]
-        rendered = [(row.job_id, row.idx, cells) for row, cells in zip(rows, values)]
-        if rendered == self._rendered_queue:
-            self._refresh_progress_bars()
-            self._update_queue_actions()
-            return
-        self._rendered_queue = rendered
-        chosen = {
-            self.queue_table.item(index.row(), 0).data(Qt.ItemDataRole.UserRole)
-            for index in self.queue_table.selectionModel().selectedRows()
-            if self.queue_table.item(index.row(), 0) is not None
-        }
-        self.queue_table.setRowCount(0)
-        self._queue_bars.clear()
-        for index, (row, cells) in enumerate(zip(rows, values)):
-            self._insert_row(self.queue_table, index, cells)
-            self.queue_table.item(index, 0).setData(Qt.ItemDataRole.UserRole, (row.job_id, row.idx))
-            bar = self._progress_bar(row)
-            self.queue_table.setCellWidget(index, 5, bar)
-            self._queue_bars[(row.job_id, row.idx)] = bar
-            if (row.job_id, row.idx) in chosen:
-                self.queue_table.selectRow(index)
+        keys = [(row.job_id, row.idx) for row in rows]
+        chosen = self._selected_key()
+        self._prune_queue_rows(keys)
+        for index, (key, row) in enumerate(zip(keys, rows)):
+            self._render_queue_row(index, key, row)
+        self._rendered_keys = keys
+        if chosen in self._queue_bars and self._selected_key() != chosen:
+            self.queue_table.selectRow(keys.index(chosen))
         self._update_queue_actions()
+
+    def _forget_settled_transfers(self) -> None:
+        # A fraction belongs to one attempt, not to a track that has since moved on.
+        for key in tuple(self._transfer_fraction):
+            row = self._queue_by_key.get(key)
+            if row is None or row.status not in state.LIVE or row.decision in STOPPED_DECISIONS:
+                del self._transfer_fraction[key]
+
+    def _prune_queue_rows(self, keys: list[tuple[str, int]]) -> None:
+        if keys == self._rendered_keys:
+            return
+        positions = {key: index for index, key in enumerate(keys)}
+        next_index = len(keys)
+        for index in range(len(self._rendered_keys) - 1, -1, -1):
+            key = self._rendered_keys[index]
+            position = positions.get(key)
+            if position is not None and position < next_index:
+                next_index = position
+                continue
+            self.queue_table.removeRow(index)
+            del self._queue_bars[key]
+            del self._rendered_cells[key]
+
+    def _render_queue_row(self, index: int, key: tuple[str, int], row: Any) -> None:
+        values = (
+            str(row.label), str(getattr(row, "source", "")), self._stage_text(row),
+            str(getattr(row, "peer", "")), self._peer_queue_value(row), "",
+        )
+        previous = self._rendered_cells.get(key)
+        self._rendered_cells[key] = values
+        if previous is None:
+            self._insert_row(self.queue_table, index, values)
+            self.queue_table.item(index, 0).setData(Qt.ItemDataRole.UserRole, key)
+            bar = self._progress_bar(row)
+            self.queue_table.setCellWidget(index, QUEUE_PROGRESS_COLUMN, bar)
+            self._queue_bars[key] = bar
+            return
+        if previous[0] != values[0]:
+            self._queue_bars[key].bar.setAccessibleName(f"Progress for {row.label}")
+        for column, (old, value) in enumerate(zip(previous, values)):
+            if old == value:
+                continue
+            item = self.queue_table.item(index, column)
+            item.setText(value)
+            item.setToolTip(value)
+        self._refresh_progress_bar(key)
 
     def _stage_text(self, row: Any) -> str:
         status = str(row.status)
-        if status in LIVE_STATUSES and (row.job_id, row.idx) in self._transfer_fraction:
+        if row.decision in STOPPED_DECISIONS:
+            return "Not found" if row.decision == state.DECLINED else "Skipped"
+        if status in state.LIVE and (row.job_id, row.idx) in self._transfer_fraction:
             return "Downloading"
         return STAGE_LABEL.get(status, status.replace("_", " ").title())
 
     def _row_percent(self, row: Any) -> int:
+        if row.decision in STOPPED_DECISIONS:
+            return STAGE_PERCENT[state.FAILED]
         status = str(row.status)
         live = self._transfer_fraction.get((row.job_id, row.idx))
-        if live is not None and status in LIVE_STATUSES:
+        if live is not None and status in state.LIVE:
             return min(100, TRANSFER_FLOOR + int(live * TRANSFER_SPAN))
         return STAGE_PERCENT.get(status, 0)
 
     def _progress_text(self, row: Any) -> str:
         status = str(row.status)
-        if status in FAILED_STATUSES or str(row.decision) in {state.SKIPPED, state.DECLINED}:
+        if status in FAILED_STATUSES or str(row.decision) in STOPPED_DECISIONS:
             return "stopped"
-        if status in FINISHED_STATUSES:
+        if status in state.FINISHED:
             return "done"
         return f"{self._row_percent(row)}%"
 
     def _progress_bar(self, row: Any) -> "ProgressCell":
         return ProgressCell(row.label, self._row_percent(row), self._progress_text(row))
 
-    def _update_bar(self, cell: "ProgressCell", row: Any) -> None:
-        cell.set_readout(self._row_percent(row), self._progress_text(row))
-
-    def _refresh_progress_bars(self) -> None:
-        for row in self._queue:
-            bar = self._queue_bars.get((row.job_id, row.idx))
-            if bar is not None:
-                self._update_bar(bar, row)
+    def _refresh_progress_bar(self, key: tuple[str, int]) -> None:
+        bar = self._queue_bars.get(key)
+        row = self._queue_by_key.get(key)
+        if bar is not None and row is not None:
+            bar.set_readout(self._row_percent(row), self._progress_text(row))
 
     def _queue_filter_matches(self, row: Any, selected_filter: str) -> bool:
         if selected_filter == "all":
@@ -1216,9 +1279,9 @@ class DesktopWindow(QMainWindow):
 
     def _queue_category(self, row: Any) -> str:
         status = str(row.status).casefold()
-        if status in FAILED_STATUSES:
+        if status in FAILED_STATUSES or str(row.decision) in STOPPED_DECISIONS:
             return "failed"
-        if status in FINISHED_STATUSES:
+        if status in state.FINISHED:
             return "completed"
         if status in ACTIVE_STATUSES:
             return "active"
@@ -1265,53 +1328,58 @@ class DesktopWindow(QMainWindow):
             self._start_run(key[0])
 
     def _selected_queue_row(self) -> Any:
-        key = self._selected_key()
-        return next((row for row in self._queue if (row.job_id, row.idx) == key), None)
+        return self._queue_by_key.get(self._selected_key())
 
     def _preview_deliveries(self) -> None:
         key = self._selected_key()
         if key:
             self._submit("delivery_plans", {"job_id": key[0]})
 
-    def _show_delivery_plans(self, plans: list[Any]) -> None:
+    def _show_delivery_plans(self, job_id: str, plans: list[Any]) -> None:
         dialog = QDialog(self)
-        dialog.setWindowTitle("Delivery plan preview")
+        dialog.setWindowTitle(f"Delivery plan: {job_id}")
         dialog.resize(760, 360)
         layout = QVBoxLayout(dialog)
         table = self._table(("Target", "Destination", "Planned changes", "Requires confirmation", "Blocker"))
-        needs_confirmation = False
+        deliverable = bool(plans) and all(
+            not getattr(plan, "blocked", False) and not plan.error for plan in plans
+        )
+        needs_confirmation = any(plan.requires_confirmation for plan in plans)
         for index, plan in enumerate(plans):
-            needs_confirmation = needs_confirmation or bool(plan.requires_confirmation)
             self._insert_row(table, index, (
                 str(plan.target), str(plan.destination), str(plan.changes),
                 "Yes" if plan.requires_confirmation else "No", str(plan.error or ""),
             ))
+        layout.addWidget(table)
         layout.addWidget(QLabel(
             "Review every target and nonzero change before writing to a collection."
             if plans else "No collection targets are enabled. Finished files remain in the output folders."
         ))
         confirmation = QCheckBox("I reviewed the plan and authorize configured deliveries")
-        confirmation.setChecked(not needs_confirmation)
+        confirmation.setChecked(deliverable and not needs_confirmation)
         layout.addWidget(confirmation)
         buttons = QHBoxLayout()
         deliver = QPushButton("Deliver configured targets")
         deliver.setEnabled(bool(plans) and confirmation.isChecked())
-        confirmation.toggled.connect(
-            lambda checked: deliver.setEnabled(bool(plans) and checked)
-        )
+        confirmation.toggled.connect(lambda checked: deliver.setEnabled(bool(plans) and checked))
         cancel = QPushButton("Cancel")
         buttons.addWidget(deliver)
         buttons.addWidget(cancel)
         layout.addLayout(buttons)
-        deliver.clicked.connect(lambda: self._deliver_from_plan(dialog))
+        deliver.clicked.connect(lambda: self._deliver_from_plan(dialog, job_id))
         cancel.clicked.connect(dialog.reject)
-        dialog.exec()
+        self._plan_open = True
+        try:
+            dialog.exec()
+        finally:
+            self._plan_open = False
 
-    def _deliver_from_plan(self, dialog: QDialog) -> None:
-        key = self._selected_key()
-        if key:
-            dialog.accept()
-            self._submit("deliver", {"job_id": key[0]})
+    def _deliver_from_plan(self, dialog: QDialog, job_id: str) -> None:
+        if self._busy or self._closing:
+            QMessageBox.warning(dialog, "Delivery unavailable", "Finish the current operation before delivering.")
+            return
+        dialog.accept()
+        self._submit("deliver", {"job_id": job_id})
 
     def _show_result(self, result: Any, action: str, job_id: str) -> None:
         if action == "deliver":
@@ -1402,27 +1470,8 @@ class DesktopWindow(QMainWindow):
             self.close()
 
 
-def _run_normalizer(argv: list[str]) -> int:
-    """Run the shipped normalizer in this process: a frozen build has no interpreter to spawn, and no
-    standard output either, so what it prints goes to the report file instead."""
-    import importlib.util
-
-    report, script = Path(argv[0]), Path(argv[1])
-    sys.stdout = report.open("w", encoding="utf-8", buffering=1)
-    sys.stderr = sys.stdout
-    spec = importlib.util.spec_from_file_location("loudness_normalizer", script)
-    if spec is None or spec.loader is None:
-        raise SystemExit(f"cannot read the normalizer at {script}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    sys.argv = [str(script), *argv[2:]]
-    return module.main() or 0
-
-
 def main() -> int:
     expose_payload_on_path()
-    if sys.argv[1:2] == ["--normalize"]:
-        return _run_normalizer(sys.argv[2:])
     application = QApplication(sys.argv)
     application.setApplicationName("Music Agent")
     application.setApplicationDisplayName("Music Agent")

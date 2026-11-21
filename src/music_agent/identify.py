@@ -8,8 +8,11 @@ filename is the last resort: either way the track is imported and queued for rev
 
 from __future__ import annotations
 
+import json
 import socket
 import threading
+import time
+import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -237,9 +240,9 @@ def _in_full(candidate: Candidate, brainz: Brainz, *, discogs: Discogs | None = 
              source: str) -> Identified:
     """Ask MusicBrainz about the found recording, and the two services about its genres.
 
-    One release, not every release it appears on: each costs a request at one a second, and a field a
-    release does not carry is left empty rather than invented. This is the first point at which a
-    trustworthy artist and title exist to ask Discogs about.
+    At most three of the releases it appears on, one request each, so that the release group the fingerprint
+    named can be found among them; a field a release does not carry is left empty rather than invented. This
+    is the first point at which a trustworthy artist and title exist to ask Discogs about.
     """
     detail = brainz.recording(candidate.id) or candidate
     release = choose([brainz.release(one.id) for one in detail.releases[:3]],
@@ -322,9 +325,7 @@ class DiscogsStyles:
         return cls(required(config, config.discogs_token_env))
 
     def styles(self, artist: str, title: str) -> tuple[str, ...]:
-        import json
         import urllib.parse
-        import urllib.request
 
         query = urllib.parse.urlencode({"q": f"{artist} {title}", "type": "release",
                                         "per_page": "1", "token": self._token})
@@ -361,9 +362,10 @@ def _match_of(result: dict) -> Match:
 class MusicBrainz:
     """MusicBrainz, serialized at the one request a second their policy asks for."""
 
-    # The limit is the account's, and musicbrainzngs' own sleep is per call: identification runs several
-    # files at a time, so the sleep has to be behind a lock shared by every client in this process.
+    # musicbrainzngs does not count the raw genre request, so both routes need a shared clock.
     _lock = threading.Lock()
+    _last_request = 0.0
+    REQUEST_SPACING = 1.0
 
     def __init__(self, contact: str) -> None:
         import musicbrainzngs
@@ -374,8 +376,15 @@ class MusicBrainz:
         self._contact = contact
 
     def _ask(self, call, *args, **kwargs):
+        """Every request this process makes, the raw ones included, one `REQUEST_SPACING` after the last."""
         with self._lock:
-            return call(*args, **kwargs)
+            pause = MusicBrainz._last_request + self.REQUEST_SPACING - time.monotonic()
+            if pause > 0:
+                time.sleep(pause)
+            try:
+                return call(*args, **kwargs)
+            finally:
+                MusicBrainz._last_request = time.monotonic()
 
     @classmethod
     def from_environment(cls, config: Config) -> MusicBrainz:
@@ -396,16 +405,15 @@ class MusicBrainz:
                                                  for release in recording.get("release-list", [])))
 
     def search(self, request: Request) -> list[Match]:
-        """The same query the reference is resolved with, scored by MusicBrainz."""
+        """The same query the reference is resolved with, one match per recording with its own score."""
         found = self._ask(self._mb.search_recordings, query=reference.query_for(request), limit=SEARCH_LIMIT)
-        listed = found.get("recording-list", [])
-        recordings = tuple(candidate for candidate in
-                           (self._as_candidate(recording) for recording in listed)
-                           if candidate is not None)
-        if not recordings:
-            return []
-        top = max(int(recording.get("ext:score", 0)) for recording in listed)
-        return [Match(score=top / 100.0, recordings=recordings)]
+        matches = []
+        for recording in found.get("recording-list", []):
+            candidate = self._as_candidate(recording)
+            if candidate is not None:
+                matches.append(Match(score=int(recording.get("ext:score", 0)) / 100.0,
+                                     recordings=(candidate,)))
+        return matches
 
     def release(self, release_id: str) -> Release:
         got = self._ask(self._mb.get_release_by_id,
@@ -415,18 +423,21 @@ class MusicBrainz:
     def genres(self, release_group_id: str) -> tuple[str, ...]:
         """A release group's genres, over a raw ws/2 call: musicbrainzngs 0.7.1 has no `genres` include at
         all, only `tags`, which came back empty on every file it was tried against."""
-        import json
-        import urllib.request
-
         request = urllib.request.Request(
             f"https://musicbrainz.org/ws/2/release-group/{release_group_id}?inc=genres&fmt=json",
             # Their policy wants the contact in the User-Agent.
             headers={"User-Agent": f"music-agent/0.1 ( {self._contact} )"},
         )
-        with self._lock:
-            with urllib.request.urlopen(request, timeout=25) as handle:
-                body = json.load(handle)
-        return tuple(genre["name"] for genre in body.get("genres", []) if genre.get("name"))
+        try:
+            body = self._ask(self._fetch_json, request)
+            return tuple(genre["name"] for genre in body.get("genres", []) if genre.get("name"))
+        except Exception:
+            return ()
+
+    @staticmethod
+    def _fetch_json(request: urllib.request.Request) -> dict:
+        with urllib.request.urlopen(request, timeout=25) as handle:
+            return json.load(handle)
 
     def _as_candidate(self, recording: dict) -> Candidate | None:
         if not recording.get("id"):

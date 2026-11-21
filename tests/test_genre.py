@@ -31,8 +31,8 @@ def written(tmp_path: Path, document: dict = TAXONOMY) -> Path:
 
 def resolved(tmp_path: Path, *offered: str) -> genre.Choice:
     """Resolve against the written taxonomy, for a collection that holds its families."""
-    path = written(tmp_path)
-    return genre.resolve(offered, vocabulary=genre.families(path), mappings=genre.table(path))
+    families, mappings = genre.taxonomy(written(tmp_path))
+    return genre.resolve(offered, vocabulary=families, mappings=mappings)
 
 
 # ── reading the taxonomy ------------------------------------------------------

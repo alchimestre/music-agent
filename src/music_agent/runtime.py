@@ -89,7 +89,7 @@ class SoulseekRuntime:
         self._state = STARTING
         self._error = None
         try:
-            shared = _share_paths(self._config)
+            shared = slsk.share_paths(self._config)
             if not self._connect():
                 self._state = STOPPED
                 self._error = ("no daemon answered and the Soulseek username and password are not "
@@ -151,7 +151,7 @@ class SoulseekRuntime:
         self._config = config
         self._error = None
         try:
-            shared = _share_paths(config)
+            shared = slsk.share_paths(config)
         except ValueError as error:
             self._error = str(error)
             self._log(str(error))
@@ -169,24 +169,15 @@ class SoulseekRuntime:
     # ── lifecycle internals ──────────────────────────────────────────────────
 
     def _connect(self) -> bool:
-        if self.daemon.connect():
-            return True
         process = self.daemon.process
         if process is not None and process.poll() is None:
-            return self._await_connect()
-        if not self._can_spawn():
-            return False
-        self.daemon.start()
-        return self._await_connect()
-
-    def _await_connect(self) -> bool:
-        deadline = time.monotonic() + slsk.STARTUP_TIMEOUT
-        while not self.daemon.connect():
-            if time.monotonic() > deadline:
-                raise slsk.DaemonError(
-                    "start", f"no daemon on {self.daemon.endpoint()} after {slsk.STARTUP_TIMEOUT:g}s")
-            time.sleep(0.25)
-        return True
+            if not self.daemon.connect():
+                self.daemon.await_start()
+            return True
+        if self._can_spawn():
+            self.daemon.ensure()
+            return True
+        return self.daemon.connect()
 
     def _can_spawn(self) -> bool:
         config = self._config
@@ -270,7 +261,7 @@ class SoulseekRuntime:
             state=self._state,
             managed=self.daemon.process is not None and self.daemon.process.poll() is None,
             username=self.daemon.username,
-            session_loss=_session_loss(daemon_status or {}),
+            session_loss=slsk.session_loss_of(daemon_status or {}),
             daemon_status=daemon_status,
             transfers=transfers,
             events=events,
@@ -300,13 +291,6 @@ def _deferred_download(saved: str, effective: str) -> bool:
     return bool(effective) and saved != effective
 
 
-def _session_loss(daemon_status: dict[str, Any]) -> str | None:
-    value = daemon_status.get("session_loss")
-    if isinstance(value, dict):
-        return str(value.get("kind") or "") or None
-    return str(value) if value else None
-
-
 def _restart_required(saved: RuntimeSettings, effective: RuntimeSettings) -> tuple[str, ...]:
     """Saved values the running daemon did not take. Empty until it has reported what it runs."""
     if not effective.listen_port:
@@ -323,19 +307,10 @@ def _restart_required(saved: RuntimeSettings, effective: RuntimeSettings) -> tup
     return tuple(changed)
 
 
-def _share_paths(config: Config) -> tuple[Path, ...]:
-    """The configured roots, refusing any that would expose staging or application state."""
-    return slsk.share_paths(config)
-
-
-def _transfer_state(item: dict[str, Any]) -> dict[str, Any]:
-    return item.get("status") or {}
-
-
 def _rows(downloads: dict[tuple[str, str], dict[str, Any]]) -> tuple[dict[str, Any], ...]:
     rows = []
     for item in downloads.values():
-        status = _transfer_state(item)
+        status = item.get("status") or {}
         received = int(status.get("bytes_downloaded") or 0)
         total = status.get("total_bytes")
         total = int(total) if isinstance(total, int) and total > 0 else None

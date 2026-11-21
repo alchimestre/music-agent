@@ -204,10 +204,12 @@ def test_the_decision_to_wait_rotate_or_give_up(status, on_disk, stuck, queue, e
         (acquire.Move.DONE, "completed", 90_000, 0, None),
         # A peer that fails outright, or claims a file and leaves no bytes, is the whole point.
         (acquire.Move.FAILED, "failed", 0, 0, "failed"),
+        (acquire.Move.FAILED, "failed", 4096, 0, None),
         (acquire.Move.FAILED, "timed_out", 0, 0, "timed_out"),
         # Ours, not theirs: a cancel is a decision we made.
         (acquire.Move.FAILED, "cancelled", 0, 0, None),
         (acquire.Move.FAILED, "completed", 0, 0, None),
+        (acquire.Move.FAILED, "missing", 0, 0, None),
         # A connect that never opened is theirs.
         (acquire.Move.ROTATE, "queued", 0, 0, "nothing arrived"),
         # A declared queue is normal Soulseek, and a peer that has sent bytes has shown it can send them.
@@ -231,13 +233,11 @@ def test_what_a_lost_download_says_about_the_peer(decision, status, received, qu
 # ── the candidate a search result becomes ────────────────────────────────────
 
 
-def test_a_lossy_result_with_no_length_gets_one_from_its_size():
-    """A peer that reports a bitrate and a size has reported the length: bytes = bitrate × seconds / 8. Without
-    that, a file the rule could have judged was offered for review instead (2026-10-12)."""
+def test_a_lossy_result_with_no_reported_length_stays_unchecked():
     item = {"username": "peer", "filename": r"M\Kiasmos - Blurred.mp3", "filesize": 12_000_000,
             "bitrate": 320, "queue_size": 0}
 
-    assert acquire.candidate_of(item).duration == 300
+    assert acquire.candidate_of(item).duration is None
 
 
 def test_a_lossless_result_is_not_given_a_length_from_its_size():
@@ -354,12 +354,22 @@ def test_a_track_with_no_length_to_check_is_taken_on_its_name(tmp_path):
     assert "download.start" in tools_called(calls), "taken, not put in the queue"
 
 
-def test_an_offer_whose_name_names_no_track_is_reported_not_taken(tmp_path):
-    """Nothing is put to a person: an offer the rule will not settle is reported, never guessed at."""
+def test_a_ready_mp3_is_tried_before_an_unchecked_flac(tmp_path):
+    unchecked = dict(GOOD[0], duration_sec=None)
+    ready = dict(GOOD[0], filename=r"Music\Kiasmos - Blurred.mp3", bitrate=320)
+    config, job, daemon, calls = setup(tmp_path, results=[unchecked, ready], download="failed::0:")
+
+    pass_once(config, job, daemon, Reference(), calls)
+
+    attempted = [params["filename"] for method, params in calls if method == "download.start"]
+    assert attempted == [ready["filename"], unchecked["filename"]]
+
+
+def test_an_offer_whose_name_names_no_track_goes_to_review(tmp_path):
     unnamed = [{
-        "id": "peerA:Music\\01.flac",
+        "id": "peerA:Music\\.flac",
         "username": "peerA",
-        "filename": "Music\\01.flac",
+        "filename": "Music\\.flac",
         "extension": "flac",
         "duration_sec": 449,
         "queue_size": 0,
@@ -368,7 +378,8 @@ def test_an_offer_whose_name_names_no_track_is_reported_not_taken(tmp_path):
 
     summary, quiet = pass_once(config, job, daemon, Reference(), calls)
 
-    assert summary.nothing_usable == [1], quiet.lines
+    assert summary.in_review == [1], quiet.lines
+    assert summary.nothing_usable == []
     assert "download.start" not in tools_called(calls)
 
 
@@ -473,15 +484,39 @@ def test_a_finished_transfer_whose_file_never_appears_is_given_its_grace(tmp_pat
 def test_every_candidate_failing_closes_the_track(tmp_path):
     """2026-10-14: nothing left to try is the end of it. The track is settled rather than left waiting for
     somebody to say so, which is what a run full of unanswerable rows cost."""
-    config, job, daemon, calls = setup(tmp_path, results=TWO_PEERS, download="failed::0:")
+    artwork = {"username": "peerA", "filename": r"Music\cover.jpg"}
+    config, job, daemon, calls = setup(tmp_path, results=[*TWO_PEERS, artwork], download="failed::0:")
+    other = state.create(config, "other")
+    other.write_records([state.Record(idx=1, artist="Kiasmos", title="Blurred")])
+    assert job.work_id(1) == other.work_id(1)
+
     summary, quiet = pass_once(config, job, daemon, Reference(), calls)
 
     assert summary.dropped == [1], quiet.lines
     assert summary.failed == []
     record = job.records()[0]
-    assert record.status == state.NOT_FOUND
+    assert record.status == state.RETRY_LATER
     assert record.decision == state.DECLINED
+    assert other.records()[0].status == state.RETRY_LATER
+    assert other.records()[0].decision == state.UNDECIDED
     assert all(one.decided() for one in job.records()), "nothing is left to try, so nothing is left open"
+
+    again, _quiet = pass_once(config, job, daemon, Reference(), calls)
+    assert again.decided == [1]
+    assert tools_called(calls).count("search") == 1
+
+
+@pytest.mark.parametrize("download", ["downloading:transferring:1000:;failed::0:",
+                                      "queued::0:;downloading:transferring:1000:;failed::0:"])
+def test_a_failure_after_bytes_arrive_does_not_count_against_the_peer(tmp_path, download):
+    config, job, daemon, calls = setup(tmp_path, results=GOOD, download=download,
+                                       soulseek="maxretry = 1\n")
+
+    summary, _quiet = pass_once(config, job, daemon, Reference(), calls)
+
+    assert summary.failed == [1]
+    assert summary.ignored == set()
+    assert job.records()[0].refused == []
 
 
 def test_a_track_with_a_candidate_left_untried_is_left_alone(tmp_path):
@@ -510,7 +545,8 @@ def test_a_track_with_a_candidate_left_untried_is_left_alone(tmp_path):
     records[0].refused = [acquire.identifier(first), acquire.identifier(second)]
     job.write_records(records)
     assert acquire.drop_exhausted(job, log=lambda line: None) == [1]
-    assert job.records()[0].status == state.NOT_FOUND
+    assert job.records()[0].status == state.RETRY_LATER
+    assert job.records()[0].decision == state.DECLINED
 
 
 def test_a_rotate_for_a_full_peer_queue_leaves_the_track_open(tmp_path):
@@ -523,7 +559,7 @@ def test_a_rotate_for_a_full_peer_queue_leaves_the_track_open(tmp_path):
     assert summary.dropped == [], quiet.lines
     assert summary.failed == [1]
     assert record.status == state.RETRY_LATER, "a queue we chose to leave is worth another pass"
-    assert record.decision == state.UNDECIDED, "review is the only writer of the decision axis"
+    assert record.decision == state.UNDECIDED
     assert record.refused == []
 
 
@@ -807,20 +843,26 @@ def test_a_track_the_library_holds_at_another_length_is_still_fetched(tmp_path):
     assert "search" in tools_called(calls)
 
 
-def test_a_daemon_that_refuses_is_left_to_retry_rather_than_crashing(tmp_path):
-    class Refusing(Direct):
+@pytest.mark.parametrize("unanswered", [False, True])
+def test_only_unanswered_daemon_requests_stop_the_pass(tmp_path, unanswered):
+    class NotAnswering(Direct):
         def search(self, query, *, timeout):
-            raise slsk.DaemonError("search", "the daemon is not logged in", 3)
+            raise slsk.DaemonError("search", "no answer" if unanswered else "refused",
+                                   unanswered=unanswered)
 
-    config, job, _daemon, calls = setup(tmp_path, results=[], tracks=1)
-    daemon = Refusing(results=[])
+    total = acquire.STUCK_AFTER + 1
+    config, job, _daemon, calls = setup(tmp_path, results=[], tracks=total, soulseek="workers = 1\n")
+    daemon = NotAnswering(results=[])
 
-    quiet = Quiet(Clock())
-    summary = acquire.run(config, job, daemon, Reference(), log=quiet.log, sleep=quiet.sleep,
-                          clock=quiet.clock)
+    if unanswered:
+        with pytest.raises(acquire.ServerStuck, match="went unanswered"):
+            pass_once(config, job, daemon, Reference(), calls)
+        return
 
-    assert summary.failed == [1]
-    assert job.records()[0].status == state.RETRY_LATER
+    summary, quiet = pass_once(config, job, daemon, Reference(), calls)
+    assert summary.failed == list(range(1, total + 1))
+    assert summary.unsearched == []
+    assert all(record.status == state.RETRY_LATER for record in job.records())
     assert any("refused" in line for line in quiet.lines)
 
 
@@ -882,6 +924,21 @@ def test_a_file_from_an_ignored_peer_never_enters_the_record(tmp_path):
 
     assert job.records()[0].candidates == []
     assert summary.nothing_usable == [1], quiet.lines
+    assert "download.start" not in tools_called(calls)
+
+
+def test_a_retained_offer_from_an_ignored_peer_is_left_to_retry(tmp_path):
+    config, job, daemon, calls = setup(tmp_path, results=[], soulseek="maxretry = 1\n")
+    candidate = Candidate(user="peerA", path=r"Music\Kiasmos - Blurred.flac", duration=449)
+    record = job.records()[0]
+    record.candidates = [candidate]
+    job.write_records([record])
+    peers.Ledger.at(config).offence(candidate.user, "nothing arrived")
+
+    summary, _quiet = pass_once(config, job, daemon, Reference(), calls)
+
+    assert summary.failed == [1]
+    assert summary.in_review == []
     assert "download.start" not in tools_called(calls)
 
 

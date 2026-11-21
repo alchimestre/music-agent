@@ -55,26 +55,28 @@ def document(path: str | Path | None) -> dict:
 
 def families(path: str | Path | None = None) -> list[str]:
     """The genre families themselves, in the taxonomy's own order."""
-    return [
-        tier1
-        for tier1 in (str(group.get("tier1") or "").strip()
-                      for group in document(path).get("groups") or [])
-        if tier1
-    ]
+    return taxonomy(path)[0]
 
 
 def table(path: str | Path | None = None) -> dict[str, str]:
     """Every name the taxonomy maps onto a family, folded on both sides as it loads."""
+    return taxonomy(path)[1]
+
+
+def taxonomy(path: str | Path | None = None) -> tuple[list[str], dict[str, str]]:
+    """The families and the table, from one read of the document."""
+    families: list[str] = []
     mappings: dict[str, str] = {}
     for group in document(path).get("groups") or []:
         family = str(group.get("tier1") or "").strip()
         if not family:
             continue
+        families.append(family)
         for name in group.get("from") or []:
             if str(name).strip():
                 mappings[fold(str(name))] = family
         mappings[fold(family)] = family
-    return mappings
+    return families, mappings
 
 
 def vocabulary(held: Sequence[str], family_names: Sequence[str] = ()) -> list[str]:

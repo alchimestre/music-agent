@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from music_agent import agent_api, config
+from music_agent import agent_api, config, spotify_account, spotify_source, state
 from music_agent.deliveries import DeliveryOutcome, DeliveryPlan
 
 
@@ -42,50 +41,59 @@ state = ".state/jobs"
     api.close()
 
 
-def test_run_playlist_returns_durable_job_id_before_one_background_pass(monkeypatch, tmp_path):
-    job = FakeJob(root=tmp_path / "job-1")
-    run_calls = []
-    admission_started = threading.Event()
-    release_admission = threading.Event()
-    monkeypatch.setattr(agent_api.state, "create", lambda *args, **kwargs: job)
-
-    def admit(config_value, source, *, job_id=None):
-        assert job_id == job.id
-        admission_started.set()
-        release_admission.wait(2)
-        return job
-
-    monkeypatch.setattr(agent_api.spotify_source, "admit", admit)
-
-    def run(config_value, selected_job, **kwargs):
-        run_calls.append((selected_job, kwargs))
-        selected_job.started.set()
-        try:
-            selected_job.release.wait(2)
-            return {"complete": True, "stage": "complete"}
-        finally:
-            selected_job.finished.set()
-
-    monkeypatch.setattr(agent_api.spotify_workflow, "run", run)
+def test_run_playlist_reuses_an_admitted_job_and_returns_before_processing(monkeypatch, tmp_path):
+    playlist_id = "ABCDEFGHIJKLMNOPQRSTUV"
+    source = f"spotify:playlist:{playlist_id}"
+    playlist = spotify_account.AccountPlaylist(playlist_id, "Set", source, (
+        {"type": "track", "name": "Pacific", "artists": ["747"], "uri": f"spotify:track:{playlist_id}"},
+    ))
+    monkeypatch.setattr(spotify_account, "read_playlist", lambda _: playlist)
     api = agent_api.AgentAPI()
     api.config = replace(config.DEFAULTS, state_root=tmp_path / "state")
+    job = spotify_source.admit(api.config, source)
+    job.append_event("operation_finished", complete=False, stage="pending")
+    monkeypatch.setattr(agent_api.receipts, "build_status", lambda config, job: {"complete": False})
+    started, release, finished = (threading.Event() for _ in range(3))
+    run_calls = []
+
+    def run(config_value, selected_job):
+        run_calls.append(selected_job.id)
+        started.set()
+        try:
+            release.wait(2)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(agent_api.spotify_workflow, "run", run)
     try:
-        before = time.monotonic()
-        result = api.run_playlist("spotify:playlist:abc")
-        elapsed = time.monotonic() - before
+        result = api.run_playlist(source)
 
         assert result["job_id"] == job.id
-        assert elapsed < 1
-        assert admission_started.wait(1)
-        assert run_calls == []
-        release_admission.set()
-        assert job.started.wait(1)
-        assert len(run_calls) == 1
-        assert run_calls[0][0] is job
+        assert [item.id for item in state.all_jobs(api.config)] == [job.id]
+        assert started.wait(1)
+        assert not finished.is_set()
+        assert api.pass_status(job.id)["terminal"] is False
+        assert run_calls == [job.id]
     finally:
-        release_admission.set()
-        job.release.set()
-        job.finished.wait(1)
+        release.set()
+        finished.wait(1)
+        api.close()
+
+
+def test_failed_admission_does_not_create_a_job(monkeypatch, tmp_path):
+    def fail(source):
+        raise ValueError("Spotify playlist unavailable")
+
+    monkeypatch.setattr(spotify_source, "resolve", fail)
+    api = agent_api.AgentAPI()
+    api.config = replace(config.DEFAULTS, state_root=tmp_path)
+
+    with pytest.raises(ValueError, match="playlist unavailable"):
+        api.run_playlist("Set")
+
+    assert state.newest(api.config) is None
+    api.close()
+
 
 def test_run_playlist_rejects_non_spotify_source_without_admitting(monkeypatch):
     admitted = []
@@ -105,15 +113,9 @@ def test_plain_playlist_names_can_contain_colons():
 
 def test_second_active_pass_is_rejected_before_admission(monkeypatch, tmp_path):
     first_job = FakeJob(root=tmp_path / "first")
-    jobs = {first_job.id: first_job}
-    created = []
-    monkeypatch.setattr(agent_api.state, "create",
-                        lambda *args, **kwargs: created.append(kwargs) or first_job)
-
-    def admit(config_value, source, *, job_id=None):
-        return jobs[job_id]
-
-    monkeypatch.setattr(agent_api.spotify_source, "admit", admit)
+    admitted = []
+    monkeypatch.setattr(spotify_source, "admit",
+                        lambda config_value, source: admitted.append(source) or first_job)
 
     def run(config_value, job, **kwargs):
         job.started.set()
@@ -134,17 +136,19 @@ def test_second_active_pass_is_rejected_before_admission(monkeypatch, tmp_path):
             api.run_playlist("spotify:playlist:second")
 
         assert result["job_id"] == first_job.id
-        assert len(created) == 1
+        assert admitted == ["spotify:playlist:first"]
     finally:
         first_job.release.set()
         first_job.finished.wait(1)
 
 
-def test_pass_status_rejects_unknown_and_traversal_job_ids(monkeypatch):
-    monkeypatch.setattr(agent_api.state, "all_jobs", lambda config_value: [])
+def test_pass_status_rejects_unknown_and_traversal_job_ids(tmp_path):
     api = agent_api.AgentAPI()
+    api.config = replace(config.DEFAULTS, state_root=tmp_path / "state")
+    api.config.state_root.mkdir()
+    (api.config.state_root / "outside").mkdir()
 
-    for job_id in ("missing", "../outside", ""):
+    for job_id in ("missing", "../outside", "", "outside/.."):
         with pytest.raises(ValueError):
             api.pass_status(job_id)
 
@@ -163,7 +167,7 @@ def test_pass_status_labels_acquired_and_blank_genre_records(monkeypatch, tmp_pa
         "ungenred": [4],
         "review": [],
     }
-    monkeypatch.setattr(agent_api.state, "all_jobs", lambda config_value: [job])
+    monkeypatch.setattr(state, "find", lambda config, job_id: job if job_id == job.id else None)
     monkeypatch.setattr(agent_api.receipts, "build_status", lambda config_value, selected_job: report)
     api = agent_api.AgentAPI()
     api.config = replace(config.DEFAULTS, state_root=tmp_path)
@@ -180,7 +184,7 @@ def test_partial_pass_finishes_without_claiming_every_request_fulfilled(tmp_path
     job = FakeJob(root=tmp_path / "job")
     job.append_event("operation_finished", stage="pending", complete=False, stop_reason="no_acquisitions")
     report = {"complete": False, "stage": "pending", "stop_reason": "no_acquisitions"}
-    monkeypatch.setattr(agent_api.state, "all_jobs", lambda config: [job])
+    monkeypatch.setattr(state, "find", lambda config, job_id: job if job_id == job.id else None)
     monkeypatch.setattr(agent_api.receipts, "build_status", lambda config, job: report)
     api = agent_api.AgentAPI()
 
@@ -198,9 +202,9 @@ def test_delivery_requires_preview_and_persists_updated_receipt(monkeypatch, tmp
     plan = DeliveryPlan("rekordbox", "collection", "add 1 track", False)
     outcomes = [DeliveryOutcome("rekordbox", True, "delivered", [])]
 
-    monkeypatch.setattr(agent_api.state, "all_jobs", lambda config_value: [job])
+    monkeypatch.setattr(state, "find", lambda config, job_id: job if job_id == job.id else None)
     monkeypatch.setattr(agent_api.receipts, "build",
-                        lambda config_value, selected_job: {"complete": True})
+                        lambda config_value, selected_job, *, plans=None: {"complete": True})
     monkeypatch.setattr(agent_api.deliveries, "delivery_plans", lambda config_value, selected_job: [plan])
     monkeypatch.setattr(agent_api.deliveries, "deliver",
                         lambda config_value, selected_job, approved, **kwargs: outcomes)
@@ -223,14 +227,12 @@ def test_delivery_requires_preview_and_persists_updated_receipt(monkeypatch, tmp
 
 
 def test_stale_delivery_preview_does_not_write_or_update_receipts(monkeypatch, tmp_path):
-    job = FakeJob(root=tmp_path / "job-1")
     cfg = replace(config.DEFAULTS, state_root=tmp_path)
+    job = state.create(cfg, "Delivery")
     plans = [DeliveryPlan("rekordbox", "collection", "add 1 track", False)]
     writes = []
-    monkeypatch.setattr(agent_api.state, "all_jobs", lambda config_value: [job])
-    monkeypatch.setattr(agent_api.deliveries, "delivery_plans",
-                        lambda config_value, selected_job: plans.copy())
-    monkeypatch.setattr(agent_api.deliveries, "deliver",
+    monkeypatch.setattr(agent_api.deliveries, "_plans", lambda *args: plans.copy())
+    monkeypatch.setattr(agent_api.deliveries, "_deliver_target",
                         lambda *args, **kwargs: pytest.fail("stale approved plans must not be written"))
     monkeypatch.setattr(agent_api.receipts, "write", lambda *args, **kwargs: writes.append(args))
     api = agent_api.AgentAPI()
@@ -251,7 +253,7 @@ def test_cleanup_is_preview_only_by_default_and_reports_counts(monkeypatch, tmp_
     calls = []
     raw = {"removed": 3, "remaining": ["spotify:track:kept"], "eligible_uris": ["spotify:track:old"]}
 
-    monkeypatch.setattr(agent_api.state, "all_jobs", lambda config_value: [job])
+    monkeypatch.setattr(state, "find", lambda config, job_id: job if job_id == job.id else None)
     monkeypatch.setattr(agent_api.spotify_reconcile, "reconcile",
                         lambda config_value, selected_job, **kwargs: calls.append(kwargs) or raw)
     api = agent_api.AgentAPI()
@@ -274,12 +276,10 @@ def test_background_failure_is_persisted_as_terminal_status(monkeypatch, tmp_pat
     job = FakeJob(root=tmp_path / "job-1")
     api = agent_api.AgentAPI()
     api.config = replace(config.DEFAULTS, state_root=tmp_path / "state")
-    monkeypatch.setattr(agent_api.spotify_source, "admit",
-                        lambda config_value, source, *, job_id=None: job)
     monkeypatch.setattr(agent_api.spotify_workflow, "run",
                         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("pipeline failed")))
 
-    api._run_pass(job, "spotify:playlist:test")
+    api._run_pass(job)
 
     assert job.events()[-1]["event"] == "operation_finished"
     assert job.events()[-1]["stage"] == "failed"

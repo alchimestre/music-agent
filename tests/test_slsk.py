@@ -53,6 +53,7 @@ def test_the_environment_carries_what_the_daemon_reads(tmp_path, creds, monkeypa
     assert env["SOULSEEK_USERNAME"] == "someone"
     assert "SOULSEEK_PASSWORD" not in env.keys()
     assert config.credential(config.slsk_password_env) == "a secret"
+    assert env["SOULSEEK_SEARCH_TIMEOUT"] == f"{slsk.SEARCH_TIMEOUT:g}"
 
 
 def test_credentials_are_renamed_to_what_the_daemon_expects(tmp_path, monkeypatch):
@@ -111,9 +112,9 @@ def test_the_concurrency_the_daemon_runs_at_comes_from_config(tmp_path, creds):
         encoding="utf-8",
     )
 
-    env = slsk.environment(config_module.load(config_path))
-
-    assert env["SOULSEEK_MAX_CONCURRENT_DOWNLOADS"] == "7"
+    config = config_module.load(config_path)
+    command = slsk.Daemon(config)._command("someone")
+    assert command[command.index("--max-concurrent-downloads") + 1] == "7"
 
 
 class Running:
@@ -144,6 +145,14 @@ def test_the_client_authenticates_and_names_the_account(tmp_path, creds):
         assert daemon.session_lost() is False
 
 
+@pytest.mark.parametrize("loss", ["displaced", "disconnected"])
+def test_the_client_reads_a_structured_session_loss(tmp_path, creds, loss):
+    with Running(tmp_path) as (daemon, fake):
+        fake.session_loss = {"kind": loss}
+        assert daemon.session_lost() is (loss == "displaced")
+        assert daemon.disconnected() is (loss == "disconnected")
+
+
 def test_a_protocol_mismatch_is_refused_rather_than_guessed(tmp_path, creds):
     """The daemon bumps its protocol when a change would break a client written against the old shape. A
     client that guessed would send the old shape and read the answer as a failure of the network."""
@@ -162,6 +171,8 @@ def test_the_wrong_account_on_the_daemon_is_named(tmp_path, creds):
     try:
         with pytest.raises(slsk.DaemonError, match="another"):
             daemon.ensure()
+        with pytest.raises(slsk.DaemonError, match="another"):
+            daemon.connect()
     finally:
         fake.stop_server()
         shutil.rmtree(directory, ignore_errors=True)
@@ -175,7 +186,7 @@ def test_a_search_is_put_on_the_wire_and_read_once(tmp_path, creds):
     assert offers[0]["filename"] == "Music\\Artist - Title.flac"
     assert offers[0]["duration_sec"] == 449
     methods = [method for method, _ in fake.calls if method != "auth"]
-    assert methods == ["search.forget", "search.start", "search.results", "search.forget"]
+    assert methods == ["search.start", "search.results", "search.forget"]
 
 
 def test_a_search_keeps_reading_the_events_a_leeched_daemon_pushes(tmp_path, creds):
@@ -207,9 +218,7 @@ def test_a_closed_socket_is_reconnected_before_the_next_call(tmp_path, creds):
 
 
 def test_a_missed_connect_does_not_replace_the_daemon(tmp_path, creds, monkeypatch):
-    """A connect can miss on a daemon that is still starting or briefly busy. Starting a second daemon means
-    killing the first to take the port and logging the account in again — so the second attempt is a connect,
-    and only after that is a start considered."""
+    """Try a busy endpoint again before trying to start a second daemon, which cannot take the busy port."""
     running = Running(tmp_path)
     with running as (_daemon, _fake):
         attempts = []

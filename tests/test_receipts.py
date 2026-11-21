@@ -16,8 +16,11 @@ class FakeJob:
         self._records = records
         self._events = list(events)
 
-    def records(self):
+    def records(self, *, records=None, work_ids=None):
         return self._records
+
+    def execution(self):
+        return self
 
     def events(self):
         return self._events
@@ -66,9 +69,11 @@ def test_duplicate_memberships_get_separate_rows_for_every_target(tmp_path, monk
     targets = [SimpleNamespace(name="rekordbox"), SimpleNamespace(name="traktor")]
     monkeypatch.setattr(deliveries.exporting, "configured", lambda config: targets)
     monkeypatch.setattr(store, "work_ids", lambda root, job_id: {1: "shared", 2: "shared"})
-    monkeypatch.setattr(store, "delivery_status", lambda *args: "success")
-    monkeypatch.setattr(deliveries, "delivery_plans", lambda config, job: [
-        plan("rekordbox", "rb", paths=[audio]), plan("traktor", "tk", paths=[audio])])
+    plans = [plan("rekordbox", "rb", paths=[audio]), plan("traktor", "tk", paths=[audio])]
+    monkeypatch.setattr(store, "delivery_statuses", lambda root, job_id: {
+        ("shared", plan.target, deliveries._collection_key(plan.destination, first, "shared")): "success"
+        for plan in plans})
+    monkeypatch.setattr(deliveries, "delivery_plans", lambda config, job: plans)
 
     receipts = deliveries.delivery_receipts(config, job)
 
@@ -87,9 +92,8 @@ def test_receipt_requires_current_artifact_and_current_destination(tmp_path, mon
                         lambda config: [SimpleNamespace(name="rekordbox")])
     monkeypatch.setattr(store, "work_ids", lambda root, job_id: {1: "work-1"})
     old_destination = deliveries._collection_key("old-target", item, "work-1")
-    monkeypatch.setattr(store, "delivery_status",
-                        lambda root, work, target, destination: "success"
-                        if destination == old_destination else None)
+    monkeypatch.setattr(store, "delivery_statuses",
+                        lambda root, job_id: {("work-1", "rekordbox", old_destination): "success"})
     monkeypatch.setattr(deliveries, "delivery_plans", lambda config, job: [
         plan("rekordbox", "new-target", paths=[audio])])
 
@@ -109,9 +113,8 @@ def test_changed_artifact_invalidates_old_success_receipt(tmp_path, monkeypatch)
     monkeypatch.setattr(store, "work_ids", lambda root, job_id: {1: "work-1"})
     old_destination = deliveries._collection_key("rb", item, "work-1")
     audio.write_bytes(b"replacement audio")
-    monkeypatch.setattr(store, "delivery_status",
-                        lambda root, work, target, destination: "success"
-                        if destination == old_destination else None)
+    monkeypatch.setattr(store, "delivery_statuses",
+                        lambda root, job_id: {("work-1", "rekordbox", old_destination): "success"})
 
     receipt = deliveries.delivery_receipts(config, job, [plan("rekordbox", "rb", paths=[audio])])[1]["rekordbox"]
 
@@ -125,7 +128,7 @@ def test_blocked_current_plan_overrides_saved_success(tmp_path, monkeypatch):
     monkeypatch.setattr(deliveries.exporting, "configured",
                         lambda config: [SimpleNamespace(name="rekordbox")])
     monkeypatch.setattr(store, "work_ids", lambda root, job_id: {1: "work-1"})
-    monkeypatch.setattr(store, "delivery_status", lambda *args: "success")
+    monkeypatch.setattr(store, "delivery_statuses", lambda *args: {})
 
     receipt = deliveries.delivery_receipts(
         config, job, [plan("rekordbox", "rb", blocked=True)])[1]["rekordbox"]
@@ -158,8 +161,9 @@ def test_partial_and_missing_targets_never_report_complete(tmp_path, monkeypatch
     targets = [SimpleNamespace(name="rekordbox"), SimpleNamespace(name="traktor")]
     monkeypatch.setattr(deliveries.exporting, "configured", lambda config: targets)
     monkeypatch.setattr(store, "work_ids", lambda root, job_id: {1: "work-1"})
-    monkeypatch.setattr(store, "delivery_status", lambda root, work, target, destination:
-                        "success" if target == "rekordbox" else None)
+    monkeypatch.setattr(store, "delivery_statuses",
+                        lambda root, job_id: {("work-1", "rekordbox",
+                                               deliveries._collection_key("rb", item, "work-1")): "success"})
     monkeypatch.setattr(deliveries, "delivery_plans", lambda config, job:
                         [plan("rekordbox", "rb", paths=[item.local_path])])
 
@@ -227,7 +231,7 @@ def test_build_status_clears_recovered_collection_blocker(tmp_path, monkeypatch)
         {"event": "delivery_finished", "outcomes": [{"target": "traktor", "success": True}]},
     ])
     config = receipt_config(tmp_path)
-    monkeypatch.setattr(receipts, "build", lambda config, job: {"complete": True})
+    monkeypatch.setattr(receipts, "build", lambda config, job, plans=None: {"complete": True})
 
     status = receipts.build_status(config, job)
 
@@ -243,7 +247,7 @@ def test_build_status_preserves_acquisition_failure_after_delivery(tmp_path, mon
         {"event": "delivery_finished", "outcomes": [{"target": "traktor", "success": True}]},
     ])
     config = receipt_config(tmp_path)
-    monkeypatch.setattr(receipts, "build", lambda config, job: {"complete": False})
+    monkeypatch.setattr(receipts, "build", lambda config, job, plans=None: {"complete": False})
 
     status = receipts.build_status(config, job)
 
@@ -264,7 +268,7 @@ def test_build_status_clears_collection_blocker_when_other_tracks_remain(tmp_pat
         {"idx": 2, "status": state.PENDING, "local_path": "",
          "deliveries": {"traktor": {"status": "failed"}}},
     ]}
-    monkeypatch.setattr(receipts, "build", lambda config, job: report)
+    monkeypatch.setattr(receipts, "build", lambda config, job, plans=None: report)
 
     status = receipts.build_status(receipt_config(tmp_path), job)
 
@@ -283,7 +287,7 @@ def test_build_status_keeps_current_delivery_failure_after_prior_success(tmp_pat
         {"idx": 1, "status": state.TAGGED, "local_path": "/audio/ready.flac",
          "deliveries": {"traktor": {"status": "failed"}}},
     ]}
-    monkeypatch.setattr(receipts, "build", lambda config, job: report)
+    monkeypatch.setattr(receipts, "build", lambda config, job, plans=None: report)
 
     status = receipts.build_status(receipt_config(tmp_path), job)
 
@@ -298,7 +302,7 @@ def test_a_resumed_pass_does_not_carry_the_previous_runs_blocker(tmp_path, monke
          "blocker": "network stopped", "stop_reason": "transient_disconnected"},
         {"event": "operation_started"},
     ])
-    monkeypatch.setattr(receipts, "build", lambda config, job: {"complete": False, "records": []})
+    monkeypatch.setattr(receipts, "build", lambda config, job, plans=None: {"complete": False, "records": []})
 
     status = receipts.build_status(receipt_config(tmp_path), job)
 
