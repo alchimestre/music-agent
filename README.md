@@ -25,14 +25,13 @@ here; conversion is `ffmpeg`. `[tools]` in `config.toml` can point at other copi
 1. Extract the complete Windows bundle and open `music-agent.exe`.
 2. Open Settings. Enter the required credentials; each field has a button that opens its service setup page.
 3. Click Validate and save settings.
-4. Open Add playlist. Choose a public playlist URL or tracklist file, click Preview playlist, then Add preview to queue.
-5. Leave the window open. The queue is worked through automatically, one pass at a time: each row shows its
-   stage, peer, and a progress bar. Process submission runs the selected submission immediately instead of
-   waiting its turn.
+4. Paste a public playlist URL in Queue and click Preview playlist. For a tracklist file, use Add playlist.
+5. Check the preview, then click Add preview to queue.
+6. Leave the window open. The queue processes one submission at a time. Select a track to see its source,
+   peer, and why it is waiting. Process submission runs the selected submission immediately.
 
-The desktop has no review screen. A track whose only offers are files the rule will not take on their own
-stays in the queue, counted under Outstanding requests. Decide it with the CLI:
-`music-agent --config PATH review --list`, where `PATH` is the desktop's `config.toml`.
+For tracks marked Needs a decision, use `music-agent --config PATH review --list`, where `PATH` is the
+desktop's `config.toml`.
 
 The desktop and the CLI keep separate settings and jobs, so neither sees the other's runs unless the CLI is
 given the desktop's config:

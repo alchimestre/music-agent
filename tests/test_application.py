@@ -155,6 +155,15 @@ def test_snapshot_can_read_a_legacy_job_without_memberships(tmp_path):
     assert {row.job_id for row in app.snapshot()} == {current.id, legacy.id}
 
 
+def test_snapshot_distinguishes_unsearched_from_empty_search(tmp_path):
+    app = app_for(tmp_path)
+    job_id, job = _one_track_job(app, tmp_path)
+    assert app.snapshot(job_id)[0].queue_reason == "not_searched"
+
+    job.append_event("searched", idx=1, added=0, offered=0)
+    assert app.snapshot(job_id)[0].queue_reason == "nothing_offered"
+
+
 def test_acquire_retries_after_an_earlier_search(tmp_path, monkeypatch):
     app = app_for(tmp_path)
     _, job = _one_track_job(app, tmp_path)

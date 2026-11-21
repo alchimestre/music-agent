@@ -4,11 +4,11 @@
     {
       "name": "ffmpeg",
       "files": ["ffmpeg.exe", "ffprobe.exe"],
-      "version": "N-128273-g836436cfb9",
-      "archive": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-11-01-12-49/ffmpeg-N-128273-g836436cfb9-win64-lgpl.zip",
-      "sha256": "00bfdb3e67d674822e447d12bfa83db5910ed7618b0dc11bd4f6f53c2f798c61",
-      "license": "LGPL-2.1-or-later",
-      "license_url": "https://raw.githubusercontent.com/FFmpeg/FFmpeg/836436cfb9/LICENSE.md"
+      "version": "n9.0.2-61-gd59078794d",
+      "archive": "https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/autobuild-2026-11-20-12-40/ffmpeg-n9.0.2-61-gd59078794d-win64-lgpl-9.0.zip",
+      "sha256": "814c62c35ca7e2b15d85b0a2a5b79bbf21783176520154f26a6df1e9df72761e",
+      "license": "LGPL-3.0-or-later",
+      "license_url": "https://raw.githubusercontent.com/FFmpeg/FFmpeg/d59078794d/COPYING.LGPLv3"
     },
     {
       "name": "fpcalc",

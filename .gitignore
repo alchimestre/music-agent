@@ -9,6 +9,7 @@ __pycache__/
 # The design notes, the agent glue and this machine's configuration: kept on disk, never published. `skill/`
 # is deliberately absent from this list — it ships, because the CLI is meant to be driven by a harness.
 .scratch/
+/graphify-out/
 agent/
 docs/agents/
 AGENTS.md

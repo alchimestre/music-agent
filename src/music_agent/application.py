@@ -46,6 +46,7 @@ class QueueRow:
     peer: str = ''
     peer_queue: int | None = None
     progress: str = ''
+    queue_reason: str = ""
 
 
 @dataclass
@@ -105,11 +106,21 @@ class Application:
             peers = {event['idx']: event.get('peer', '') for event in events
                      if event.get('event') == 'transfer_started' and event.get('idx') is not None}
             work_ids = store.work_ids(self.config.state_root, job.id)
-            for record in job.records():
+            records = job.records()
+            waiting = state.queue(job, records=records, events=events)
+            reasons = {
+                record.idx: reason
+                for reason, group in (
+                    ("review", waiting.needs_you), ("nothing_offered", waiting.nothing_offered),
+                    ("nothing_usable", waiting.nothing_usable), ("not_searched", waiting.not_searched),
+                )
+                for record in group
+            }
+            for record in records:
                 rows.append(QueueRow(job.id, record.idx, record.label, record.status,
                                      record.decision, record.notes, record.local_path,
                                      work_ids.get(record.idx, ''), source=source,
-                                     peer=peers.get(record.idx, '')))
+                                     peer=peers.get(record.idx, ''), queue_reason=reasons.get(record.idx, '')))
         return rows
 
     def run(self, job_id: str, emit=lambda event: None) -> RunResult:
