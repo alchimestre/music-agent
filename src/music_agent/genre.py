@@ -12,9 +12,9 @@ Nothing here is put to a person: a name that fits nothing is counted and printed
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
 
 from .parsing import fold
 
@@ -98,7 +98,7 @@ def resolve(offered: Sequence[str], *, vocabulary: Sequence[str],
     the vocabulary is read from the collection at run time.
     """
     allowed = {fold(genre) for genre in vocabulary}
-    ranked: list[tuple[tuple[int, int], str, str]] = []
+    ranked: list[tuple[tuple[tuple[int, int], int], str, str]] = []
     for order, source in enumerate(offered):
         mapped = mappings.get(fold(source))
         if mapped and fold(mapped) in allowed:

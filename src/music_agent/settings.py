@@ -104,7 +104,7 @@ def check_access(path: Path, *, writable: bool) -> None:
 
 
 def settings_text(config: Config) -> str:
-    sections = {
+    sections: dict[str, dict[str, object]] = {
         'paths': {'staging': config.staging, 'lossless': config.lossless, 'lossy': config.lossy,
                   'state': config.state_root, 'peers': config.peers},
         'loudness': {'target_lufs': config.target_lufs, 'true_peak_db': config.true_peak_db,
