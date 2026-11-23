@@ -7,7 +7,6 @@ daemon is not stopped here: only the child this runtime spawned is.
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
