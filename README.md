@@ -1,247 +1,165 @@
 # music-agent
 
-A tracklist in, tracks in every collection you export to: files from Soulseek, lossless converted to
-16-bit/44.1 kHz AIFF at −14 LUFS / −1 dBTP, tags from MusicBrainz and AcoustID. Each step is recorded under
-the state root, `paths.state/<job_id>/`, so a job can be resumed or repeated.
+Give music-agent a playlist. It finds tracks, prepares audio and imports them into your DJ libraries.
 
-## Start
-
-1. `git submodule update --init` — the loudness normalizer.
-2. `uv sync` — Python 3.13+.
-3. `cp .env.example .env`, then fill in Soulseek, MusicBrainz and AcoustID credentials.
-4. `set -a; source .env; set +a`.
-
-```sh
-music-agent run --tracks <file|dir|URL>
+```mermaid
+flowchart LR
+    Input[Playlist or folder] --> Search[Search Soulseek]
+    Search --> Prepare[Prepare and tag audio]
+    Prepare --> Libraries[Your DJ libraries]
+    Search --> Review[Needs your decision]
 ```
 
-That is the whole pipeline. It prints one line per stage and asks nothing.
+Lossless files become 16-bit/44.1 kHz AIFF. Lossy files keep their format.
+Default loudness is −14 LUFS / −1 dBTP. Runs can be resumed.
 
-`uv tool install --editable .` puts `music-agent` on PATH from this checkout. The loudness normalizer ships
-here; conversion is `ffmpeg`. `[tools]` in `config.toml` can point at other copies.
+## Quick start
 
-## Windows desktop
+Needs Python 3.13+, `uv`, FFmpeg and `soulseek-rs`.
+On macOS: `brew install michel/tap/soulseek-rs ffmpeg chromaprint`.
+Other systems: install [FFmpeg](https://ffmpeg.org/download.html), Chromaprint (`fpcalc`), and [soulseek-rs](https://github.com/michel/soulseek-rs#installation).
 
-1. Extract the complete Windows bundle and open `music-agent.exe`.
-2. Open Settings. Enter the required credentials; each field has a button that opens its service setup page.
-3. Click Validate and save settings.
-4. Paste a public playlist URL in Queue and click Preview playlist. For a tracklist file, use Add playlist.
-5. Check the preview, then click Add preview to queue.
-6. Leave the window open. The queue processes one submission at a time. Select a track to see its source,
-   peer, and why it is waiting. Process submission runs the selected submission immediately.
+1. Clone and install:
 
-For tracks marked Needs a decision, use `music-agent --config PATH review --list`, where `PATH` is the
-desktop's `config.toml`.
+```sh
+git clone --recurse-submodules https://github.com/alchimestre/music-agent.git
+cd music-agent
+uv tool install --editable .
+```
 
-The desktop and the CLI keep separate settings and jobs, so neither sees the other's runs unless the CLI is
-given the desktop's config:
+2. Copy settings:
 
-| | config | state |
-|---|---|---|
-| desktop | `config.toml` in the platform user config directory | `jobs/` in the platform user data directory |
-| CLI, MCP | `config.toml` beside this file, else `~/.config/music-agent/config.toml` | `paths.state`, `~/Music/music-agent/state` by default |
+```sh
+cp config.example.toml config.toml
+cp .env.example .env
+```
 
-Secrets are stored in the OS credential store when Remember secrets in the OS credential store is checked.
-Settings accept UTF-8 with or without a byte-order mark. A malformed settings file stops startup.
-Files remain available without a DJ collection export.
+3. Set installed collections in `[export] targets`.
+4. Fill `MUSICBRAINZ_CONTACT`, `ACOUSTID_API_KEY`, `SLSK_USERNAME` and `SLSK_PASSWORD` in `.env`.
+5. Load credentials and run:
+
+```sh
+set -a; . ./.env; set +a
+music-agent run --tracks path/to/tracklist.txt
+```
+
+Reload `.env` in each terminal.
+Inputs: tracklist, audio folder or public playlist URL.
+YouTube also needs `yt-dlp` on `PATH`.
 
 ## Commands
 
-| command | what it does | time |
-|---|---|---|
-| `run --tracks FILE` | acquire, process, export, sweep | hours |
-| `run --tracks DIR` | the same, over a lane: every file in it is a track to upgrade | hours |
-| `acquire --tracks FILE\|DIR` | search and download into staging | hours |
-| `process` | identify, genre, convert, normalize, tag | hours |
-| `import` | export to every target; rekordbox must be closed | seconds |
-| `status` | what the run did, and what needs you | seconds |
-| `status --queue` | tracks not settled, and why | seconds |
-| `status --files` | files nothing points at; rows whose file has gone | seconds |
-| `review --list` | the queue, numbered, with the reason each was left | seconds |
-| `retag` | re-derive genres on files already tagged | minutes |
-| `reconcile` | rebuild the run's records from the files it downloaded | seconds |
-| `dedupe` | one row per track; dry run, `--apply` merges | seconds |
-| `backfill` | a row for every file that has none; dry run, `--apply` adds | seconds |
-| `sweep` | staging leftovers; dry run, `--apply` clears | seconds |
-| `tidy` | every leftover check: staging, unpointed files, duplicate rows, gone rows | seconds |
-| `peers` | peers that never deliver; `--unban USER` asks again | seconds |
+| Command | Use |
+|---|---|
+| `run --tracks TRACKS` | Search, process, import and sweep |
+| `status` | Progress; add `--queue`, `--files` or `--json` |
+| `review --list` | Show tracks needing a decision |
+| `acquire`, `process`, `import` | Resume a stage |
+| `reconcile`, `retag` | Rebuild run records or genres |
+| `dedupe`, `backfill`, `sweep` | Preview fixes; `--apply` writes |
+| `tidy` | Report leftovers |
+| `peers` | Show peers that deliver nothing |
 
-`FILE` is a path, or the URL or share link of a public Spotify, Deezer or YouTube playlist. `--job ID`
-picks a run; the default is the newest unfinished one, else the newest. A YouTube playlist needs
-`yt-dlp` on `PATH` (`brew install yt-dlp`); the other two need nothing configured.
+Use `run` normally. Stage commands resume interrupted work.
+`--target NAME` selects collections; `--without NAME` excludes them.
+`--passes N` repeats searches. `--job ID` selects a run.
+Without `--job`, the CLI uses the newest unfinished run, or newest run if all are finished.
 
-Use the stage commands only for an interrupted run or a failed stage; `run` is the normal path.
+## Review
 
-## Export targets
+Use numbers from `review --list`.
 
-`[export] targets` lists the collections, in order; `rekordbox` and `traktor` ship. A target that is not
-installed is skipped, one that refuses leaves the run open, and naming one target is a complete config.
+| Command | Result |
+|---|---|
+| `review --accept 12 --candidate 2` | Download and process candidate 2 |
+| `review --skip 12` | Leave the track for later |
+| `review --not-found 12` | Stop searching in this run |
 
-```sh
-music-agent import --target rekordbox     # one target; repeat for several
-music-agent import --without traktor      # leave one out
-```
+Genres use music-tagger's taxonomy. Unmatched genres stay blank.
 
-`status --files`, `dedupe`, `backfill` and `tidy` read rekordbox's collection, so they need rekordbox
-configured.
+## Collections
 
-Traktor's collection belongs to [traktor-nml](https://github.com/alchimestre/traktor-nml): it owns
-`collection.nml` and its rules, and `[traktor] command` says how to run it. Entries `dedupe` leaves behind are
-`traktor-nml purge`'s to remove.
+Set `[export] targets` to `rekordbox`, `traktor` or both.
+Missing targets are skipped. Failed targets keep the run open.
+Close rekordbox or Traktor before importing.
+Processing can keep files without collection exports.
+Traktor uses [traktor-nml](https://github.com/alchimestre/traktor-nml).
+Genres use `[genres] taxonomy`; lossless upgrades keep the collection genre.
 
-Genres come from music-tagger's taxonomy through `[genres] taxonomy`. Processing keeps canonical families,
-including a collection genre inherited by a lossless upgrade. Other file tags and service genres resolve
-to a family or blank before export. Traktor additions and replacements read that file tag.
+## Windows desktop
 
-## When a track is left over
+Build on Windows from the repository root.
 
-Almost always empty. A file whose length cannot be checked is taken as it is; only a file whose name names no
-track is left for you.
+1. Initialize the converter and install dependencies:
 
 ```sh
-music-agent review --list                     # the queue, numbered, and why each was left
-music-agent review --accept 12 --candidate 2  # fetch that one, then process
-music-agent review --skip 12                  # passed over for now
-music-agent review --not-found 12             # no usable copy; this run asks no more
+git submodule update --init
+uv sync --extra desktop --group windows-build
 ```
 
-`--accept`, `--skip` and `--not-found` are the only answers a queued track takes.
+2. Stage bundled programs:
 
-## Peers
+```sh
+uv run python packaging/windows/stage.py
+```
 
-A peer that advertises, accepts and delivers nothing is a paid mirror. A pass counts those per user:
-`maxretry` inside `findtime_days` earns an ignore for `bantime_days`, and a peer that delivers is forgiven.
-Stored at `paths.peers`.
+3. Build and package:
 
-## Configuration
+```sh
+uv run pyside6-deploy
+uv run python packaging/windows/assemble.py build/windows
+```
 
-`config.toml` beside this file, or `~/.config/music-agent/config.toml` when installed; `--config` reads
-another one. It holds directories, loudness targets, Soulseek pace, the ignore policy, `[tools]` paths,
-`[export]` targets, and the names of the credential variables. No secrets.
+The ZIP is `build/windows/music-agent-windows-unsigned.zip`.
+Extract it and open `music-agent.exe`.
+Enter credentials in Settings, validate, then save.
+Add a playlist or tracklist, preview it, then add the preview.
+The desktop app and CLI use separate settings and jobs.
+The desktop can save secrets in the OS credential store.
+Use the desktop's `config.toml` with CLI `review` for tracks needing a decision.
 
-## Spotify account playlists
+## Spotify playlists
 
-The public playlist reader used by `run` and `acquire` remains anonymous and unchanged. Account playlist
-management uses [spogo](https://github.com/steipete/spogo), an unofficial Spotify client that calls
-undocumented endpoints; Spotify can change or block those endpoints.
-
-Install spogo with Homebrew:
+Account commands use [spogo](https://github.com/steipete/spogo), an unofficial client with undocumented endpoints.
+Install and log in on macOS:
 
 ```sh
 brew install steipete/tap/spogo
+spogo auth import --browser safari
 ```
 
-Import the existing browser session into spogo's local cookie cache:
+Treat the browser cookie cache like a password.
+Use `music-agent spotify --help` for playlist commands.
+`spotify run --remove-delivered` requires a current success receipt from every target for each duplicate.
+`reconcile --job ID` previews removal; add `--apply` to apply it.
+Verify duplicates before removal. Unrelated additions are preserved.
+Concurrent edits to the same URI can race with removal.
+Use `music-agent status --job ID --json` to check delivery receipts.
+Missing or changed audio invalidates a success receipt.
+See the [project guide](skill/SKILL.md) for full instructions.
 
-```sh
-spogo auth import --browser BROWSER
-```
+## Settings and network
 
-Choose a supported browser with an existing Spotify session; Arc is an option. Do not paste cookies or
-passwords into `music-agent` arguments, configuration, logs, or chat. The cookie cache is sensitive
-authentication material; protect it as you would a password.
+CLI config: repository `config.toml`, or `~/.config/music-agent/config.toml` when installed.
+Use `--config PATH` for another file.
+The CLI does not load `.env`; source it in each terminal.
+Default Soulseek port: `20000`. Forward it on your router.
+Close other Soulseek clients before a run. One account supports one client.
+The `soulseek-rs` daemon stays running between runs.
 
-```sh
-music-agent spotify playlists
-music-agent spotify read PLAYLIST
-music-agent spotify read PLAYLIST --json
-music-agent spotify read PLAYLIST --out PATH
-music-agent spotify add PLAYLIST URI...
-music-agent spotify remove PLAYLIST URI...
-music-agent spotify remove PLAYLIST URI... --apply
-```
+## MCP tools
 
-`read` defaults to text and preserves track order and duplicates. Empty collections return empty results.
-`remove` previews the removal of every matching URI occurrence; it writes only with `--apply`.
-Playlist reordering is not supported.
+Install with `uv sync --extra mcp`.
 
-### Delivery-aware runs
-
-Snapshot an account playlist and deliver its supported tracks to every configured collection:
-
-```sh
-music-agent spotify run "PLAYLIST" --json
-```
-
-`PLAYLIST` accepts a URL, URI, ID or unique exact case-insensitive account playlist name.
-Ordered source rows, original credits and duplicate occurrences stay attached to the run.
-Episodes, local tracks and invalid rows remain in the snapshot but are not acquired.
-
-Resume the same run without reacquiring retained audio or repeating successful deliveries:
-
-```sh
-music-agent spotify run --job ID --json
-```
-
-Preview removal of source URIs verified in every configured collection:
-
-```sh
-music-agent spotify reconcile --job ID
-```
-
-Apply the verified removal:
-
-```sh
-music-agent spotify reconcile --job ID --apply
-```
-Cleanup removes only this pass’s acquisitions by default. Add `--scope delivered` to include verified
-already-held tracks.
-
-`spotify run --remove-delivered` applies the removal after delivery, with scope `delivered`.
-Every duplicate occurrence must be verified before its URI is removed.
-Unknown write outcomes are checked against the remote playlist, never blindly retried.
-Unrelated additions are preserved. spogo has no snapshot/CAS control: a concurrent same-URI
-edit between the final read and removal cannot be detected atomically.
-
-Read current per-artifact collection receipts:
-
-```sh
-music-agent status --job ID --json
-```
-
-Each run writes `progress.json`, `receipt.json` and a full `run.log` under its state directory.
-JSON completion goes to stdout; bounded stage updates go to stderr.
-Receipts separate newly acquired files, already-held tracks, review reasons, blank genres and pending targets.
-`stop_reason` distinguishes `collection_blocked`, `transient_disconnected`, `displaced`,
-`no_acquisitions` and `user_stopped`; the run does not restart the daemon or retry indefinitely.
-Closed collection apps are required only for writes, not acquisition.
-Changed or missing audio invalidates its success receipts.
-Delivery receipts also require current collection membership; historical success alone is insufficient.
-A finished job does not authorize Spotify cleanup; each playlist entry must still have verified delivery.
-Traktor requires `traktor-nml verify --json PATH...`; an older backend fails closed.
-Delivery approval ignores empty SQLite WAL files and shared-memory metadata; collection data changes require a new preview.
-
-
-Soulseek takes one client per account. A pass refuses to start while another client of this account is
-running on this machine, names it, and leaves it alone: stop it yourself. Once started, a pass holds the
-session in a daemon that outlives it.
-
-`SLSK_LISTEN_PORT` in `.env` sets the port this machine accepts peers on, a fact about its network. Forward
-it on the router. An optional `[soulseek] listen_port` in `config.toml` is read only when the variable is
-unset.
-
-## Agents
-
-Install the MCP extra before loading the project’s `.mcp.json`:
-
-```sh
-uv sync --all-extras
-```
-
-| Tool | Operation |
+| Tool | Use |
 |---|---|
-| `run_playlist(source)` | Start one Spotify pass and return its job ID |
-| `pass_status(job_id)` | Read progress, review reasons, blank genres and collection outcomes |
-| `deliver_pass(job_id, apply=false)` | Preview delivery; apply the prior preview without acquiring or processing |
-| `cleanup_playlist(job_id, scope="acquired", apply=false)` | Preview or remove verified acquisitions; `delivered` also includes already-held tracks |
+| `run_playlist(source)` | Start a Spotify run |
+| `pass_status(job_id)` | Read progress and delivery |
+| `deliver_pass(job_id, apply=false)` | Preview or apply delivery |
+| `cleanup_playlist(job_id, scope="acquired", apply=false)` | Preview or remove acquisitions |
 
-The server reads `config.toml` and `.env`. Reload the agent session after registering it.
-Delivery previews expire when their artifacts or destinations change. Cleanup verifies Spotify after writing.
-Delivery recovery clears resolved collection blockers without hiding acquisition failures.
-CLI imports refresh the same verified per-file delivery receipts.
-Status distinguishes a finished pass from a fulfilled playlist. Keep the MCP server running during a pass.
-Acquisition counts include every source entry sharing work downloaded in that pass; cleanup still verifies each entry's delivery.
-The `skill/SKILL.md` instructions use these tools when available and the CLI otherwise.
+The server reads `config.toml` and `.env`. Keep it running during a pass.
+Cleanup defaults to acquisitions; `scope="delivered"` includes held tracks.
 
 ## Tests
 
@@ -249,9 +167,14 @@ The `skill/SKILL.md` instructions use these tools when available and the CLI oth
 uv run pytest -q
 ```
 
-Add `--extra desktop --extra mcp` before `pytest` to run the optional desktop and MCP tests.
-Close rekordbox to run the test that mints a row in a copy of the local collection.
+Optional desktop and MCP tests:
 
-No `.env` is needed: the suite supplies a generic MusicBrainz contact.
+```sh
+uv run --extra desktop --extra mcp pytest -q
+```
 
-MIT licensed.
+Close rekordbox for the collection-copy test. Tests need no `.env`.
+
+## License
+
+[MIT](LICENSE).
