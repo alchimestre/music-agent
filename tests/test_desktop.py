@@ -14,6 +14,8 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+pytest.importorskip("PySide6")
+
 from PySide6.QtWidgets import QApplication, QCheckBox, QDialog, QPushButton  # noqa: E402
 
 from music_agent import state  # noqa: E402
