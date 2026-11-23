@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import shutil
-import signal
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -16,7 +15,7 @@ from music_agent import slsk
 
 from fake_server import Fake
 
-from test_processes import machine  # the process table the kill policy is read against
+pytest_plugins = ("test_processes",)
 
 ONE = [{"username": "peer", "filename": "Music\\Artist - Title.flac", "filesize": 100,
         "bitrate": 855, "duration_sec": 449, "has_free_slots": True, "avg_speed": 500_000}]

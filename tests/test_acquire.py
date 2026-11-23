@@ -7,7 +7,6 @@ protocol, with a clock the test moves by hand.
 
 from __future__ import annotations
 
-import json
 import threading
 import time
 from pathlib import Path
