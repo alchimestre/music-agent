@@ -7,9 +7,6 @@ end to end against the stand-in server, with no Soulseek and no waiting.
 
 from __future__ import annotations
 
-import json
-import os
-import sys
 from dataclasses import replace
 from pathlib import Path
 

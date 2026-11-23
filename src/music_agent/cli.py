@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -32,7 +31,6 @@ from . import operations
 from . import sweep
 from . import spotify_account
 from . import tidy
-from . import traktor
 
 
 def _run(config: config_module.Config, args: argparse.Namespace) -> int:
@@ -572,9 +570,9 @@ def _files(config: config_module.Config, job: state.Job) -> int:
         print("  nothing left behind: every file in a lane is pointed at, and every row's file is there")
         return 0
     for heading, paths in (
-        (f"in staging that this run does not point at", leftovers.staged),
-        (f"in a lane that no row and no record points at", leftovers.lane),
-        (f"rows whose file has gone", leftovers.gone),
+        ("in staging that this run does not point at", leftovers.staged),
+        ("in a lane that no row and no record points at", leftovers.lane),
+        ("rows whose file has gone", leftovers.gone),
     ):
         if not paths:
             continue

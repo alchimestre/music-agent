@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from argparse import ArgumentTypeError, Namespace
 from io import StringIO
 from pathlib import Path
@@ -14,7 +13,7 @@ from audio_files import aiff
 from music_agent import acquire
 from music_agent import cli as cli_module
 from music_agent import config as config_module
-from music_agent import deezer, exporting, lanes, library, playlists, slsk, spotify, state, sweep, youtube
+from music_agent import deezer, exporting, lanes, library, playlists, spotify, state, sweep, youtube
 from music_agent import passes as pipeline_passes
 from music_agent.cli import main
 from fake_server import Direct
@@ -428,7 +427,6 @@ def test_the_files_report_names_what_nothing_points_at(tmp_path, capsys, monkeyp
     """A refused placement leaves its file in staging, a re-download can leave a second copy in a lane, and
     a row can outlive its file. All three are reported and none is repaired unasked."""
     config_path = make_paths_config(tmp_path)
-    config = config_module.load(config_path)
     job = seed(config_path, [SETTLED])
     job.write_records([state.Record(idx=1, artist="Kiasmos", title="Blurred",
                                     status=state.DOWNLOADED,
@@ -467,7 +465,6 @@ def test_reconcile_from_the_command_line_rebuilds_a_record(tmp_path, capsys):
     """The one stage `main` reaches whose summary is not a `process.Summary`: it has no failure list, and a
     shared report tail that assumes one breaks exactly here."""
     config_path = make_paths_config(tmp_path)
-    config = config_module.load(config_path)
     job = seed(config_path, [SETTLED])
     lane = tmp_path / "lossless"
     lane.mkdir(parents=True, exist_ok=True)
@@ -788,7 +785,7 @@ def test_peers_lists_the_ignored_and_lifts_one(tmp_path, capsys):
 
     path = make_paths_config(tmp_path)
     path.write_text(path.read_text(encoding="utf-8")
-                    + f'[soulseek]\nmaxretry = 1\nbantime_days = 30\n', encoding="utf-8")
+                    + '[soulseek]\nmaxretry = 1\nbantime_days = 30\n', encoding="utf-8")
     config = config_module.load(path)
 
     assert main(["--config", str(path), "peers"]) == 0
