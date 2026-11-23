@@ -250,6 +250,9 @@ The `skill/SKILL.md` instructions use these tools when available and the CLI oth
 uv run pytest -q
 ```
 
+Add `--extra desktop --extra mcp` before `pytest` to run the optional desktop and MCP tests.
+Close rekordbox to run the test that mints a row in a copy of the local collection.
+
 No `.env` is needed: the suite supplies a generic MusicBrainz contact.
 
 MIT licensed.
