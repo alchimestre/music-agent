@@ -221,14 +221,16 @@ def accept_many(
                 return f"[{record.idx}] {record.label}: {candidate.user} did not hand the file over ({decision.value})"
             return _take(job, record, candidate, path, from_disk=False)
 
-    with daemon_factory() as daemon:
-        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-            # Submitted in pick order: a batch that met a failing peer on a different track each run would
-            # make its own reports untraceable. Completion is still whatever finishes first.
-            running = [pool.submit(fetch, daemon, record, candidate) for record, candidate in fetching]
-            for future in as_completed(running):
-                outcome = future.result()
-                (refused if isinstance(outcome, str) else settled).append(outcome)
+    with daemon_factory() as daemon, ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        # Submitted in pick order: a batch that met a failing peer on a different track each run would
+        # make its own reports untraceable. Completion is still whatever finishes first.
+        running = [pool.submit(fetch, daemon, record, candidate) for record, candidate in fetching]
+        for future in as_completed(running):
+            outcome = future.result()
+            if isinstance(outcome, str):
+                refused.append(outcome)
+            else:
+                settled.append(outcome)
 
     settled.sort(key=lambda s: s.idx)
     return Batch(tuple(settled), tuple(refused))

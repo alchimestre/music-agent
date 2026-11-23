@@ -127,11 +127,14 @@ def test_a_row_is_minted_in_a_copy_of_the_real_collection(tmp_path, request):
     """The mint path against the real schema, which is the only way to know it works rather than looks right:
     the file's own metadata becomes a row, and a second pass finds nothing left to do."""
     from pyrekordbox import Rekordbox6Database
+    from pyrekordbox.utils import get_rekordbox_pid
     from sqlalchemy import text
 
     live = Path("~/Library/Pioneer/rekordbox/master.db").expanduser()
     if not live.is_file():
         pytest.skip("no rekordbox collection here to copy")
+    if get_rekordbox_pid():
+        pytest.skip("close rekordbox before testing commits against a collection copy")
     work = tmp_path / "master.db"
     shutil.copy2(live, work)
     database = Rekordbox6Database(work)
