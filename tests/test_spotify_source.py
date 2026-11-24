@@ -54,6 +54,36 @@ def test_admission_preserves_duplicates_and_episode_positions(tmp_path, monkeypa
     assert spotify_source.admit(config, PLAYLIST_URI).id == job.id
 
 
+def test_the_length_spotify_plays_becomes_the_reference(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    timed = {**track(TRACK_URI, "Pacific", ["747"]), "duration_ms": 317320}
+    untimed = track(TRACK_URI, "State", ["808 State"])
+    monkeypatch.setattr(spotify_account, "read_playlist", lambda _: playlist([timed, untimed]))
+
+    job = spotify_source.admit(config, PLAYLIST_URI)
+
+    assert [record.duration_s for record in job.records()] == [317, None]
+
+
+def test_a_reused_job_takes_the_lengths_for_tracks_it_still_lacks(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    source = playlist([
+        {**track(TRACK_URI, "Pacific", ["747"]), "duration_ms": 317320},
+        {**track(TRACK_URI, "State", ["808 State"]), "duration_ms": 200000},
+    ])
+    monkeypatch.setattr(spotify_account, "read_playlist", lambda _: source)
+    job = spotify_source.admit(config, PLAYLIST_URI)
+    lacking, held = job.records()
+    lacking.duration_s = None
+    held.duration_s, held.status = 150, state.IMPORTED
+    job.write_records([lacking, held])
+
+    reused = spotify_source.admit(config, PLAYLIST_URI)
+
+    assert reused.id == job.id
+    assert [record.duration_s for record in reused.records()] == [317, 150]
+
+
 def test_changed_ordered_source_content_creates_new_job(tmp_path, monkeypatch):
     config = make_config(tmp_path)
     current = playlist([track(TRACK_URI, "First", ["One"])])

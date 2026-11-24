@@ -115,9 +115,10 @@ There is no separate command for a playlist and no file to write first: the URL 
 read once, by the same reader. To read back what a run holds, its own list is `tracks.jsonl` beside its
 `events.jsonl`, under `<state root>/<run id>/`.
 
-What is worth saying before a run starts: a playlist of well-covered classics will come back with a **reference
-that is hard to pin** — MusicBrainz holds many edits of each, `Dreams` among them as 21 recordings from 126 s
-to 301 s — and an offer whose length matches none of them is refused rather than guessed at. That is the rule
+What is worth saying before a run starts: a Spotify playlist carries each track's own length, and that length is
+the **reference**. A list that states no length resolves one from MusicBrainz, and a list of well-covered
+classics will come back with a reference that is hard to pin — `Dreams` is held as 21 recordings from 126 s to
+301 s — so an offer whose length matches none of them is refused rather than guessed at. That is the rule
 working, not the playlist failing; a list of newer or rarer tracks does better.
 
 **Done when** the run holds every track that was asked for, in the order it was asked for.
@@ -187,9 +188,11 @@ Traktor delivery requires `traktor-nml verify --json PATH...`; never treat aggre
 music-agent acquire --tracks <file|dir|URL> --name <what to call the run>
 ```
 
-Read what it prints. Each track resolves a **reference** from MusicBrainz, searches Soulseek, and either
-settles, lands in review, or comes back with nothing usable. Tracks the collection already holds are skipped
-there and then, so a run costs nothing for music that is already in the collection.
+Read what it prints. Each track takes its **reference** from the source, or resolves one from MusicBrainz when
+the source states no length, searches Soulseek, and either settles, lands in review, or comes back with nothing
+usable. A credit of several artists is searched whole, then one artist at a time until a file is takeable, and
+one credited artist in a peer's path is enough to match. Tracks the collection already holds are skipped there
+and then, so a run costs nothing for music that is already in the collection.
 
 A pass shows its position while it runs: one line rewritten in place at a terminal, and one line per track as
 it settles when the output is captured — which is the form a harness reads back. Each line carries the count,
@@ -272,12 +275,9 @@ A track the rule **can** settle is in none of them, and a track whose every offe
 pass that refused them: nothing is left to try, so it is dropped rather than left as a row waiting for somebody
 to say so.
 
-**The length decides between offers, never whether to take one.** A reference length that resolved is what
-tells two offers apart — the ±1 s window — and it is compared only where there is something to compare it to.
-With one offer and no length to check, the file is taken on its name; with several, the ladder decides: lossless
-before lossy, then the higher bitrate, then the faster peer. That is a real trade — an arbitrary tie can pick
-the wrong file — and the pass logs which candidate it took and why, so the choice is visible afterwards rather
-than silent.
+**A reported length must be within ±1 s of the reference.** If either length is missing, a matching name is
+enough for a new track, not for an upgrade. Among takeable files, the ladder prefers lossless, then higher
+bitrate, then faster peers. The pass logs which candidate it took and why.
 
 Everything else the rule decides alone and never shows: a file below the 192 kbps floor, a different version, a
 different artist, a length outside the window, a preview clip.

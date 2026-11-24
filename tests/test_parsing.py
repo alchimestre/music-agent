@@ -10,7 +10,7 @@ import pytest
 
 from music_agent.parsing import (
     appears_in,
-    artists_appear,
+    artist_appears,
     credits,
     extract_mix,
     fold,
@@ -22,6 +22,7 @@ from music_agent.parsing import (
     primary_artist,
     same_credit,
     search_query,
+    search_queries,
     song_title,
     track_title,
     strip_code_tail,
@@ -117,28 +118,35 @@ def test_the_primary_artist_is_the_one_the_credit_leads_with():
 
 
 def test_a_featured_candidate_answers_a_request_for_the_lead_artist():
-    assert artists_appear("Acid Arab", r"M\X\Acid Arab feat. Cem Yıldız - Ejma.flac") is True
+    assert artist_appears("Acid Arab", r"M\X\Acid Arab feat. Cem Yıldız - Ejma.flac") is True
 
 
-def test_a_candidate_naming_one_artist_does_not_answer_a_request_that_names_both():
-    assert artists_appear("Acid Arab feat. Cem Yıldız", r"M\X\Acid Arab - Ejma.flac") is False
+def test_a_candidate_naming_one_credited_artist_answers_a_request_that_names_several():
+    assert artist_appears("Acid Arab feat. Cem Yıldız", r"M\X\Acid Arab - Ejma.flac") is True
+    assert artist_appears("Acid Arab feat. Cem Yıldız", r"M\X\Cem Yıldız - Ejma.flac") is True
+    assert artist_appears("Acid Arab feat. Cem Yıldız", r"M\X\Someone Else - Ejma.flac") is False
 
 
 def test_artist_presence_folds_accents_and_rejects_other_names():
-    assert artists_appear("Claude François", r"M\Claude Francois - X.flac") is True
-    assert artists_appear("Kiasmos", r"M\Kiasmos & Someone - X.flac") is True
-    assert artists_appear("Kiasmos", r"M\Blurred\X.flac") is False
+    assert artist_appears("Claude François", r"M\Claude Francois - X.flac") is True
+    assert artist_appears("Kiasmos", r"M\Kiasmos & Someone - X.flac") is True
+    assert artist_appears("Kiasmos", r"M\Blurred\X.flac") is False
 
 
 def test_the_artist_is_found_in_the_folder_when_the_name_omits_it():
     """`Artist/Album/Track` is the usual shape, so the artist is often only in the path."""
     path = r"@@uqfjk\Music\Aphex Twin\Selected Ambient Works 85-92\12 Delphium.m4a"
-    assert artists_appear("Aphex Twin", path) is True
-    assert artists_appear("Someone Else", path) is False
+    assert artist_appears("Aphex Twin", path) is True
+    assert artist_appears("Someone Else", path) is False
 
 
 def test_a_request_with_no_artist_matches_nobody():
-    assert artists_appear("", r"M\Anyone - X.flac") is False
+    assert artist_appears("", r"M\Anyone - X.flac") is False
+
+
+def test_a_trailing_credit_is_not_the_mix():
+    assert extract_mix("Six (Center of The Universe Remix) (feat. MD Pallavi)") == "Center of The Universe Remix"
+    assert extract_mix("Six (feat. MD Pallavi)") == ""
 
 
 def test_containment_is_on_word_boundaries_not_substrings():
@@ -280,6 +288,15 @@ def test_the_query_carries_no_genre_words():
 
 def test_the_query_is_folded_so_a_dropped_accent_can_still_match():
     assert search_query("Claude François", "Ne-am despărțit") == "claude francois ne am despartit"
+
+
+def test_a_credit_of_several_artists_is_also_asked_one_artist_at_a_time():
+    assert search_queries("Kiasmos", "Blurred") == ["kiasmos blurred"]
+    assert search_queries("Soundwalk Collective, Alif Hilal", "Reverse Discourse (Edit)") == [
+        "soundwalk collective alif hilal reverse discourse",
+        "soundwalk collective reverse discourse",
+        "alif hilal reverse discourse",
+    ]
 
 
 # -- the filename ----------------------------------------------------------

@@ -671,19 +671,57 @@ def test_a_retry_later_record_whose_file_is_in_its_lane_is_not_fetched_again(tmp
     assert tools_called(calls) == [], "a file in its lane has already been downloaded"
 
 
-def test_a_later_pass_prefers_peers_with_free_slots(tmp_path):
-    """Peer attributes may scope a retry pass, and never the first one: the filter is applied to what came
-    back, and only when it leaves something to take."""
-    busy = [{"username": "busy", "filename": "M\\busy.flac", "filesize": 10, "has_free_slots": False}]
-    free = [{"username": "free", "filename": "M\\free.flac", "filesize": 10, "has_free_slots": True}]
-    config, job, daemon, calls = setup(tmp_path, results=busy + free)
+@pytest.mark.parametrize("free_is_takeable", [True, False])
+def test_a_later_pass_prefers_free_slots_only_if_the_offer_is_takeable(tmp_path, free_is_takeable):
+    busy = {**GOOD[0], "username": "busy", "has_free_slots": False}
+    free = {**GOOD[0], "username": "free", "has_free_slots": True}
+    if not free_is_takeable:
+        free["filename"] = "Music\\Kiasmos - Another Track.flac"
+    config, job, daemon, calls = setup(tmp_path, results=[busy, free])
     record = job.records()[0]
 
     first = acquire.search(daemon, record, later_pass=False)
     second = acquire.search(daemon, record, later_pass=True)
 
     assert {candidate.user for candidate in first} == {"busy", "free"}
-    assert [candidate.user for candidate in second] == ["free"]
+    expected = {"free"} if free_is_takeable else {"busy", "free"}
+    assert {candidate.user for candidate in second} == expected
+
+
+@pytest.mark.parametrize("first_offer_was_tried", [True, False])
+def test_a_credit_is_asked_one_artist_at_a_time_until_a_file_is_takeable(tmp_path, first_offer_was_tried):
+    config, job, daemon, calls = setup(tmp_path, results=TWO_PEERS[1:])
+    record = job.records()[0]
+    record.artist = "Somebody Else, Kiasmos, A Third"
+    whole = "somebody else kiasmos a third blurred"
+    other = "somebody else blurred"
+    lead = "kiasmos blurred"
+    wrong_track = {**GOOD[0], "filename": "Music\\Somebody Else - Another Track.flac"}
+    if first_offer_was_tried:
+        record.tried = [GOOD[0]["id"]]
+    answers = {whole: [], other: GOOD if first_offer_was_tried else [wrong_track]}
+    answer = daemon.search
+    asked = []
+
+    def by_query(query, *, timeout):
+        asked.append(query)
+        return answers[query] if query in answers else answer(query, timeout=timeout)
+
+    daemon.search = by_query
+
+    found = acquire.search(daemon, record, later_pass=False)
+
+    assert asked == [whole, other, lead]
+    assert found[-1].user == "peerB"
+
+
+def test_a_file_offered_under_multiple_queries_appears_once_in_the_queue(tmp_path):
+    _, job, _, _ = setup(tmp_path, results=[])
+    record = job.records()[0]
+    offer = Candidate(user="peer", path="Music\\Kiasmos - Blurred.flac")
+
+    assert acquire.merge(record, [offer, offer]) == 1
+    assert record.candidates == [offer]
 
 
 class Nothing:

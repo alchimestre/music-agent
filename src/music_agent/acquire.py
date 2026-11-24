@@ -11,13 +11,14 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field, replace
 from enum import Enum
+from itertools import islice
 from pathlib import Path
 
 from . import peers, progress as progress_bar, reference, rules, slsk, state
 from .config import Config
 from .lanes import Held
 from .library import Library
-from .parsing import search_query
+from .parsing import search_queries
 from .reference import Lookup
 from .rules import Candidate
 from .slsk import Daemon, DaemonError
@@ -391,29 +392,43 @@ class Pacer:
             self._sleep(delay)
 
 
-def search(daemon: Daemon, record: state.Record, *, later_pass: bool) -> list[Candidate]:
-    """Ask the daemon, and read back what it offered.
-
-    A retry pass prefers peers with a free slot, and never the first one, because a filter can eliminate the
-    only peer who has the track. When no peer has a free slot the rest are kept: an offer is worth a later
-    pass, and dropping them would close the track instead.
-    """
-    offered = daemon.search(search_query(record.artist, record.title), timeout=slsk.SEARCH_TIMEOUT)
-    found = [candidate for candidate in (candidate_of(item) for item in offered) if candidate is not None]
-    found = found[:MAX_RESULTS]
-    if later_pass:
-        free = [candidate for candidate in found if candidate.slots]
-        if free:
-            return free
+def search(daemon: Daemon, record: state.Record, *, later_pass: bool,
+           pacer: Pacer | None = None, ledger: peers.Ledger | None = None) -> list[Candidate]:
+    """Search until an untried, takeable offer appears; keep earlier offers for the queue."""
+    request = record.request
+    tried = set(record.tried)
+    found: list[Candidate] = []
+    for query in search_queries(record.artist, record.title):
+        if pacer is not None:
+            pacer.wait()
+        offered = daemon.search(query, timeout=slsk.SEARCH_TIMEOUT)
+        candidates = (candidate for candidate in map(candidate_of, offered) if candidate is not None)
+        batch = list(islice(candidates, MAX_RESULTS))
+        found.extend(batch)
+        eligible = [
+            candidate for candidate in batch
+            if identifier(candidate) not in tried and (ledger is None or not ledger.ignores(candidate.user))
+        ]
+        takeable = rules.takeable(rules.Track(request=request, candidates=eligible))
+        if later_pass and any(verdict.candidate.slots for verdict in takeable):
+            return [candidate for candidate in found if candidate.slots]
+        if takeable:
+            break
     return found
 
 
 def merge(record: state.Record, found: list[Candidate]) -> int:
     """Add what the search found to what the record already holds, without repeating anything."""
     known = {identifier(candidate) for candidate in record.candidates}
-    added = [candidate for candidate in found if identifier(candidate) not in known]
-    record.candidates.extend(added)
-    return len(added)
+    added = 0
+    for candidate in found:
+        key = identifier(candidate)
+        if key in known:
+            continue
+        known.add(key)
+        record.candidates.append(candidate)
+        added += 1
+    return added
 
 
 def await_transfer(
@@ -572,9 +587,10 @@ def _prepare(
     Returns the summary list to file the track under when there is nothing to fetch, and otherwise the lossy
     copy a successful download would replace.
     """
-    if not record.candidates:
+    if record.duration_s is None and not record.candidates:
         # Resolved once, then written into the record: a resumed run never re-queries, and a track that
-        # resolved nothing is not re-asked every time — it is simply taken on its name.
+        # resolved nothing is not re-asked every time — it is simply taken on its name. A length the source
+        # gave is the version asked for, and MusicBrainz is not asked to second-guess it.
         seconds = reference.resolve(record.request, lookup)
         record.duration_s = seconds
         job.append_event("reference", idx=record.idx, seconds=seconds)
@@ -697,9 +713,7 @@ class Pass:
         if outcome is not None:
             return outcome
 
-        if pacer is not None:
-            pacer.wait()
-        found = search(daemon, record, later_pass=later_pass)
+        found = search(daemon, record, later_pass=later_pass, pacer=pacer, ledger=ledger)
         # Before the peers are filtered: a search that came back at all is the daemon talking, whatever it held.
         watch.answered()
         kept = [candidate for candidate in found if not ledger.ignores(candidate.user)]

@@ -67,7 +67,11 @@ def _record_for(raw: dict[str, Any], idx: int) -> state.Record | None:
     request = tracklist.request_for(artist, parsing.track_title(raw["name"]))
     if not request.title:
         return None
-    return state.Record(idx=idx, artist=request.artist, title=request.title, mix=request.mix)
+    # The length Spotify plays is the length of the version asked for, which no lookup by name can promise.
+    length_ms = raw.get("duration_ms")
+    seconds = round(length_ms / 1000) if isinstance(length_ms, int) and length_ms > 0 else None
+    return state.Record(idx=idx, artist=request.artist, title=request.title, mix=request.mix,
+                        duration_s=seconds)
 
 
 def _latest_identical(config: Config, payload: dict[str, Any]) -> state.Job | None:
@@ -87,10 +91,28 @@ def admit(config: Config, source: str, name: str | None = None) -> state.Job:
     with store.writer_lock(config.state_root):
         existing = _latest_identical(config, payload)
         if existing is not None:
+            _carry_lengths(existing, records)
             return existing
         job = state.create(config, name or playlist.name, records)
         job.append_event("spotify_source", snapshot=payload)
         return job
+
+
+def _carry_lengths(job: state.Job, admitted: list[state.Record]) -> None:
+    """Give a reused job the lengths its source states, so the tracks it still lacks are checked against the
+    version asked for rather than taken on a name or on another edit's length."""
+    lengths = {record.idx: record.duration_s for record in admitted if record.duration_s is not None}
+    changed = []
+    for record in job.records():
+        length = lengths.get(record.idx)
+        if length is None or record.duration_s == length:
+            continue
+        if record.status not in {state.PENDING, state.RETRY_LATER}:
+            continue
+        record.duration_s = length
+        changed.append(record)
+    if changed:
+        job.write_records(changed)
 
 
 def snapshot(job: state.Job) -> dict[str, Any] | None:

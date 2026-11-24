@@ -17,7 +17,8 @@ from pathlib import PurePosixPath
 
 from .parsing import (
     appears_in,
-    artists_appear,
+    artist_appears,
+    credits,
     extract_mix,
     is_original,
     is_remix,
@@ -60,8 +61,9 @@ class Label(Enum):
 class Request:
     """What is being asked for.
 
-    `ref_duration` is the MusicBrainz recording length in whole seconds, or None when nothing could be
-    resolved — and a None reference can never settle a track.
+    `ref_duration` is the track's length in whole seconds — the source's own when it gives one, else the
+    MusicBrainz recording length — or None when nothing could be resolved, and a None reference can never
+    settle a track.
 
     `replaces` is the lossy copy the collection already holds, when this track is an upgrade. It makes the
     request *optional*: the collection already plays the track, so a file that cannot improve on that copy —
@@ -149,19 +151,39 @@ def hms(seconds: int | None) -> str:
     return "  ?  " if seconds is None else "%d:%02d" % (seconds // 60, seconds % 60)
 
 
-def version_matches(candidate: Candidate, request: Request) -> bool:
+def version_matches(candidate: Candidate, request: Request, *, length_agrees: bool = False) -> bool:
     """What a request is willing to take.
 
     A named version takes only that version. A bare request takes any version that is not somebody else's
     remix, which is wider than `parsing.mix_matches` — that one is the equivalence reference resolution
     filters with, and it has to stay narrow or a bare request would resolve to an extended mix's length.
+
+    A store writes `Aeri (Remix)` and names the remixer in the credit, where a peer writes `Aeri (Vanoni
+    Remix)`: a version prefixed with a credited artist is the version asked for.
+
+    A file that names no version, at the length of the version asked for, is that version: the reference is
+    the named version's own length, and a store's `(Versión Maxi)` is a label few peers copy.
     """
     if is_original(request.mix):
         return not is_remix(candidate.mix)
-    return mix_matches(request.mix, candidate.mix)
+    if length_agrees and not candidate.mix:
+        return True
+    if mix_matches(request.mix, candidate.mix):
+        return True
+    return any(mix_matches(f"{artist} {request.mix}", candidate.mix) for artist in credits(request.artist))
 
 
-def _judged_by_name(candidate: Candidate, request: Request) -> Verdict | None:
+def _names_the_track(request: Request, path: str) -> bool:
+    """Whether the basename carries the title, in either order: `Artist - Title` or `Title - Artist`."""
+    parsed = parse_filename(path)
+    if appears_in(request.title, parsed.title):
+        return True
+    if parsed.raw_title and appears_in(request.title, parsed.raw_title):
+        return True
+    return appears_in(request.title, parsed.artist) and artist_appears(request.artist, parsed.title)
+
+
+def _judged_by_name(candidate: Candidate, request: Request, *, length_agrees: bool = False) -> Verdict | None:
     """What the file itself says, which no reference length is needed to read.
 
     A wrong artist, a wrong track, a wrong version, or a lossy file under the quality floor is not a question
@@ -169,16 +191,13 @@ def _judged_by_name(candidate: Candidate, request: Request) -> Verdict | None:
     remix was offered fifteen files of the same EP — six of them other tracks, most of the rest the original —
     because the queue's one question was asked before the name was read.
     """
-    parsed = parse_filename(candidate.path)
-
-    if not parsed.title:
+    if not parse_filename(candidate.path).title:
         return Verdict(candidate, Label.NEEDS_YOU, "the filename names no track")
 
-    if not artists_appear(request.artist, candidate.path):
+    if not artist_appears(request.artist, candidate.path):
         return Verdict(candidate, Label.REJECTED, "a different artist")
 
-    if not appears_in(request.title, parsed.title) and not (
-            parsed.raw_title and appears_in(request.title, parsed.raw_title)):
+    if not _names_the_track(request, candidate.path):
         return Verdict(candidate, Label.REJECTED, "a different track")
 
     # Below the floor a lossy file is ruled out rather than offered: 2026-10-12, these went to review
@@ -186,7 +205,7 @@ def _judged_by_name(candidate: Candidate, request: Request) -> Verdict | None:
     if not candidate.lossless and candidate.bitrate is not None and candidate.bitrate < QUALITY_FLOOR:
         return Verdict(candidate, Label.REJECTED, f"{candidate.bitrate} kbps — below the quality floor")
 
-    if not version_matches(candidate, request):
+    if not version_matches(candidate, request, length_agrees=length_agrees):
         return Verdict(candidate, Label.REJECTED, f"a different mix — {candidate.mix or 'unnamed'}")
 
     return None
@@ -236,7 +255,7 @@ def classify(candidate: Candidate, request: Request) -> Verdict:
     # track. The artist is looked for across the whole path because peers keep it in the folder — `…\Aphex
     # Twin\Selected Ambient Works 85-92\12 Delphium.m4a` — and the title is looked for in the basename, which
     # is the one place a title is always written.
-    named = _judged_by_name(candidate, request)
+    named = _judged_by_name(candidate, request, length_agrees=True)
     if named is not None:
         return named
 
@@ -244,7 +263,7 @@ def classify(candidate: Candidate, request: Request) -> Verdict:
         return Verdict(candidate, Label.READY, "same mix, length matches")
     # A bare request takes a non-remix version, so name the version that was taken rather than claiming the
     # two are the same mix.
-    return Verdict(candidate, Label.READY, f"{candidate.mix}, same length as the reference")
+    return Verdict(candidate, Label.READY, f"{candidate.mix or 'unnamed'}, same length as the reference")
 
 
 def visible(track: Track) -> list[Verdict]:

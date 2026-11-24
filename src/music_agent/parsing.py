@@ -58,18 +58,19 @@ _CREDITS = frozenset({"feat", "ft", "featuring", "with"})
 
 
 def extract_mix(name: str) -> str:
-    """The last parenthesised group — 'Original Mix', a remixer's name, or '' — wherever it sits in the name.
+    """The last parenthesised group that is not a credit — 'Original Mix', a remixer's name, or '' — wherever
+    it sits in the name.
 
     Read from the whole string, never from a filename stem: a title holds dots of its own, and taking
     `E.T. (Tiesto Remix)` for a file name lost the version, so the request asked for the original.
 
-    A credit is not a mix: `(feat X)` and `(ft. X)` return ''.
+    A credit is not a mix: `(feat X)` and `(ft. X)` are skipped, so `Six (Some Remix) (feat. X)` is still
+    that remix.
     """
-    groups = _PARENTHESISED.findall(name)
-    if not groups:
-        return ""
-    trailing = groups[-1].strip()
-    return "" if fold(trailing).split(" ")[0].rstrip(".") in _CREDITS else trailing
+    for group in reversed(_PARENTHESISED.findall(name)):
+        if fold(group).split(" ")[0] not in _CREDITS:
+            return group.strip()
+    return ""
 
 
 def strip_code_tail(name: str) -> str:
@@ -146,14 +147,17 @@ def appears_in(wanted: str, text: str) -> bool:
     return any(words[i:i + span] == wanted_words for i in range(len(words) - span + 1))
 
 
-def artists_appear(wanted: str, path: str) -> bool:
-    """Is every artist the request names present in the peer's path?
+def artist_appears(wanted: str, path: str) -> bool:
+    """Is an artist the request names present in the peer's path?
+
+    One is enough. A store credits everybody — composer, ensemble, conductor, remixer — and a peer files
+    the track under one of them: asking for all of them refused `Andi Otto - Six (… remix).aif` for want
+    of the two other names in its credit.
 
     The whole path is searched rather than the basename alone, because peers routinely leave the artist
     in the folder and name the file `12 Delphium.m4a`.
     """
-    named = credits(wanted)
-    return bool(named) and all(appears_in(artist, path) for artist in named)
+    return any(appears_in(artist, path) for artist in credits(wanted))
 
 
 def bare_title(text: str) -> str:
@@ -325,6 +329,18 @@ def search_query(artist: str, title: str) -> str:
     return zero results, and peers routinely drop accents.
     """
     return fold(f"{artist} {bare_title(title)}")
+
+
+def search_queries(artist: str, title: str) -> list[str]:
+    """The queries worth asking, in order: the whole credit, then each credited artist on its own.
+
+    A peer's path has to hold every word of a query, and a store credits more names than a peer writes —
+    composer, ensemble, conductor, remixer. The whole credit of `Soundwalk Collective, Alif Hilal` answered
+    nothing where the first name alone answered sixteen files.
+    """
+    named = credits(artist)
+    alone = [search_query(one, title) for one in named] if len(named) > 1 else []
+    return list(dict.fromkeys([search_query(artist, title), *alone]))
 
 
 @dataclass(frozen=True)

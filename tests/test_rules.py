@@ -227,6 +227,33 @@ def test_a_candidate_crediting_more_artists_still_matches():
     assert verdict.label is Label.READY
 
 
+def test_one_credited_artist_in_the_name_is_enough():
+    """A store credits composer, ensemble and remixer; a peer files the track under one of them."""
+    request = Request(artist="Artist, Guest, Remixer", title="Title", ref_duration=300)
+    assert verdict_for("Artist - Title.flac", request, duration=300) is Label.READY
+    assert verdict_for("Someone Else - Title.flac", request, duration=300) is Label.REJECTED
+
+
+def test_a_name_written_title_first_is_the_same_track():
+    assert verdict_for("Title - Artist.mp3", REQUEST, duration=300, bitrate=320) is Label.READY
+    assert verdict_for("Something Else - Artist.mp3", REQUEST, duration=300, bitrate=320) is Label.REJECTED
+
+
+def test_a_remix_named_only_by_its_credit_takes_the_credited_remixers_version():
+    """A store writes `Aeri (Remix)` and puts the remixer in the credit."""
+    request = Request(artist="Launaea, Vanoni", title="Aeri", mix="Remix", ref_duration=588)
+    assert verdict_for("Launaea - Aeri (Vanoni Remix).flac", request, duration=588) is Label.READY
+    assert verdict_for("Launaea - Aeri (Somebody Remix).flac", request, duration=588) is Label.REJECTED
+
+
+def test_an_unnamed_file_at_the_named_versions_length_is_that_version():
+    maxi = Request(artist="Artist", title="Title", mix="Versión Maxi", ref_duration=300)
+    assert verdict_for("Artist - Title.flac", maxi, duration=300) is Label.READY
+    assert verdict_for("Artist - Title.flac", maxi, duration=None) is Label.REJECTED
+    unchecked = Request(artist="Artist", title="Title", mix="Versión Maxi")
+    assert verdict_for("Artist - Title.flac", unchecked, duration=300) is Label.REJECTED
+
+
 # -- the mix ---------------------------------------------------------------
 
 def test_a_named_mix_must_be_the_one_asked_for():
