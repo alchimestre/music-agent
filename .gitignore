@@ -15,6 +15,7 @@ docs/agents/
 AGENTS.md
 config.toml
 .omp/
+.truthiness/
 
 # The Windows release build regenerates these: downloaded archives, the staged payload, and the
 # deployment spec.
