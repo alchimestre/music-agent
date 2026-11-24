@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import shutil
+import socket
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -214,6 +215,17 @@ def test_a_closed_socket_is_reconnected_before_the_next_call(tmp_path, creds):
     with Running(tmp_path) as (daemon, _fake):
         daemon.close()
         assert daemon.status()["username"]
+
+
+def test_a_request_the_daemon_never_received_is_sent_again(tmp_path, creds):
+    """The daemon hangs up between two calls and nothing has read the socket since. The write fails, so
+    the request reached nobody: it goes out again on a new connection, once."""
+    with Running(tmp_path) as (daemon, fake):
+        daemon.status()
+        daemon._sock.shutdown(socket.SHUT_RDWR)
+        assert daemon.status()["username"]
+
+    assert fake.calls.count(("daemon.status", {})) == 2
 
 
 def test_a_missed_connect_does_not_replace_the_daemon(tmp_path, creds, monkeypatch):

@@ -425,12 +425,7 @@ class Daemon:
             message_id = next(self._ids)
             line = json.dumps({"jsonrpc": "2.0", "id": message_id, "method": method,
                                "params": params or {}}) + "\n"
-            try:
-                self._sock.sendall(line.encode("utf-8"))
-            except OSError as error:
-                self.close()
-                raise DaemonError(method, f"the socket closed on the write: {error}",
-                                  unanswered=True) from error
+            self._send(method, line.encode("utf-8"))
             deadline = time.monotonic() + timeout
             while True:
                 stashed = self._replies.pop(message_id, None)
@@ -455,6 +450,23 @@ class Daemon:
                     self._keep(message)
                     continue
                 return self._answer(message, method)
+
+    def _send(self, method: str, request: bytes) -> None:
+        """Write one request, reconnecting once: a write that failed delivered nothing to run twice."""
+        try:
+            self._sock.sendall(request)
+            return
+        except OSError:
+            self.close()
+            self.ensure()
+        try:
+            if self._sock is None:
+                raise OSError("the daemon's socket is closed")
+            self._sock.sendall(request)
+        except OSError as error:
+            self.close()
+            raise DaemonError(method, f"the socket closed on the write: {error}",
+                              unanswered=True) from error
 
     @staticmethod
     def _answer(message: dict[str, Any], method: str) -> dict[str, Any]:
