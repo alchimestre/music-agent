@@ -86,6 +86,18 @@ def strip_code_tail(name: str) -> str:
     return name[: match.start()].strip() or name
 
 
+def bracketed_version(name: str) -> str:
+    """A trailing `[…]` on a file's stem that reads as words, not a code, a video id or a label: `Idumea
+    [vocals Shirley Collins]` names its version there, and read as unnamed it passed for another singer's take."""
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    match = _TRAILING_BRACKET.search(stem)
+    if not match or " " not in match.group(1).strip():
+        return ""
+    if strip_code_tail(stem) != stem or names_the_master(match.group(1)):
+        return ""
+    return match.group(1).strip()
+
+
 def credits(text: str) -> list[str]:
     """Every artist credited in a string, in the order written and without repeats."""
     found: list[str] = []

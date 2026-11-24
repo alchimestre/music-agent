@@ -18,6 +18,7 @@ from pathlib import PurePosixPath
 from .parsing import (
     appears_in,
     artist_appears,
+    bracketed_version,
     credits,
     extract_mix,
     is_original,
@@ -166,11 +167,12 @@ def version_matches(candidate: Candidate, request: Request, *, length_agrees: bo
     """
     if is_original(request.mix):
         return not is_remix(candidate.mix)
-    if length_agrees and not candidate.mix:
+    named = candidate.mix or bracketed_version(candidate.name)
+    if length_agrees and not named:
         return True
-    if mix_matches(request.mix, candidate.mix):
+    if mix_matches(request.mix, named):
         return True
-    return any(mix_matches(f"{artist} {request.mix}", candidate.mix) for artist in credits(request.artist))
+    return any(mix_matches(f"{artist} {request.mix}", named) for artist in credits(request.artist))
 
 
 def _names_the_track(request: Request, path: str) -> bool:

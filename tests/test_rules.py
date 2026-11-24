@@ -254,6 +254,16 @@ def test_an_unnamed_file_at_the_named_versions_length_is_that_version():
     assert verdict_for("Artist - Title.flac", unchecked, duration=300) is Label.REJECTED
 
 
+def test_a_bracketed_version_is_read_before_the_length_is():
+    """2026-11-24: `21 - Idumea [vocals Shirley Collins].flac`, at the length of the Bonnie Prince Billy take,
+    was placed as that take."""
+    request = Request(artist="Current 93, Bonnie Prince Billy", title="Idumea",
+                      mix='Vocals Bonnie "Prince" Billy', ref_duration=163)
+    assert verdict_for("21 - Idumea [vocals Shirley Collins].flac", request, duration=163) is Label.REJECTED
+    assert verdict_for("05 - Idumea [vocals Bonnie Prince Billy].flac", request, duration=163) is Label.READY
+    assert verdict_for("Current 93 - Idumea [aCDGd9arng8].flac", request, duration=163) is Label.READY
+
+
 # -- the mix ---------------------------------------------------------------
 
 def test_a_named_mix_must_be_the_one_asked_for():
