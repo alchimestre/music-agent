@@ -830,9 +830,13 @@ def test_a_track_the_library_already_holds_is_not_even_searched(tmp_path):
 def test_a_track_already_in_the_collection_is_not_resolved_again(tmp_path):
     """The collection does not change under a pass, so the second pass has the first pass's answer. Asking
     again costs a MusicBrainz reference per held track per pass, which on a 305-track run was five minutes of
-    the pass spent re-confirming what it already knew."""
+    the pass spent re-confirming what it already knew. The held file sits in a lane, and is still not counted
+    as this run's download."""
     config, job, daemon, calls = setup(tmp_path, results=GOOD)
-    shelf = library.Library([lanes.Held("Kiasmos", "Blurred", 449, path="/Library/Kiasmos.aiff")], [])
+    config.lossless.mkdir(parents=True, exist_ok=True)
+    held = config.lossless / "Kiasmos - Blurred.aiff"
+    held.write_bytes(b"held")
+    shelf = library.Library([lanes.Held("Kiasmos", "Blurred", 449, path=str(held))], [])
     lookup = Reference()
 
     first, _ = pass_once(config, job, daemon, lookup, calls, shelf=shelf)
@@ -840,6 +844,7 @@ def test_a_track_already_in_the_collection_is_not_resolved_again(tmp_path):
     second, _ = pass_once(config, job, daemon, lookup, calls, shelf=shelf)
 
     assert first.already_held == second.already_held == [1]
+    assert second.already_downloaded == []
     assert len(lookup.asked) == asked, "the second pass asks the reference nothing"
     assert tools_called(calls).count("search") == 0
 

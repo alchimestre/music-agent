@@ -696,6 +696,13 @@ class Pass:
             log(f"[{record.idx}] {record.label}: {record.decision} — left alone")
             return Outcome.DECIDED
 
+        if record.status == state.FOUND_IN_LIBRARY:
+            # The collection check already answered this track, and the collection does not change under a pass.
+            # Asking again costs a MusicBrainz reference per track per pass: 130 of the 305 tracks in a run on
+            # 2026-10-17 were already held, and every pass spent five minutes re-resolving them to reach the same
+            # answer before it searched anything. Checked before the lane file, which a held record points at.
+            return Outcome.ALREADY_HELD
+
         if record.local_path and Path(record.local_path).is_file():
             # The file is the truth, not the status: a record this run has already placed must not be searched
             # for again, because until the import runs the collection still points at the copy it replaces.
@@ -703,13 +710,6 @@ class Pass:
             if record.status in {state.CONVERTED, state.DOWNLOADED, state.NORMALIZED, state.TAGGED,
                                  state.IMPORTED, state.RETRY_LATER} or in_a_lane(self.lanes, record.local_path):
                 return Outcome.ALREADY_DOWNLOADED
-
-        if record.status == state.FOUND_IN_LIBRARY:
-            # The collection check already answered this track, and the collection does not change under a pass.
-            # Asking again costs a MusicBrainz reference per track per pass: 130 of the 305 tracks in a run on
-            # 2026-10-17 were already held, and every pass spent five minutes re-resolving them to reach the same
-            # answer before it searched anything.
-            return Outcome.ALREADY_HELD
 
         outcome, upgrade = _prepare(job, record, lookup, library, log)
         if outcome is not None:
