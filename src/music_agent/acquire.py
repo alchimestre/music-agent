@@ -608,6 +608,8 @@ def _prepare(
     held = matched.held
     if held.lossless:
         record.status = state.FOUND_IN_LIBRARY
+        record.local_path = held.path
+        record.format = Path(held.path).suffix.lstrip(".") if held.path else record.format
         record.notes = f"already held at {held.path}" if held.path else "already held"
         job.append_event("already_held", idx=record.idx, path=held.path, genre=held.genre)
         log(f"[{record.idx}] {record.label}: already in the library"

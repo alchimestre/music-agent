@@ -340,7 +340,7 @@ def test_a_name_the_lane_already_holds_is_not_overwritten(tmp_path, monkeypatch,
     assert existing.read_bytes() == b"the one already there", "nothing was overwritten"
     assert source.exists() == same_path, "only a distinct download may be deleted"
     assert job.records()[0].status == state.FOUND_IN_LIBRARY
-    assert job.records()[0].local_path == ""
+    assert job.records()[0].local_path == str(existing), "delivery verifies the held file by its path"
     assert "already there" in job.records()[0].notes
 
 

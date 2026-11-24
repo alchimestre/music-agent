@@ -603,7 +603,7 @@ def _placement_failed(job, records, record, error: ProcessError, summary, log) -
     if isinstance(error, NameTaken):
         source = Path(record.local_path)
         same_path = source.resolve() == error.target.resolve()
-        record.local_path = ""
+        record.local_path = str(error.target)
         record.status = state.FOUND_IN_LIBRARY
         record.notes = str(error) if same_path else f"{error} — this copy was removed"
         job.write_records(records)

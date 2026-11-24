@@ -822,7 +822,7 @@ def test_a_track_the_library_already_holds_is_not_even_searched(tmp_path):
     record = job.records()[0]
     assert summary.already_held == [1], quiet.lines
     assert record.status == state.FOUND_IN_LIBRARY
-    assert record.local_path == ""
+    assert record.local_path == "/Library/Kiasmos - Blurred.aiff", "delivery verifies the held file by its path"
     assert tools_called(calls) == [], "an already-held track should not have been searched for"
     assert not job.finished(), "the import finishes a run, not this stage"
 
